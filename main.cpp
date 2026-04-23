@@ -1113,6 +1113,42 @@ static bool GetExeVersion(const std::wstring& path, int& major, int& minor, int&
 }
 
 // ── Transfer worker ────────────────────────────────────────────────────────────
+
+// Returns the directory containing HermesProxy.exe in the old install, or empty.
+// Search order: same level as _classic_era_, grandparent, then subdirs of parent.
+static std::wstring FindHermesDirInOldInstall(const std::wstring& srcClassicEra)
+{
+    std::wstring parent = srcClassicEra.substr(0, srcClassicEra.rfind(L'\\'));
+
+    if (GetFileAttributesW((parent + L"\\HermesProxy.exe").c_str()) != INVALID_FILE_ATTRIBUTES)
+        return parent;
+
+    size_t gp = parent.rfind(L'\\');
+    if (gp != std::wstring::npos) {
+        std::wstring grandParent = parent.substr(0, gp);
+        if (GetFileAttributesW((grandParent + L"\\HermesProxy.exe").c_str()) != INVALID_FILE_ATTRIBUTES)
+            return grandParent;
+    }
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((parent + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                std::wstring child = parent + L"\\" + fd.cFileName;
+                if (GetFileAttributesW((child + L"\\HermesProxy.exe").c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    FindClose(h);
+                    return child;
+                }
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+
+    return {};
+}
+
 // srcClassicEra is the selected _classic_era_ folder from the old installation.
 static void TransferWorker(std::wstring srcClassicEra)
 {
@@ -1124,11 +1160,13 @@ static void TransferWorker(std::wstring srcClassicEra)
     std::wstring dstWtf     = dstBase + L"\\WTF";
     std::wstring dstAddons  = dstBase + L"\\Interface\\AddOns";
 
-    // AccountData lives one level above _classic_era_, not inside it
-    std::wstring srcParent      = srcClassicEra.substr(0, srcClassicEra.rfind(L'\\'));
-    std::wstring srcAccountData = srcParent + L"\\AccountData";
+    // Locate AccountData next to HermesProxy.exe in the old install.
+    // In the new install HermesProxy.exe is at {install}\client\, so AccountData goes there too.
+    std::wstring oldHermesDir   = FindHermesDirInOldInstall(srcClassicEra);
+    std::wstring srcAccountData = oldHermesDir.empty() ? L"" : (oldHermesDir + L"\\AccountData");
     std::wstring dstAccountData = g_installPath + L"\\client\\AccountData";
-    bool hasAccountData = GetFileAttributesW(srcAccountData.c_str()) != INVALID_FILE_ATTRIBUTES;
+    bool hasAccountData = !srcAccountData.empty() &&
+        GetFileAttributesW(srcAccountData.c_str()) != INVALID_FILE_ATTRIBUTES;
 
     PostStatus(WS_TRANSFER);
     PostPct(0);
