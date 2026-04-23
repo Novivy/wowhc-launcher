@@ -37,7 +37,7 @@ static constexpr wchar_t CLIENT_DOWNLOAD_URL[] =
     L"https://client.wow-hc.com/1.14.2/WOW-1.14.2.zip";
    // L"https://dl.wow-hc.com/clients/WOW-Classic-1.14.2.zip";
 
-static constexpr wchar_t APP_NAME[]        = L"WOW-HC.com";
+static constexpr wchar_t APP_NAME[]        = L"WOW-HC Launcher";
 static constexpr wchar_t HERMES_GH_OWNER[] = L"Novivy";
 static constexpr wchar_t HERMES_GH_REPO[]  = L"HermesProxy";
 static constexpr wchar_t ADDON_GH_OWNER[]      = L"Novivy";
@@ -758,18 +758,28 @@ static void RefreshPlayButton()
     RefreshTransferButton();
 }
 
+static void SetVerLabel(HWND ctrl, const std::wstring& text)
+{
+    // Transparent static controls don't erase old text on update.
+    // Invalidate the parent's region under the control so WM_ERASEBKGND
+    // repaints the dark background before the control redraws.
+    RECT rc; GetWindowRect(ctrl, &rc);
+    MapWindowPoints(HWND_DESKTOP, g_hwnd, reinterpret_cast<POINT*>(&rc), 2);
+    InvalidateRect(g_hwnd, &rc, TRUE);
+    UpdateWindow(g_hwnd);
+    SetWindowTextW(ctrl, text.c_str());
+}
+
 static void RefreshVersionLabels()
 {
     if (!g_hwndVerLauncher) return;
     const char* lv = LAUNCHER_VERSION_STR;
     std::wstring lvW(lv, lv + strlen(lv));
-    SetWindowTextW(g_hwndVerLauncher, (L"Launcher " + lvW).c_str());
+    SetVerLabel(g_hwndVerLauncher, L"Launcher " + lvW);
     std::wstring hv = ReadLocalHermesVersion();
-    SetWindowTextW(g_hwndVerHermes,
-        (L"HermesProxy " + (hv.empty() ? L"N/A" : hv)).c_str());
+    SetVerLabel(g_hwndVerHermes, L"HermesProxy " + (hv.empty() ? L"N/A" : hv));
     std::wstring av = ReadLocalAddonVersion();
-    SetWindowTextW(g_hwndVerAddon,
-        (L"Addon " + (av.empty() ? L"N/A" : av)).c_str());
+    SetVerLabel(g_hwndVerAddon, L"Addon " + (av.empty() ? L"N/A" : av));
 }
 
 // ── Progress helper ────────────────────────────────────────────────────────────
