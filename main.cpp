@@ -639,6 +639,7 @@ static std::wstring FmtBytes(DWORD64 bytes)
     return buf;
 }
 
+
 static std::wstring FmtSpeed(DWORD64 bytesPerSec)
 {
     wchar_t buf[32];
