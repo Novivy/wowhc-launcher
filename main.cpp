@@ -379,6 +379,32 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
             WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
         WinHttpReceiveResponse(hReq, nullptr))
     {
+        DWORD statusCode = 0; DWORD scLen = sizeof(statusCode);
+        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            nullptr, &statusCode, &scLen, nullptr);
+        if (statusCode != 200) {
+            // Read up to 2KB of the error body for debugging
+            std::string errBody;
+            DWORD avail = 0, rd = 0;
+            while (errBody.size() < 2048 &&
+                   WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+                std::vector<char> eb(avail + 1);
+                WinHttpReadData(hReq, eb.data(), avail, &rd);
+                errBody.append(eb.data(), rd);
+            }
+            wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
+            std::wstring logPath = std::wstring(tmp) + L"wowhc_debug.log";
+            if (FILE* f = _wfopen(logPath.c_str(), L"a")) {
+                fprintf(f, "URL: %ls\nHTTP %lu\n%s\n---\n",
+                    url.c_str(), statusCode, errBody.c_str());
+                fclose(f);
+            }
+            MessageBoxW(nullptr,
+                (L"HTTP error " + std::to_wstring(statusCode) +
+                 L"\nCheck: " + logPath).c_str(),
+                L"WOW-HC Debug", MB_OK | MB_ICONWARNING);
+        }
+        if (statusCode == 200) {
         wchar_t lenBuf[32] = {}; DWORD ls = sizeof(lenBuf);
         DWORD64 total = 0;
         if (WinHttpQueryHeaders(hReq, WINHTTP_QUERY_CONTENT_LENGTH,
@@ -398,6 +424,7 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
             CloseHandle(hFile);
             if (!ok) DeleteFileW(dest.c_str());
         }
+        } // statusCode == 200
     }
     WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess);
     return ok;
