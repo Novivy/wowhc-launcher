@@ -1188,6 +1188,8 @@ static LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
+static void CreateDesktopShortcutIfNeeded();
+
 // ── Window procedure ───────────────────────────────────────────────────────────
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1238,7 +1240,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_hwndLink = CreateWindowExW(0, L"STATIC", L"wow-hc.com",
             WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOTIFY,
-            D(160), D(157), D(200), D(16), hwnd,
+            D(150), D(150), D(200), D(16), hwnd,
             (HMENU)(UINT_PTR)ID_LINK_WEBSITE, nullptr, nullptr);
         SF(g_hwndLink, g_fontLink);
         SetWindowSubclass(g_hwndLink, BtnSubclassProc, 10, (DWORD_PTR)&g_linkHover);
@@ -1284,7 +1286,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         // Play/Install — centered, taller primary action button
         g_hwndPlay = CreateWindowExW(0, L"BUTTON", L"INSTALL",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(162), D(320), D(195), D(68), hwnd,
+            D(152), D(320), D(195), D(68), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_PLAY, nullptr, nullptr);
         SF(g_hwndPlay, g_fontPlay);
 
@@ -1298,26 +1300,33 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_hwndLinkAddons = CreateWindowExW(0, L"STATIC", L"Get more Addons",
             WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_NOTIFY,
-            D(290), D(435), D(200), D(14), hwnd,
+            D(290), D(385), D(200), D(14), hwnd,
             (HMENU)(UINT_PTR)ID_LINK_ADDONS, nullptr, nullptr);
         SF(g_hwndLinkAddons, g_fontLink);
 
-        g_hwndVerLauncher = CreateWindowExW(0, L"STATIC", L"",
+        g_hwndVerAddon = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(435), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
-        SF(g_hwndVerLauncher, g_fontSmall);
+            D(10), D(365), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+        SF(g_hwndVerAddon, g_fontSmall);
 
         g_hwndVerHermes = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(425), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+            D(10), D(375), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
         SF(g_hwndVerHermes, g_fontSmall);
 
-        g_hwndVerAddon = CreateWindowExW(0, L"STATIC", L"",
+        g_hwndVerLauncher = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(415), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
-        SF(g_hwndVerAddon, g_fontSmall);
+            D(10), D(385), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+        SF(g_hwndVerLauncher, g_fontSmall);
+
+
+
+
+
 
         RefreshVersionLabels();
+
+        SetWindowPos(g_hwndPlay, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 
         SetWindowSubclass(g_hwndPlay,     BtnSubclassProc, 0, (DWORD_PTR)&g_playHover);
         SetWindowSubclass(g_hwndBrowse,   BtnSubclassProc, 1, (DWORD_PTR)&g_browseHover);
@@ -1360,8 +1369,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             UINT imgW = g_logoBitmap->GetWidth();
             UINT imgH = g_logoBitmap->GetHeight();
             if (imgH == 0) imgH = 1;
-            int areaX = MulDiv(105,  g_dpi, 96);
-            int areaY = MulDiv(40,   g_dpi, 96);
+            int areaX = MulDiv(100,  g_dpi, 96);
+            int areaY = MulDiv(30,   g_dpi, 96);
             int areaW = MulDiv(300, g_dpi, 96);
             int areaH = MulDiv(112, g_dpi, 96);
             int drawW, drawH;
@@ -1408,10 +1417,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg)))) {
                 DWORD opts = 0; pDlg->GetOptions(&opts);
                 pDlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-                pDlg->SetTitle(L"Choose installation folder");
+                pDlg->SetTitle(L"Choose where to install WOW-HC (a 'WOW-HC' folder will be created inside)");
                 if (!g_installPath.empty()) {
+                    // Pre-select the parent of the current install path
+                    std::wstring parentPath = g_installPath;
+                    size_t bsPos = parentPath.rfind(L'\\');
+                    if (bsPos != std::wstring::npos) parentPath = parentPath.substr(0, bsPos);
                     IShellItem* pInit = nullptr;
-                    if (SUCCEEDED(SHCreateItemFromParsingName(g_installPath.c_str(), nullptr, IID_PPV_ARGS(&pInit)))) {
+                    if (SUCCEEDED(SHCreateItemFromParsingName(parentPath.c_str(), nullptr, IID_PPV_ARGS(&pInit)))) {
                         pDlg->SetFolder(pInit);
                         pInit->Release();
                     }
@@ -1422,11 +1435,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         wchar_t* path = nullptr;
                         pItem->GetDisplayName(SIGDN_FILESYSPATH, &path);
                         if (path) {
-                            bool samePath = (g_installPath == path);
+                            std::wstring effectivePath = std::wstring(path) + L"\\WOW-HC";
+                            bool samePath = (g_installPath == effectivePath);
                             if (!samePath) {
+                                // Check the WOW-HC subfolder, not the chosen folder itself
                                 WIN32_FIND_DATAW findData;
                                 HANDLE hFind = FindFirstFileW(
-                                    (std::wstring(path) + L"\\*").c_str(), &findData);
+                                    (effectivePath + L"\\*").c_str(), &findData);
                                 bool isEmpty = true;
                                 if (hFind != INVALID_HANDLE_VALUE) {
                                     do {
@@ -1440,11 +1455,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 }
                                 if (!isEmpty) {
                                     MessageBoxW(hwnd,
-                                        L"The selected folder is not empty.\r\n\r\n"
-                                        L"Please select an empty folder for the client installation.",
+                                        L"The 'WOW-HC' folder inside the selected location is not empty.\r\n\r\n"
+                                        L"Please select a different location or clear the existing WOW-HC folder.",
                                         L"Folder Not Empty", MB_OK | MB_ICONWARNING);
                                 } else {
-                                    g_installPath = path;
+                                    g_installPath = effectivePath;
                                     SetWindowTextW(g_hwndPath, g_installPath.c_str());
                                     SaveConfig();
                                     if (!g_workerBusy.load()) {
@@ -1604,6 +1619,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         if (ok && g_freshInstall) {
             g_freshInstall = false;
+            CreateDesktopShortcutIfNeeded();
             int resp = MessageBoxW(hwnd,
                 L"Client installed successfully!\r\n\r\n"
                 L"Do you have an existing WoW installation you'd like to\r\n"
@@ -1748,13 +1764,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             COLORREF linkClr = g_addonsHover ? RGB(140, 200, 255) : RGB(100, 170, 240);
             SetTextColor(hdc, linkClr);
             SetBkMode(hdc, TRANSPARENT);
-            return (LRESULT)g_hbrBg;
+            return (LRESULT)GetStockObject(NULL_BRUSH);
         }
         if (hCtl == g_hwndVerLauncher || hCtl == g_hwndVerHermes || hCtl == g_hwndVerAddon) {
             SetTextColor(hdc, RGB(100, 100, 110));
-            SetBkColor(hdc, CLR_BG);
             SetBkMode(hdc, TRANSPARENT);
-            return (LRESULT)g_hbrBg;
+            return (LRESULT)GetStockObject(NULL_BRUSH);
         }
         SetTextColor(hdc, CLR_TEXT);
         return (LRESULT)g_hbrBg;
@@ -1771,7 +1786,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
         LONG w = MulDiv(514, g_dpi, 96);
-        LONG h = MulDiv(490, g_dpi, 96);
+        LONG h = MulDiv(440, g_dpi, 96);
         mmi->ptMinTrackSize = {w, h};
         mmi->ptMaxTrackSize = {w, h};
         break;
@@ -1829,13 +1844,18 @@ static void SaveIconFile(const std::wstring& icoPath)
 
 static void CreateDesktopShortcutIfNeeded()
 {
+    // Only ever create the shortcut once; if the user deletes it, respect that.
+    wchar_t flag[8] = {};
+    GetPrivateProfileStringW(L"Launcher", L"ShortcutCreated", L"0",
+        flag, 8, ConfigPath().c_str());
+    if (flag[0] == L'1')
+        return;
+
     wchar_t desktop[MAX_PATH];
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktop)))
         return;
 
     std::wstring lnkPath = std::wstring(desktop) + L"\\WOW-HC.lnk";
-    if (GetFileAttributesW(lnkPath.c_str()) != INVALID_FILE_ATTRIBUTES)
-        return;
 
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -1860,6 +1880,8 @@ static void CreateDesktopShortcutIfNeeded()
         ppf->Release();
     }
     psl->Release();
+
+    WritePrivateProfileStringW(L"Launcher", L"ShortcutCreated", L"1", ConfigPath().c_str());
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────
@@ -1899,7 +1921,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     g_configDir = std::wstring(appdata) + L"\\WOWHCLauncher";
     CreateDirectoryW(g_configDir.c_str(), nullptr);
     LoadConfig();
-    CreateDesktopShortcutIfNeeded();
 
     g_hbrBg  = CreateSolidBrush(CLR_BG);
     g_hbrBg2 = CreateSolidBrush(CLR_BG2);
@@ -1916,7 +1937,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     RegisterClassExW(&wc);
 
     int WND_W = MulDiv(514, g_dpi, 96);
-    int WND_H = MulDiv(490, g_dpi, 96);
+    int WND_H = MulDiv(440, g_dpi, 96);
     int sx = GetSystemMetrics(SM_CXSCREEN);
     int sy = GetSystemMetrics(SM_CYSCREEN);
 
