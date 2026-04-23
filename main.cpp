@@ -1600,6 +1600,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_pTaskbar->SetProgressState(g_hwnd, ok ? TBPF_NOPROGRESS : TBPF_ERROR);
         if (ok) RefreshVersionLabels();
 
+
         if (ok) std::thread(RunLauncherUpdateCheck).detach();
 
         if (ok && g_freshInstall) {
