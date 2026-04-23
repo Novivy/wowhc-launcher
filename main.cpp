@@ -20,6 +20,7 @@
 #include <tuple>
 #include <cwchar>
 #include <memory>
+#include <ctime>
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -38,8 +39,14 @@ static constexpr wchar_t CLIENT_DOWNLOAD_URL[] =
 static constexpr wchar_t APP_NAME[]        = L"WOW-HC.com";
 static constexpr wchar_t HERMES_GH_OWNER[] = L"Novivy";
 static constexpr wchar_t HERMES_GH_REPO[]  = L"HermesProxy";
-static constexpr wchar_t ADDON_GH_OWNER[]  = L"Novivy";
-static constexpr wchar_t ADDON_GH_REPO[]   = L"wow-hc-addon";
+static constexpr wchar_t ADDON_GH_OWNER[]      = L"Novivy";
+static constexpr wchar_t ADDON_GH_REPO[]       = L"wow-hc-addon";
+static constexpr wchar_t LAUNCHER_GH_OWNER[]   = L"Novivy";
+static constexpr wchar_t LAUNCHER_GH_REPO[]    = L"wowhc-launcher";
+
+#ifndef LAUNCHER_VERSION_STR
+#define LAUNCHER_VERSION_STR "v0.0.0-dev"
+#endif
 
 // ── Resource IDs ───────────────────────────────────────────────────────────────
 static const int IDR_LOGO_CLEAN = 201;
@@ -62,6 +69,7 @@ enum : UINT {
     ID_STATIC_STATUS = 105,
     ID_BTN_TRANSFER  = 106,
     ID_LINK_WEBSITE  = 107,
+    ID_TIMER_UPDATE  = 200,
 };
 
 #define WM_WORKER_STATUS    (WM_APP + 1)  // wParam = WorkerStatus
@@ -70,6 +78,10 @@ enum : UINT {
 #define WM_WORKER_TEXT      (WM_APP + 4)  // lParam = new std::wstring*
 #define WM_SET_INSTALL_MODE (WM_APP + 5)  // wParam = 0 not installed / 1 installed
 #define WM_TRANSFER_DONE    (WM_APP + 6)  // wParam = 1 success / 0 fail
+#define WM_ASK_UPDATE       (WM_APP + 7)  // wParam = UpdateComponent, lParam = new wstring* "remote\nlocal"
+#define WM_APPLY_SELF_UPD   (WM_APP + 8)  // lParam = new wstring* (new exe path)
+
+enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
 enum WorkerStatus : int {
     WS_CHECKING = 0,
@@ -198,6 +210,26 @@ static void WriteLocalAddonVersion(const std::wstring& ver)
 {
     std::wofstream f(AddonVerPath());
     f << ver;
+}
+
+static time_t ReadLastCheckTime()
+{
+    wchar_t buf[32] = {};
+    GetPrivateProfileStringW(L"Launcher", L"LastCheckTime", L"0",
+        buf, 32, ConfigPath().c_str());
+    return (time_t)_wtoi64(buf);
+}
+
+static void WriteLastCheckTime()
+{
+    wchar_t buf[32];
+    swprintf_s(buf, L"%I64d", (long long)time(nullptr));
+    WritePrivateProfileStringW(L"Launcher", L"LastCheckTime", buf, ConfigPath().c_str());
+}
+
+static bool ShouldRunUpdateCheck()
+{
+    return (time(nullptr) - ReadLastCheckTime()) >= 86400;
 }
 
 // ── Version comparison ─────────────────────────────────────────────────────────
@@ -718,6 +750,189 @@ struct DlProgress {
     }
 };
 
+// ── Launcher version ───────────────────────────────────────────────────────────
+static std::wstring GetLauncherVersion()
+{
+    const char* v = LAUNCHER_VERSION_STR;
+    return std::wstring(v, v + strlen(v));
+}
+
+// ── EXE asset URL (for self-update) ────────────────────────────────────────────
+static std::string FindExeAssetUrl(const std::string& json)
+{
+    size_t pos = 0;
+    while (true) {
+        size_t found = json.find("browser_download_url", pos);
+        if (found == std::string::npos) break;
+        std::string url = JsonString(json.substr(found), "browser_download_url");
+        if (!url.empty()) {
+            std::string lower = url;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            if (lower.rfind(".exe") != std::string::npos) return url;
+        }
+        pos = found + 1;
+    }
+    return {};
+}
+
+// ── Self-update: rename running EXE, place new one, relaunch ───────────────────
+static void ApplyLauncherUpdate(const std::wstring& newExePath)
+{
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wstring oldPath = std::wstring(exePath) + L".old";
+    DeleteFileW(oldPath.c_str());
+    if (!MoveFileW(exePath, oldPath.c_str())) { DeleteFileW(newExePath.c_str()); return; }
+    if (!MoveFileW(newExePath.c_str(), exePath)) {
+        MoveFileW(oldPath.c_str(), exePath);
+        return;
+    }
+    ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL);
+    PostQuitMessage(0);
+}
+
+// ── Per-component update helpers (callable from worker or timer thread) ─────────
+static void RunHermesUpdateCheck()
+{
+    std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
+        + HERMES_GH_OWNER + L"/" + HERMES_GH_REPO + L"/releases/latest";
+    std::string json = HttpGet(apiUrl);
+    if (json.empty()) return;
+
+    std::string tag = JsonString(json, "tag_name");
+    std::wstring remoteVer(tag.begin(), tag.end());
+    std::wstring localVer = ReadLocalHermesVersion();
+    if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
+
+    std::wstring payload = remoteVer + L"\n" + localVer;
+    LRESULT r = SendMessageW(g_hwnd, WM_ASK_UPDATE, UC_HERMES,
+        (LPARAM)(new std::wstring(payload)));
+    if (r != IDYES) return;
+
+    std::string assetUrl = FindAssetUrl(json);
+    if (assetUrl.empty()) return;
+
+    std::wstring assetW(assetUrl.begin(), assetUrl.end());
+    std::wstring tmpZip = TempFile(L"hermes_update.zip");
+
+    PostStatus(WS_DL_HERMES); PostPct(0);
+    DlProgress dlHermes{L"Downloading HermesProxy update...", 70};
+    bool ok = HttpDownload(assetW, tmpZip,
+        [&dlHermes](DWORD64 dl, DWORD64 tot) { dlHermes(dl, tot); });
+
+    if (ok) {
+        PostStatus(WS_EX_HERMES);
+        std::wstring clientDir = g_installPath + L"\\client";
+        CreateDirectoryW(clientDir.c_str(), nullptr);
+        ok = ExtractZipSmart(tmpZip, clientDir, true, [](int pct) {
+            PostPct(70 + pct * 30 / 100);
+        });
+        DeleteFileW(tmpZip.c_str());
+        if (ok) { WriteLocalHermesVersion(remoteVer); PostPct(100); }
+    } else {
+        DeleteFileW(tmpZip.c_str());
+    }
+}
+
+static void RunAddonUpdateCheck()
+{
+    std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
+        + ADDON_GH_OWNER + L"/" + ADDON_GH_REPO + L"/releases/latest";
+    std::string json = HttpGet(apiUrl);
+    if (json.empty()) return;
+
+    std::string tag = JsonString(json, "tag_name");
+    std::wstring remoteVer(tag.begin(), tag.end());
+    std::wstring localVer  = ReadLocalAddonVersion();
+    std::wstring addonPath = g_installPath + L"\\client\\_classic_era_\\Interface\\AddOns\\WOW_HC";
+    bool folderMissing = GetFileAttributesW(addonPath.c_str()) == INVALID_FILE_ATTRIBUTES;
+    if (remoteVer.empty() || (!IsNewer(localVer, remoteVer) && !folderMissing)) return;
+
+    std::wstring payload = remoteVer + L"\n" + localVer;
+    LRESULT r = SendMessageW(g_hwnd, WM_ASK_UPDATE, UC_ADDON,
+        (LPARAM)(new std::wstring(payload)));
+    if (r != IDYES) return;
+
+    std::string assetUrl = FindAssetUrl(json);
+    if (assetUrl.empty()) assetUrl = JsonString(json, "zipball_url");
+    if (assetUrl.empty()) return;
+
+    std::wstring assetW(assetUrl.begin(), assetUrl.end());
+    std::wstring tmpZip = TempFile(L"addon_update.zip");
+
+    PostStatus(WS_DL_ADDON); PostPct(0);
+    DlProgress dlAddon{L"Downloading WOW_HC addon...", 70};
+    bool ok = HttpDownload(assetW, tmpZip,
+        [&dlAddon](DWORD64 dl, DWORD64 tot) { dlAddon(dl, tot); });
+
+    if (ok) {
+        PostStatus(WS_EX_ADDON);
+        std::wstring addonsDir = g_installPath + L"\\client\\_classic_era_\\Interface\\AddOns";
+        CreateDirectoryW((g_installPath + L"\\client\\_classic_era_").c_str(), nullptr);
+        CreateDirectoryW((g_installPath + L"\\client\\_classic_era_\\Interface").c_str(), nullptr);
+        CreateDirectoryW(addonsDir.c_str(), nullptr);
+        std::wstring addonDest = addonsDir + L"\\WOW_HC";
+        DeleteDirRecursive(addonDest);
+        CreateDirectoryW(addonDest.c_str(), nullptr);
+        ok = ExtractZipSmart(tmpZip, addonDest, true, [](int pct) {
+            PostPct(70 + pct * 30 / 100);
+        });
+        DeleteFileW(tmpZip.c_str());
+        if (ok) { WriteLocalAddonVersion(remoteVer); PostPct(100); }
+    } else {
+        DeleteFileW(tmpZip.c_str());
+    }
+}
+
+// Checks for a newer launcher release, prompts, downloads and hot-swaps the EXE.
+// Safe to call from any thread. Skips if a worker operation is in progress.
+static void RunLauncherUpdateCheck()
+{
+    if (g_workerBusy.load()) return;
+
+    // Clean up any leftover .old from a previous self-update
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    DeleteFileW((std::wstring(exePath) + L".old").c_str());
+
+    std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
+        + LAUNCHER_GH_OWNER + L"/" + LAUNCHER_GH_REPO + L"/releases/latest";
+    std::string json = HttpGet(apiUrl);
+    if (json.empty()) return;
+
+    std::string tag = JsonString(json, "tag_name");
+    std::wstring remoteVer(tag.begin(), tag.end());
+    std::wstring localVer = GetLauncherVersion();
+    if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
+
+    std::wstring payload = remoteVer + L"\n" + localVer;
+    LRESULT r = SendMessageW(g_hwnd, WM_ASK_UPDATE, UC_LAUNCHER,
+        (LPARAM)(new std::wstring(payload)));
+    if (r != IDYES) return;
+
+    std::string assetUrl = FindExeAssetUrl(json);
+    if (assetUrl.empty()) return;
+
+    std::wstring assetW(assetUrl.begin(), assetUrl.end());
+    std::wstring tmpExe = TempFile(L"wowhc_launcher_new.exe");
+    PostText(L"Downloading launcher update...");
+    if (!HttpDownload(assetW, tmpExe)) { DeleteFileW(tmpExe.c_str()); return; }
+
+    SendMessageW(g_hwnd, WM_APPLY_SELF_UPD, 0, (LPARAM)(new std::wstring(tmpExe)));
+}
+
+// Called by the 24-h timer while the launcher is open.
+static void PeriodicUpdateCheck()
+{
+    RunLauncherUpdateCheck();
+    if (!g_installPath.empty()) {
+        RunHermesUpdateCheck();
+        RunAddonUpdateCheck();
+        WriteLastCheckTime();
+    }
+    if (g_playReady.load()) { PostStatus(WS_READY); PostPct(100); }
+}
+
 // ── Worker thread ──────────────────────────────────────────────────────────────
 static void Worker()
 {
@@ -785,112 +1000,14 @@ static void Worker()
         PostPct(100);
     }
 
-    // ── 2. Check HermesProxy update ───────────────────────────────────────────
-    PostStatus(WS_CHECKING);
-    PostPct(0);
-
-    std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
-        + HERMES_GH_OWNER + L"/" + HERMES_GH_REPO + L"/releases/latest";
-
-    std::string json = HttpGet(apiUrl);
-    if (!json.empty()) {
-        std::string tag = JsonString(json, "tag_name");
-        std::wstring remoteVer(tag.begin(), tag.end());
-        std::wstring localVer = ReadLocalHermesVersion();
-
-        if (!remoteVer.empty() && IsNewer(localVer, remoteVer)) {
-            PostStatus(WS_DL_HERMES);
-            PostPct(0);
-
-            std::string assetUrl = FindAssetUrl(json);
-            if (!assetUrl.empty()) {
-                std::wstring assetW(assetUrl.begin(), assetUrl.end());
-                std::wstring tmpZip = TempFile(L"hermes_update.zip");
-
-                DlProgress dlHermes{L"Downloading HermesProxy update...", 70};
-                bool ok = HttpDownload(assetW, tmpZip,
-                    [&dlHermes](DWORD64 dl, DWORD64 tot) { dlHermes(dl, tot); });
-
-                if (ok) {
-                    PostStatus(WS_EX_HERMES);
-                    std::wstring clientDir = g_installPath + L"\\client";
-                    CreateDirectoryW(clientDir.c_str(), nullptr);
-
-                    ok = ExtractZipSmart(tmpZip, clientDir, true, [](int pct) {
-                        PostPct(70 + pct * 30 / 100);
-                    });
-                    DeleteFileW(tmpZip.c_str());
-
-                    if (ok) {
-                        WriteLocalHermesVersion(remoteVer);
-                        PostPct(100);
-                    }
-                } else {
-                    DeleteFileW(tmpZip.c_str());
-                }
-            }
-        }
-    }
-
-    // ── 3. Check WOW_HC addon update ──────────────────────────────────────────
-    PostStatus(WS_CHECKING);
-    PostPct(0);
-
-    std::wstring addonApiUrl = std::wstring(L"https://api.github.com/repos/")
-        + ADDON_GH_OWNER + L"/" + ADDON_GH_REPO + L"/releases/latest";
-
-    std::string addonJson = HttpGet(addonApiUrl);
-    if (!addonJson.empty()) {
-        std::string addonTag = JsonString(addonJson, "tag_name");
-        std::wstring addonRemoteVer(addonTag.begin(), addonTag.end());
-        std::wstring addonLocalVer = ReadLocalAddonVersion();
-        std::wstring addonFolderPath = g_installPath + L"\\client\\_classic_era_\\Interface\\AddOns\\WOW_HC";
-        bool addonFolderMissing = GetFileAttributesW(addonFolderPath.c_str()) == INVALID_FILE_ATTRIBUTES;
-
-        if (!addonRemoteVer.empty() && (IsNewer(addonLocalVer, addonRemoteVer) || addonFolderMissing)) {
-            PostStatus(WS_DL_ADDON);
-            PostPct(0);
-
-            std::string addonAssetUrl = FindAssetUrl(addonJson);
-            if (addonAssetUrl.empty()) {
-                // No uploaded binary asset — fall back to GitHub's source ZIP
-                addonAssetUrl = JsonString(addonJson, "zipball_url");
-            }
-            if (!addonAssetUrl.empty()) {
-                std::wstring addonAssetW(addonAssetUrl.begin(), addonAssetUrl.end());
-                std::wstring tmpZip = TempFile(L"addon_update.zip");
-
-                DlProgress dlAddon{L"Downloading WOW_HC addon...", 70};
-                bool ok = HttpDownload(addonAssetW, tmpZip,
-                    [&dlAddon](DWORD64 dl, DWORD64 tot) { dlAddon(dl, tot); });
-
-                if (ok) {
-                    PostStatus(WS_EX_ADDON);
-                    std::wstring addonsDir = g_installPath + L"\\client\\_classic_era_\\Interface\\AddOns";
-                    CreateDirectoryW((g_installPath + L"\\client\\_classic_era_").c_str(), nullptr);
-                    CreateDirectoryW((g_installPath + L"\\client\\_classic_era_\\Interface").c_str(), nullptr);
-                    CreateDirectoryW(addonsDir.c_str(), nullptr);
-
-                    // Remove old addon folder so stale files are not kept
-                    std::wstring addonDest = addonsDir + L"\\WOW_HC";
-                    DeleteDirRecursive(addonDest);
-                    CreateDirectoryW(addonDest.c_str(), nullptr);
-
-                    // Extract into AddOns\WOW_HC; stripTopLevel strips the GitHub archive wrapper
-                    ok = ExtractZipSmart(tmpZip, addonDest, true, [](int pct) {
-                        PostPct(70 + pct * 30 / 100);
-                    });
-                    DeleteFileW(tmpZip.c_str());
-
-                    if (ok) {
-                        WriteLocalAddonVersion(addonRemoteVer);
-                        PostPct(100);
-                    }
-                } else {
-                    DeleteFileW(tmpZip.c_str());
-                }
-            }
-        }
+    // ── 2+3. Check HermesProxy and addon updates (at most once per 24 h) ─────────
+    bool justInstalled = !clientOk;
+    if (justInstalled || ShouldRunUpdateCheck()) {
+        PostStatus(WS_CHECKING);
+        PostPct(0);
+        RunHermesUpdateCheck();
+        RunAddonUpdateCheck();
+        WriteLastCheckTime();
     }
 
     PostStatus(WS_READY);
@@ -1107,12 +1224,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowSubclass(g_hwndBrowse,   BtnSubclassProc, 1, (DWORD_PTR)&g_browseHover);
         SetWindowSubclass(g_hwndTransfer, BtnSubclassProc, 2, (DWORD_PTR)&g_transferHover);
 
+        SetTimer(hwnd, ID_TIMER_UPDATE, 24u * 60u * 60u * 1000u, nullptr);
+
         if (!g_installPath.empty()) {
             g_workerBusy = true;
             std::thread(Worker).detach();
         } else {
             PostStatus(WS_NO_PATH);
             PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_BROWSE, BN_CLICKED), 0);
+            // No install path yet — still check for a launcher update in background
+            std::thread(RunLauncherUpdateCheck).detach();
         }
 
         break;
@@ -1333,6 +1454,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_pTaskbar)
             g_pTaskbar->SetProgressState(g_hwnd, ok ? TBPF_NOPROGRESS : TBPF_ERROR);
 
+        if (ok) std::thread(RunLauncherUpdateCheck).detach();
+
         if (ok && g_freshInstall) {
             g_freshInstall = false;
             int resp = MessageBoxW(hwnd,
@@ -1368,6 +1491,39 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_clientInstalled = (wp != 0);
         RefreshPlayButton();
         break;
+    }
+
+    case WM_TIMER:
+        if (wp == ID_TIMER_UPDATE && !g_workerBusy.load())
+            std::thread(PeriodicUpdateCheck).detach();
+        return 0;
+
+    case WM_ASK_UPDATE:
+    {
+        auto* payload = reinterpret_cast<std::wstring*>(lp);
+        size_t nl = payload->find(L'\n');
+        std::wstring remote = payload->substr(0, nl);
+        std::wstring local  = (nl != std::wstring::npos) ? payload->substr(nl + 1) : L"";
+        delete payload;
+
+        static const wchar_t* names[] = { L"HermesProxy", L"WOW_HC Addon", L"WOW HC Launcher" };
+        const wchar_t* name = (wp < 3) ? names[wp] : L"Component";
+        wchar_t msg[512];
+        if (local.empty())
+            swprintf_s(msg, L"%s %s is available.\r\nInstall now?", name, remote.c_str());
+        else
+            swprintf_s(msg, L"%s %s is available (installed: %s).\r\nUpdate now?",
+                name, remote.c_str(), local.c_str());
+        return MessageBoxW(hwnd, msg, L"Update Available", MB_YESNO | MB_ICONQUESTION);
+    }
+
+    case WM_APPLY_SELF_UPD:
+    {
+        auto* path = reinterpret_cast<std::wstring*>(lp);
+        std::wstring newExe = *path;
+        delete path;
+        ApplyLauncherUpdate(newExe);
+        return 0;
     }
 
     case WM_DRAWITEM:
@@ -1462,6 +1618,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_DESTROY:
+        KillTimer(hwnd, ID_TIMER_UPDATE);
         if (g_pTaskbar) { g_pTaskbar->Release(); g_pTaskbar = nullptr; }
         if (g_hIconLarge) { DestroyIcon(g_hIconLarge); g_hIconLarge = nullptr; }
         if (g_hIconSmall) { DestroyIcon(g_hIconSmall); g_hIconSmall = nullptr; }
