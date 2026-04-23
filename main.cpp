@@ -105,11 +105,11 @@ static const wchar_t* STATUS_TEXT[] = {
     L"Checking for updates...",
     L"Downloading HermesProxy update...",
     L"Extracting HermesProxy...",
-    L"Downloading WoW client...",
-    L"Installing WoW client...",
+    L"Downloading client...",
+    L"Installing client (it may take a few minutes)...",
     L"Downloading WOW_HC addon...",
     L"Installing WOW_HC addon...",
-    L"Transferring UI, macros and addons...",
+    L"Transferring UI, macros, addons and settings...",
     L"Ready to play!",
     L"Error - check your connection or installation path.",
     L"Launching...",
@@ -752,7 +752,8 @@ static void RefreshPlayButton()
     SetWindowTextW(g_hwndPlay, installed ? L"PLAY" : L"INSTALL");
     bool enable = hasPath && (installed ? ready : !busy);
     EnableWindow(g_hwndPlay, enable ? TRUE : FALSE);
-    if (g_hwndOpen) EnableWindow(g_hwndOpen, hasPath ? TRUE : FALSE);
+    if (g_hwndBrowse) EnableWindow(g_hwndBrowse, busy ? FALSE : TRUE);
+    if (g_hwndOpen)   EnableWindow(g_hwndOpen, (hasPath && !busy) ? TRUE : FALSE);
     RefreshTransferButton();
 }
 
@@ -836,9 +837,14 @@ static void ApplyLauncherUpdate(const std::wstring& newExePath)
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     std::wstring oldPath = std::wstring(exePath) + L".old";
     DeleteFileW(oldPath.c_str());
-    if (!MoveFileW(exePath, oldPath.c_str())) { DeleteFileW(newExePath.c_str()); return; }
+    if (!MoveFileW(exePath, oldPath.c_str())) {
+        DeleteFileW(newExePath.c_str());
+        MessageBoxW(nullptr, L"Failed to rename the current launcher EXE.\nMake sure the launcher is not running from a read-only location.", L"Update Failed", MB_OK | MB_ICONERROR);
+        return;
+    }
     if (!MoveFileW(newExePath.c_str(), exePath)) {
         MoveFileW(oldPath.c_str(), exePath);
+        MessageBoxW(nullptr, L"Failed to place the new launcher EXE.\nThe update was rolled back.", L"Update Failed", MB_OK | MB_ICONERROR);
         return;
     }
     ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL);
@@ -965,12 +971,19 @@ static void RunLauncherUpdateCheck()
     if (r != IDYES) return;
 
     std::string assetUrl = FindExeAssetUrl(json);
-    if (assetUrl.empty()) return;
+    if (assetUrl.empty()) {
+        MessageBoxW(g_hwnd, L"Could not find the launcher EXE asset in the GitHub release.\nPlease update manually.", L"Update Failed", MB_OK | MB_ICONERROR);
+        return;
+    }
 
     std::wstring assetW(assetUrl.begin(), assetUrl.end());
     std::wstring tmpExe = TempFile(L"wowhc_launcher_new.exe");
     PostText(L"Downloading launcher update...");
-    if (!HttpDownload(assetW, tmpExe)) { DeleteFileW(tmpExe.c_str()); return; }
+    if (!HttpDownload(assetW, tmpExe)) {
+        DeleteFileW(tmpExe.c_str());
+        MessageBoxW(g_hwnd, L"Failed to download the launcher update.\nCheck your internet connection and try again.", L"Update Failed", MB_OK | MB_ICONERROR);
+        return;
+    }
 
     SendMessageW(g_hwnd, WM_APPLY_SELF_UPD, 0, (LPARAM)(new std::wstring(tmpExe)));
 }
@@ -1067,8 +1080,8 @@ static void Worker()
     PostStatus(WS_READY);
     PostPct(100);
     g_playReady = true;
-    PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
     g_workerBusy = false;
+    PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
 }
 
 // ── EXE version reader ────────────────────────────────────────────────────────
@@ -1302,9 +1315,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             D(10), D(415), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
         SF(g_hwndVerAddon, g_fontSmall);
 
-        if (!g_installPath.empty())
-            EnableWindow(g_hwndOpen, TRUE);
-
         RefreshVersionLabels();
 
         SetWindowSubclass(g_hwndPlay,     BtnSubclassProc, 0, (DWORD_PTR)&g_playHover);
@@ -1317,6 +1327,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         if (!g_installPath.empty()) {
             g_workerBusy = true;
+            RefreshPlayButton();
             std::thread(Worker).detach();
         } else {
             PostStatus(WS_NO_PATH);
@@ -1395,7 +1406,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg)))) {
                 DWORD opts = 0; pDlg->GetOptions(&opts);
                 pDlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-                pDlg->SetTitle(L"Choose WoW installation folder");
+                pDlg->SetTitle(L"Choose installation folder");
                 if (!g_installPath.empty()) {
                     IShellItem* pInit = nullptr;
                     if (SUCCEEDED(SHCreateItemFromParsingName(g_installPath.c_str(), nullptr, IID_PPV_ARGS(&pInit)))) {
@@ -1411,13 +1422,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         if (path) {
                             bool samePath = (g_installPath == path);
                             if (!samePath) {
-                                g_installPath = path;
-                                SetWindowTextW(g_hwndPath, g_installPath.c_str());
-                                SaveConfig();
-                                EnableWindow(g_hwndOpen, TRUE);
-                                if (!g_workerBusy.load()) {
-                                    g_workerBusy = true;
-                                    std::thread(Worker).detach();
+                                WIN32_FIND_DATAW findData;
+                                HANDLE hFind = FindFirstFileW(
+                                    (std::wstring(path) + L"\\*").c_str(), &findData);
+                                bool isEmpty = true;
+                                if (hFind != INVALID_HANDLE_VALUE) {
+                                    do {
+                                        if (wcscmp(findData.cFileName, L".") != 0 &&
+                                            wcscmp(findData.cFileName, L"..") != 0) {
+                                            isEmpty = false;
+                                            break;
+                                        }
+                                    } while (FindNextFileW(hFind, &findData));
+                                    FindClose(hFind);
+                                }
+                                if (!isEmpty) {
+                                    MessageBoxW(hwnd,
+                                        L"The selected folder is not empty.\r\n\r\n"
+                                        L"Please select an empty folder for the client installation.",
+                                        L"Folder Not Empty", MB_OK | MB_ICONWARNING);
+                                } else {
+                                    g_installPath = path;
+                                    SetWindowTextW(g_hwndPath, g_installPath.c_str());
+                                    SaveConfig();
+                                    if (!g_workerBusy.load()) {
+                                        g_workerBusy = true;
+                                        std::thread(Worker).detach();
+                                    }
+                                    RefreshPlayButton();
                                 }
                             }
                             CoTaskMemFree(path);
@@ -1571,7 +1603,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (ok && g_freshInstall) {
             g_freshInstall = false;
             int resp = MessageBoxW(hwnd,
-                L"WoW client installed successfully!\r\n\r\n"
+                L"Client installed successfully!\r\n\r\n"
                 L"Do you have an existing WoW installation you'd like to\r\n"
                 L"transfer your UI, macros, addons, and settings from?",
                 L"Transfer from existing installation?",
@@ -1761,6 +1793,38 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 // ── Desktop shortcut ───────────────────────────────────────────────────────────
+static void SaveIconFile(const std::wstring& icoPath)
+{
+    HRSRC hRes = FindResourceW(g_hInst, MAKEINTRESOURCEW(IDR_LOGO_ROUND), L"PNG");
+    if (!hRes) return;
+    HGLOBAL hMem = LoadResource(g_hInst, hRes);
+    if (!hMem) return;
+    void* pData = LockResource(hMem);
+    DWORD size  = SizeofResource(g_hInst, hRes);
+    if (!pData || !size) return;
+
+    HANDLE hFile = CreateFileW(icoPath.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    DWORD written; WORD w; DWORD dw; BYTE b;
+    // ICONDIR
+    w = 0; WriteFile(hFile, &w, 2, &written, nullptr);
+    w = 1; WriteFile(hFile, &w, 2, &written, nullptr);
+    w = 1; WriteFile(hFile, &w, 2, &written, nullptr);
+    // ICONDIRENTRY
+    b = 0;  WriteFile(hFile, &b, 1, &written, nullptr); // width  (0 = 256)
+    b = 0;  WriteFile(hFile, &b, 1, &written, nullptr); // height (0 = 256)
+    b = 0;  WriteFile(hFile, &b, 1, &written, nullptr); // colorCount
+    b = 0;  WriteFile(hFile, &b, 1, &written, nullptr); // reserved
+    w = 1;  WriteFile(hFile, &w, 2, &written, nullptr); // planes
+    w = 32; WriteFile(hFile, &w, 2, &written, nullptr); // bitCount
+    dw = size; WriteFile(hFile, &dw, 4, &written, nullptr); // bytesInRes
+    dw = 22;   WriteFile(hFile, &dw, 4, &written, nullptr); // imageOffset (6+16)
+    WriteFile(hFile, pData, size, &written, nullptr);
+    CloseHandle(hFile);
+}
+
 static void CreateDesktopShortcutIfNeeded()
 {
     wchar_t desktop[MAX_PATH];
@@ -1781,9 +1845,11 @@ static void CreateDesktopShortcutIfNeeded()
                                 IID_IShellLinkW, reinterpret_cast<void**>(&psl))))
         return;
 
+    std::wstring icoPath = g_configDir + L"\\wow-hc.ico";
+    SaveIconFile(icoPath);
     psl->SetPath(exePath);
     psl->SetWorkingDirectory(exeDir.c_str());
-    psl->SetIconLocation(exePath, 0);
+    psl->SetIconLocation(icoPath.c_str(), 0);
     psl->SetDescription(L"WOW HC Launcher");
 
     IPersistFile* ppf = nullptr;
