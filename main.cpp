@@ -34,7 +34,8 @@
 
 // ── Build-time config ──────────────────────────────────────────────────────────
 static constexpr wchar_t CLIENT_DOWNLOAD_URL[] =
-    L"https://dl.wow-hc.com/clients/WOW-Classic-1.14.2.zip";
+    L"https://client.wow-hc.com/1.14.2/WOW-1.14.2.zip";
+   // L"https://dl.wow-hc.com/clients/WOW-Classic-1.14.2.zip";
 
 static constexpr wchar_t APP_NAME[]        = L"WOW-HC.com";
 static constexpr wchar_t HERMES_GH_OWNER[] = L"Novivy";
@@ -69,6 +70,8 @@ enum : UINT {
     ID_STATIC_STATUS = 105,
     ID_BTN_TRANSFER  = 106,
     ID_LINK_WEBSITE  = 107,
+    ID_BTN_OPEN      = 108,
+    ID_LINK_ADDONS   = 109,
     ID_TIMER_UPDATE  = 200,
 };
 
@@ -121,12 +124,18 @@ static HWND              g_hwndProgress      = nullptr;
 static HWND              g_hwndPath          = nullptr;
 static HWND              g_hwndPlay          = nullptr;
 static HWND              g_hwndBrowse        = nullptr;
+static HWND              g_hwndOpen          = nullptr;
 static HWND              g_hwndTransfer      = nullptr;
 
 static HFONT             g_fontNormal        = nullptr;
 static HFONT             g_fontPlay          = nullptr;
 static HFONT             g_fontLink          = nullptr;
+static HFONT             g_fontSmall         = nullptr;
 static HWND              g_hwndLink          = nullptr;
+static HWND              g_hwndLinkAddons    = nullptr;
+static HWND              g_hwndVerLauncher   = nullptr;
+static HWND              g_hwndVerHermes     = nullptr;
+static HWND              g_hwndVerAddon      = nullptr;
 
 static Gdiplus::Bitmap*  g_logoBitmap        = nullptr;
 static ITaskbarList3*    g_pTaskbar          = nullptr;
@@ -152,8 +161,10 @@ static UINT g_dpi = 96;
 
 static bool g_playHover     = false;
 static bool g_browseHover   = false;
+static bool g_openHover     = false;
 static bool g_transferHover = false;
 static bool g_linkHover     = false;
+static bool g_addonsHover   = false;
 static bool g_freshInstall  = false;
 
 // ── Config helpers ─────────────────────────────────────────────────────────────
@@ -714,7 +725,22 @@ static void RefreshPlayButton()
     SetWindowTextW(g_hwndPlay, installed ? L"PLAY" : L"INSTALL");
     bool enable = hasPath && (installed ? ready : !busy);
     EnableWindow(g_hwndPlay, enable ? TRUE : FALSE);
+    if (g_hwndOpen) EnableWindow(g_hwndOpen, hasPath ? TRUE : FALSE);
     RefreshTransferButton();
+}
+
+static void RefreshVersionLabels()
+{
+    if (!g_hwndVerLauncher) return;
+    const char* lv = LAUNCHER_VERSION_STR;
+    std::wstring lvW(lv, lv + strlen(lv));
+    SetWindowTextW(g_hwndVerLauncher, (L"Launcher " + lvW).c_str());
+    std::wstring hv = ReadLocalHermesVersion();
+    SetWindowTextW(g_hwndVerHermes,
+        (L"HermesProxy " + (hv.empty() ? L"N/A" : hv)).c_str());
+    std::wstring av = ReadLocalAddonVersion();
+    SetWindowTextW(g_hwndVerAddon,
+        (L"Addon " + (av.empty() ? L"N/A" : av)).c_str());
 }
 
 // ── Progress helper ────────────────────────────────────────────────────────────
@@ -1153,6 +1179,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         };
         g_fontNormal = MakeFont(9,  FW_NORMAL);
         g_fontPlay   = MakeFont(13, FW_BOLD);
+        g_fontSmall  = MakeFont(8,  FW_NORMAL);
 
         {
             LOGFONTW lf = {};
@@ -1196,34 +1223,68 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hwndPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
             g_installPath.c_str(),
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-            D(10), D(268), D(375), D(22), hwnd,
+            D(10), D(268), D(305), D(22), hwnd,
             (HMENU)(UINT_PTR)ID_EDIT_PATH, nullptr, nullptr);
         SF(g_hwndPath, g_fontNormal);
 
         g_hwndBrowse = CreateWindowExW(0, L"BUTTON", L"Browse...",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            D(393), D(268), D(97), D(22), hwnd,
+            D(324), D(268), D(82), D(22), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_BROWSE, nullptr, nullptr);
         SF(g_hwndBrowse, g_fontNormal);
 
-        // Play/Install — centered, taller primary action button (1.5× base size)
+        g_hwndOpen = CreateWindowExW(0, L"BUTTON", L"Open",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
+            D(410), D(268), D(82), D(22), hwnd,
+            (HMENU)(UINT_PTR)ID_BTN_OPEN, nullptr, nullptr);
+        SF(g_hwndOpen, g_fontNormal);
+
+        // Play/Install — centered, taller primary action button
         g_hwndPlay = CreateWindowExW(0, L"BUTTON", L"INSTALL",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(162), D(305), D(195), D(54), hwnd,
+            D(162), D(320), D(195), D(68), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_PLAY, nullptr, nullptr);
         SF(g_hwndPlay, g_fontPlay);
 
         // Transfer — smaller secondary button below Play
         g_hwndTransfer = CreateWindowExW(0, L"BUTTON",
             L"Transfer UI/Macros/Addons/Settings from existing installation",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(60), D(380), D(400), D(22), hwnd,
+            WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
+            D(60), D(409), D(400), D(22), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_TRANSFER, nullptr, nullptr);
         SF(g_hwndTransfer, g_fontNormal);
 
+        g_hwndLinkAddons = CreateWindowExW(0, L"STATIC", L"Get more Addons",
+            WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_NOTIFY,
+            D(290), D(435), D(200), D(14), hwnd,
+            (HMENU)(UINT_PTR)ID_LINK_ADDONS, nullptr, nullptr);
+        SF(g_hwndLinkAddons, g_fontLink);
+
+        g_hwndVerLauncher = CreateWindowExW(0, L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE,
+            D(10), D(435), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+        SF(g_hwndVerLauncher, g_fontSmall);
+
+        g_hwndVerHermes = CreateWindowExW(0, L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE,
+            D(10), D(425), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+        SF(g_hwndVerHermes, g_fontSmall);
+
+        g_hwndVerAddon = CreateWindowExW(0, L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE,
+            D(10), D(415), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+        SF(g_hwndVerAddon, g_fontSmall);
+
+        if (!g_installPath.empty())
+            EnableWindow(g_hwndOpen, TRUE);
+
+        RefreshVersionLabels();
+
         SetWindowSubclass(g_hwndPlay,     BtnSubclassProc, 0, (DWORD_PTR)&g_playHover);
         SetWindowSubclass(g_hwndBrowse,   BtnSubclassProc, 1, (DWORD_PTR)&g_browseHover);
+        SetWindowSubclass(g_hwndOpen,     BtnSubclassProc, 3, (DWORD_PTR)&g_openHover);
         SetWindowSubclass(g_hwndTransfer, BtnSubclassProc, 2, (DWORD_PTR)&g_transferHover);
+        SetWindowSubclass(g_hwndLinkAddons, BtnSubclassProc, 11, (DWORD_PTR)&g_addonsHover);
 
         SetTimer(hwnd, ID_TIMER_UPDATE, 24u * 60u * 60u * 1000u, nullptr);
 
@@ -1290,6 +1351,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         }
 
+        if (id == ID_LINK_ADDONS) {
+            ShellExecuteW(nullptr, L"open", L"https://wow-hc.com/addons/classic", nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        }
+
+        if (id == ID_BTN_OPEN) {
+            std::wstring openPath = g_installPath + L"\\client\\_classic_era_";
+            ShellExecuteW(nullptr, L"explore", openPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        }
+
         if (id == ID_BTN_BROWSE) {
             IFileOpenDialog* pDlg = nullptr;
             if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
@@ -1297,20 +1369,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 DWORD opts = 0; pDlg->GetOptions(&opts);
                 pDlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
                 pDlg->SetTitle(L"Choose WoW installation folder");
+                if (!g_installPath.empty()) {
+                    IShellItem* pInit = nullptr;
+                    if (SUCCEEDED(SHCreateItemFromParsingName(g_installPath.c_str(), nullptr, IID_PPV_ARGS(&pInit)))) {
+                        pDlg->SetFolder(pInit);
+                        pInit->Release();
+                    }
+                }
                 if (SUCCEEDED(pDlg->Show(hwnd))) {
                     IShellItem* pItem = nullptr;
                     if (SUCCEEDED(pDlg->GetResult(&pItem))) {
                         wchar_t* path = nullptr;
                         pItem->GetDisplayName(SIGDN_FILESYSPATH, &path);
                         if (path) {
-                            g_installPath = path;
-                            CoTaskMemFree(path);
-                            SetWindowTextW(g_hwndPath, g_installPath.c_str());
-                            SaveConfig();
-                            if (!g_workerBusy.load()) {
-                                g_workerBusy = true;
-                                std::thread(Worker).detach();
+                            bool samePath = (g_installPath == path);
+                            if (!samePath) {
+                                g_installPath = path;
+                                SetWindowTextW(g_hwndPath, g_installPath.c_str());
+                                SaveConfig();
+                                EnableWindow(g_hwndOpen, TRUE);
+                                if (!g_workerBusy.load()) {
+                                    g_workerBusy = true;
+                                    std::thread(Worker).detach();
+                                }
                             }
+                            CoTaskMemFree(path);
                         }
                         pItem->Release();
                     }
@@ -1454,6 +1537,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (ok) PostStatus(WS_READY);
         if (g_pTaskbar)
             g_pTaskbar->SetProgressState(g_hwnd, ok ? TBPF_NOPROGRESS : TBPF_ERROR);
+        if (ok) RefreshVersionLabels();
 
         if (ok) std::thread(RunLauncherUpdateCheck).detach();
 
@@ -1532,6 +1616,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
         if (dis->hwndItem != g_hwndPlay &&
             dis->hwndItem != g_hwndBrowse &&
+            dis->hwndItem != g_hwndOpen &&
             dis->hwndItem != g_hwndTransfer)
             break;
 
@@ -1541,7 +1626,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         bool disabled = (dis->itemState & ODS_DISABLED)  != 0;
         bool isPlay   = (dis->hwndItem == g_hwndPlay);
         bool hover    = !disabled && (isPlay ? g_playHover :
-                        (dis->hwndItem == g_hwndBrowse) ? g_browseHover : g_transferHover);
+                        (dis->hwndItem == g_hwndBrowse) ? g_browseHover :
+                        (dis->hwndItem == g_hwndOpen)   ? g_openHover : g_transferHover);
 
         COLORREF bg;
         if (pressed)       bg = RGB(55, 55, 62);
@@ -1597,6 +1683,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             SetBkMode(hdc, TRANSPARENT);
             return (LRESULT)g_hbrBg;
         }
+        if (hCtl == g_hwndLinkAddons) {
+            COLORREF linkClr = g_addonsHover ? RGB(140, 200, 255) : RGB(100, 170, 240);
+            SetTextColor(hdc, linkClr);
+            SetBkMode(hdc, TRANSPARENT);
+            return (LRESULT)g_hbrBg;
+        }
+        if (hCtl == g_hwndVerLauncher || hCtl == g_hwndVerHermes || hCtl == g_hwndVerAddon) {
+            SetTextColor(hdc, RGB(100, 100, 110));
+            SetBkColor(hdc, CLR_BG);
+            SetBkMode(hdc, TRANSPARENT);
+            return (LRESULT)g_hbrBg;
+        }
         SetTextColor(hdc, CLR_TEXT);
         return (LRESULT)g_hbrBg;
     }
@@ -1611,8 +1709,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_GETMINMAXINFO:
     {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-        LONG w = MulDiv(520, g_dpi, 96);
-        LONG h = MulDiv(450, g_dpi, 96);
+        LONG w = MulDiv(514, g_dpi, 96);
+        LONG h = MulDiv(490, g_dpi, 96);
         mmi->ptMinTrackSize = {w, h};
         mmi->ptMaxTrackSize = {w, h};
         break;
@@ -1624,6 +1722,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_hIconLarge) { DestroyIcon(g_hIconLarge); g_hIconLarge = nullptr; }
         if (g_hIconSmall) { DestroyIcon(g_hIconSmall); g_hIconSmall = nullptr; }
         if (g_fontLink)   { DeleteObject(g_fontLink);  g_fontLink   = nullptr; }
+        if (g_fontSmall)  { DeleteObject(g_fontSmall); g_fontSmall  = nullptr; }
         PostQuitMessage(0);
         break;
 
@@ -1721,8 +1820,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     wc.hIconSm       = g_hIconSmall;
     RegisterClassExW(&wc);
 
-    int WND_W = MulDiv(520, g_dpi, 96);
-    int WND_H = MulDiv(450, g_dpi, 96);
+    int WND_W = MulDiv(514, g_dpi, 96);
+    int WND_H = MulDiv(490, g_dpi, 96);
     int sx = GetSystemMetrics(SM_CXSCREEN);
     int sy = GetSystemMetrics(SM_CYSCREEN);
 
