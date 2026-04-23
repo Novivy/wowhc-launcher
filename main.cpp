@@ -117,7 +117,7 @@ static const wchar_t* STATUS_TEXT[] = {
     L"Ready to play!",
     L"Error - check your connection or installation path.",
     L"Launching...",
-    L"Select an new or existing installation folder",
+    L"Select a new or existing installation folder",
 };
 
 // ── Globals ────────────────────────────────────────────────────────────────────
