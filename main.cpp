@@ -905,6 +905,7 @@ static void ApplyLauncherUpdate(const std::wstring& newExePath)
         MessageBoxW(nullptr, L"Failed to place the new launcher EXE.\nThe update was rolled back.", L"Update Failed", MB_OK | MB_ICONERROR);
         return;
     }
+    SaveConfig();
     ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL);
     PostQuitMessage(0);
 }
@@ -1434,7 +1435,7 @@ static LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-static void CreateDesktopShortcutIfNeeded();
+static void EnsureDesktopShortcut(bool onlyIfAlreadyExists = false);
 
 // ── Window procedure ───────────────────────────────────────────────────────────
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -1927,7 +1928,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         if (ok && g_freshInstall) {
             g_freshInstall = false;
-            CreateDesktopShortcutIfNeeded();
+            EnsureDesktopShortcut(false);
             int resp = MessageBoxW(hwnd,
                 L"Client installed successfully!\r\n\r\n"
                 L"Do you have an existing WoW installation you'd like to\r\n"
@@ -2168,20 +2169,30 @@ static void SaveIconFile(const std::wstring& icoPath)
     CloseHandle(hFile);
 }
 
-static void CreateDesktopShortcutIfNeeded()
+// onlyIfAlreadyExists=true  → only refresh target (called at startup, skips if user deleted it)
+// onlyIfAlreadyExists=false → create on first install, refresh if it already exists
+static void EnsureDesktopShortcut(bool onlyIfAlreadyExists)
 {
-    // Only ever create the shortcut once; if the user deletes it, respect that.
-    wchar_t flag[8] = {};
-    GetPrivateProfileStringW(L"Launcher", L"ShortcutCreated", L"0",
-        flag, 8, ConfigPath().c_str());
-    if (flag[0] == L'1')
-        return;
-
     wchar_t desktop[MAX_PATH];
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktop)))
         return;
 
     std::wstring lnkPath = std::wstring(desktop) + L"\\WOW-HC.lnk";
+
+    wchar_t flag[8] = {};
+    GetPrivateProfileStringW(L"Launcher", L"ShortcutCreated", L"0",
+        flag, 8, ConfigPath().c_str());
+    bool alreadyCreated = (flag[0] == L'1');
+    bool lnkExists = GetFileAttributesW(lnkPath.c_str()) != INVALID_FILE_ATTRIBUTES;
+
+    if (onlyIfAlreadyExists) {
+        // Startup refresh: only update target if shortcut still exists on the desktop.
+        // If the user deleted it, do nothing (respect that choice).
+        if (!lnkExists) return;
+    } else {
+        // Post-install creation: if already created but user deleted it, respect that.
+        if (alreadyCreated && !lnkExists) return;
+    }
 
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -2207,7 +2218,8 @@ static void CreateDesktopShortcutIfNeeded()
     }
     psl->Release();
 
-    WritePrivateProfileStringW(L"Launcher", L"ShortcutCreated", L"1", ConfigPath().c_str());
+    if (!alreadyCreated)
+        WritePrivateProfileStringW(L"Launcher", L"ShortcutCreated", L"1", ConfigPath().c_str());
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────
@@ -2247,6 +2259,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     g_configDir = std::wstring(appdata) + L"\\WOWHCLauncher";
     CreateDirectoryW(g_configDir.c_str(), nullptr);
     LoadConfig();
+    EnsureDesktopShortcut(true); // refresh shortcut target to current exe path if it exists
 
     // If a fully-installed client is saved but WowClassic.exe is gone, reset paths so
     // the user is prompted to choose again (moved/deleted installation).
