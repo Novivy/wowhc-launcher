@@ -1,2 +1,6 @@
 // RT_MANIFEST = 24, CREATEPROCESS_MANIFEST_RESOURCE_ID = 1
 1 24 "app.manifest"
+
+// Embedded PNG resources — loaded at runtime via FindResource/LoadResource
+201 PNG "assets\\wow-hardcore-logo-clean.png"
+202 PNG "assets\\wow-hardcore-logo-round.png"

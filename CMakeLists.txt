@@ -21,8 +21,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(${PROJECT_NAME} WIN32 main.cpp app.rc)
 
+# Static runtime: /MT for Release, /MTd for Debug — no VCRUNTIME DLL dependency
+set_property(TARGET ${PROJECT_NAME} PROPERTY
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # /utf-8 so MSVC correctly reads the UTF-8 source file for wide string literals
 target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)
+
+# Release: optimize for size+speed, enable whole-program optimization
+target_compile_options(${PROJECT_NAME} PRIVATE
+    $<$<CONFIG:Release>:/O2 /GL /GS->
+)
+target_link_options(${PROJECT_NAME} PRIVATE
+    $<$<CONFIG:Release>:/LTCG /OPT:REF /OPT:ICF>
+)
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     UNICODE
@@ -55,4 +67,5 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     shell32
     ole32
     uuid
+    gdiplus
 )
