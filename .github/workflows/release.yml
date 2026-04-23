@@ -1,0 +1,45 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure CMake
+        run: |
+          cmake -G "Ninja" `
+            -DCMAKE_BUILD_TYPE=Release `
+            "-DLAUNCHER_VERSION=${{ github.ref_name }}" `
+            -B build-release .
+        shell: pwsh
+
+      - name: Build
+        run: cmake --build build-release --config Release
+        shell: pwsh
+
+      - name: Rename artifact
+        run: Copy-Item "build-release\2026_wowhc_launcher.exe" "WOW-HC-Launcher.exe"
+        shell: pwsh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: WOW-HC-Launcher.exe
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
