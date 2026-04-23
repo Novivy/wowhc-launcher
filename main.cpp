@@ -44,6 +44,7 @@ static constexpr wchar_t ADDON_GH_OWNER[]      = L"Novivy";
 static constexpr wchar_t ADDON_GH_REPO[]       = L"wow-hc-addon";
 static constexpr wchar_t LAUNCHER_GH_OWNER[]   = L"Novivy";
 static constexpr wchar_t LAUNCHER_GH_REPO[]    = L"wowhc-launcher";
+static constexpr char    LAUNCHER_EXE_ASSET[]  = "WOW-HC-Launcher.exe";
 
 #ifndef LAUNCHER_VERSION_STR
 #define LAUNCHER_VERSION_STR "v0.0.0-dev"
@@ -972,8 +973,9 @@ static void RunLauncherUpdateCheck()
 
     std::string assetUrl = FindExeAssetUrl(json);
     if (assetUrl.empty()) {
-        MessageBoxW(g_hwnd, L"Could not find the launcher EXE asset in the GitHub release.\nPlease update manually.", L"Update Failed", MB_OK | MB_ICONERROR);
-        return;
+        // Fallback: construct direct GitHub release download URL
+        assetUrl = std::string("https://github.com/Novivy/wowhc-launcher/releases/latest/download/")
+                 + LAUNCHER_EXE_ASSET;
     }
 
     std::wstring assetW(assetUrl.begin(), assetUrl.end());
