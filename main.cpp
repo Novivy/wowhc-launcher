@@ -349,6 +349,8 @@ static std::string FindAssetUrl(const std::string& json)
     return fallback;
 }
 
+static void PostText(std::wstring text); // forward declaration
+
 // ── WinHTTP helpers ────────────────────────────────────────────────────────────
 static HINTERNET OpenSession()
 {
@@ -391,23 +393,70 @@ static HINTERNET MakeRequest(HINTERNET hSess, const std::wstring& url, HINTERNET
 static std::string HttpGet(const std::wstring& url)
 {
     HINTERNET hSess = OpenSession();
-    if (!hSess) return {};
+    if (!hSess) {
+        PostText(L"Update check failed: could not open network session.");
+        return {};
+    }
     HINTERNET hConn = nullptr;
     HINTERNET hReq  = MakeRequest(hSess, url, hConn);
-    if (!hReq) { WinHttpCloseHandle(hSess); return {}; }
+    if (!hReq) {
+        WinHttpCloseHandle(hSess);
+        PostText(L"Update check failed: could not connect to server.");
+        return {};
+    }
     WinHttpAddRequestHeaders(hReq,
-        L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28",
+        L"Accept: application/vnd.github+json\r\n"
+        L"X-GitHub-Api-Version: 2022-11-28\r\n"
+        L"Cache-Control: no-cache\r\nPragma: no-cache",
         (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
     std::string body;
-    if (WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(hReq, nullptr))
-    {
-        DWORD avail = 0, read = 0;
-        while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
-            std::vector<char> buf(avail + 1);
-            WinHttpReadData(hReq, buf.data(), avail, &read);
-            body.append(buf.data(), read);
+    bool sent  = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                     WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    bool recvd = sent && WinHttpReceiveResponse(hReq, nullptr);
+    if (!sent || !recvd) {
+        DWORD err = GetLastError();
+        wchar_t msg[128];
+        swprintf_s(msg, L"Update check failed: network error (0x%08lX).", err);
+        PostText(msg);
+    } else {
+        DWORD statusCode = 0, scLen = sizeof(statusCode);
+        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            nullptr, &statusCode, &scLen, nullptr);
+        if (statusCode == 200) {
+            DWORD avail = 0, read = 0;
+            while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+                std::vector<char> buf(avail + 1);
+                WinHttpReadData(hReq, buf.data(), avail, &read);
+                body.append(buf.data(), read);
+            }
+        } else {
+            wchar_t msg[256];
+            if (statusCode == 403 || statusCode == 429) {
+                // Rate-limited: read the reset timestamp from the response header
+                wchar_t resetBuf[32] = {};
+                DWORD resetLen = sizeof(resetBuf);
+                std::wstring resetInfo;
+                if (WinHttpQueryHeaders(hReq,
+                        WINHTTP_QUERY_CUSTOM,
+                        L"X-RateLimit-Reset", resetBuf, &resetLen, nullptr) &&
+                    resetBuf[0] != L'\0') {
+                    long long ts = _wtoi64(resetBuf);
+                    if (ts > 0) {
+                        time_t t = (time_t)ts;
+                        struct tm tm {};
+                        gmtime_s(&tm, &t);
+                        wchar_t timeBuf[32];
+                        wcsftime(timeBuf, 32, L"%H:%M UTC", &tm);
+                        resetInfo = std::wstring(L"\nRate limit resets at ") + timeBuf;
+                    }
+                }
+                swprintf_s(msg, L"GitHub API rate limit reached (HTTP %lu).%ls\n\nThe update check will be skipped for now.",
+                    statusCode, resetInfo.c_str());
+                MessageBoxW(g_hwnd, msg, L"Update Check", MB_OK | MB_ICONINFORMATION);
+            } else {
+                swprintf_s(msg, L"Update check failed: GitHub API returned HTTP %lu.", statusCode);
+                PostText(msg);
+            }
         }
     }
     WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess);
@@ -422,11 +471,19 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
     HINTERNET hConn = nullptr;
     HINTERNET hReq  = MakeRequest(hSess, url, hConn);
     if (!hReq) { WinHttpCloseHandle(hSess); return false; }
+    WinHttpAddRequestHeaders(hReq,
+        L"Cache-Control: no-cache\r\nPragma: no-cache",
+        (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
     bool ok = false;
-    if (WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(hReq, nullptr))
-    {
+    bool sent = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                    WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    bool recvd = sent && WinHttpReceiveResponse(hReq, nullptr);
+    if (!sent || !recvd) {
+        DWORD err = GetLastError();
+        wchar_t msg[128];
+        swprintf_s(msg, L"Network error (WinHTTP 0x%08lX).\nCheck your internet connection and try again.", err);
+        MessageBoxW(g_hwnd, msg, L"Download Failed", MB_OK | MB_ICONERROR);
+    } else {
         DWORD statusCode = 0; DWORD scLen = sizeof(statusCode);
         WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
             nullptr, &statusCode, &scLen, nullptr);
@@ -447,10 +504,10 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                     url.c_str(), statusCode, errBody.c_str());
                 fclose(f);
             }
-            MessageBoxW(nullptr,
+            MessageBoxW(g_hwnd,
                 (L"HTTP error " + std::to_wstring(statusCode) +
                  L"\nCheck: " + logPath).c_str(),
-                L"WOW-HC Debug", MB_OK | MB_ICONWARNING);
+                L"Download Failed", MB_OK | MB_ICONERROR);
         }
         if (statusCode == 200) {
         wchar_t lenBuf[32] = {}; DWORD ls = sizeof(lenBuf);
