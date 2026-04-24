@@ -277,14 +277,6 @@ static void WriteLocalAddonVersion(const std::wstring& ver)
     f << ver;
 }
 
-static time_t ReadLastCheckTime()
-{
-    wchar_t buf[32] = {};
-    GetPrivateProfileStringW(L"Launcher", L"LastCheckTime", L"0",
-        buf, 32, ConfigPath().c_str());
-    return (time_t)_wtoi64(buf);
-}
-
 static void WriteLastCheckTime()
 {
     wchar_t buf[32];
@@ -295,11 +287,6 @@ static void WriteLastCheckTime()
 static void ResetLastCheckTime()
 {
     WritePrivateProfileStringW(L"Launcher", L"LastCheckTime", L"0", ConfigPath().c_str());
-}
-
-static bool ShouldRunUpdateCheck()
-{
-    return (time(nullptr) - ReadLastCheckTime()) >= 86400;
 }
 
 // ── Version comparison ─────────────────────────────────────────────────────────
@@ -1291,15 +1278,12 @@ static void Worker()
         PostPct(100);
     }
 
-    // ── 2+3. Check HermesProxy and addon updates (always on fresh install, else 24h gate) ──
-    bool justInstalled = !clientOk;
-    if (justInstalled || ShouldRunUpdateCheck()) {
-        PostStatus(WS_CHECKING);
-        PostPct(0);
-        RunHermesUpdateCheck();
-        RunAddonUpdateCheck();
-        WriteLastCheckTime();
-    }
+    // ── 2+3. Check HermesProxy and addon updates on every startup ──────────────────────────
+    PostStatus(WS_CHECKING);
+    PostPct(0);
+    RunHermesUpdateCheck();
+    RunAddonUpdateCheck();
+    WriteLastCheckTime();
 
     // After Hermes update/install: refresh Arctium path for new installs if it wasn't found yet
     if (g_arctiumExePath.empty() || GetFileAttributesW(g_arctiumExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
