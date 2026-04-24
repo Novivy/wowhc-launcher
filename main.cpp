@@ -207,6 +207,22 @@ static void LoadConfig()
         g_clientPath = g_installPath + L"\\client";
 }
 
+// ── EXE version reader ────────────────────────────────────────────────────────
+static bool GetExeVersion(const std::wstring& path, int& major, int& minor, int& patch)
+{
+    DWORD dummy;
+    DWORD size = GetFileVersionInfoSizeW(path.c_str(), &dummy);
+    if (!size) return false;
+    std::vector<BYTE> buf(size);
+    if (!GetFileVersionInfoW(path.c_str(), 0, size, buf.data())) return false;
+    VS_FIXEDFILEINFO* pInfo = nullptr; UINT infoSize = 0;
+    if (!VerQueryValueW(buf.data(), L"\\", (void**)&pInfo, &infoSize) || !pInfo) return false;
+    major = HIWORD(pInfo->dwFileVersionMS);
+    minor = LOWORD(pInfo->dwFileVersionMS);
+    patch = HIWORD(pInfo->dwFileVersionLS);
+    return true;
+}
+
 static std::wstring ReadLocalHermesVersion()
 {
     if (g_clientPath.empty()) return {};
@@ -223,6 +239,24 @@ static void WriteLocalHermesVersion(const std::wstring& ver)
 {
     std::wofstream f(HermesVerPath());
     f << ver;
+}
+
+// EXE VERSIONINFO is ground truth; .txt is fallback for exes without a resource
+static std::wstring GetLocalHermesVersion()
+{
+    auto fromExe = [](const std::wstring& path) -> std::wstring {
+        if (path.empty() || GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+            return {};
+        int maj = 0, min = 0, pat = 0;
+        if (!GetExeVersion(path, maj, min, pat) || maj == 0) return {};
+        wchar_t ver[32]; swprintf_s(ver, L"v%d.%d.%d", maj, min, pat);
+        return ver;
+    };
+    std::wstring v = fromExe(g_hermesExePath);
+    if (v.empty() && !g_clientPath.empty())
+        v = fromExe(g_clientPath + L"\\HermesProxy.exe");
+    if (v.empty()) v = ReadLocalHermesVersion();
+    return v;
 }
 
 static std::wstring ReadLocalAddonVersion()
@@ -823,7 +857,7 @@ static void RefreshVersionLabels()
     const char* lv = LAUNCHER_VERSION_STR;
     std::wstring lvW(lv, lv + strlen(lv));
     SetVerLabel(g_hwndVerLauncher, L"Launcher " + lvW);
-    std::wstring hv = ReadLocalHermesVersion();
+    std::wstring hv = GetLocalHermesVersion();
     SetVerLabel(g_hwndVerHermes, L"HermesProxy " + (hv.empty() ? L"" : hv));
     std::wstring av = ReadLocalAddonVersion();
     SetVerLabel(g_hwndVerAddon, L"Addon " + (av.empty() ? L"" : av));
@@ -920,7 +954,7 @@ static void RunHermesUpdateCheck()
 
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
-    std::wstring localVer = ReadLocalHermesVersion();
+    std::wstring localVer = GetLocalHermesVersion();
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
     std::wstring payload = remoteVer + L"\n" + localVer;
@@ -949,6 +983,25 @@ static void RunHermesUpdateCheck()
             if (sep != std::wstring::npos) hermesDir = g_hermesExePath.substr(0, sep);
         }
         CreateDirectoryW(hermesDir.c_str(), nullptr);
+
+        // Kill HermesProxy if running — file lock would silently corrupt the update
+        {
+            HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (hSnap != INVALID_HANDLE_VALUE) {
+                PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
+                if (Process32FirstW(hSnap, &pe)) {
+                    do {
+                        if (_wcsicmp(pe.szExeFile, L"HermesProxy.exe") == 0) {
+                            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                            if (h) { TerminateProcess(h, 0); CloseHandle(h); }
+                        }
+                    } while (Process32NextW(hSnap, &pe));
+                }
+                CloseHandle(hSnap);
+            }
+            Sleep(500);
+        }
+
         ok = ExtractZipSmart(tmpZip, hermesDir, true, [](int pct) {
             PostPct(70 + pct * 30 / 100);
         });
@@ -1059,22 +1112,6 @@ static void RunLauncherUpdateCheck()
     }
 
     SendMessageW(g_hwnd, WM_APPLY_SELF_UPD, 0, (LPARAM)(new std::wstring(tmpExe)));
-}
-
-// ── EXE version reader ────────────────────────────────────────────────────────
-static bool GetExeVersion(const std::wstring& path, int& major, int& minor, int& patch)
-{
-    DWORD dummy;
-    DWORD size = GetFileVersionInfoSizeW(path.c_str(), &dummy);
-    if (!size) return false;
-    std::vector<BYTE> buf(size);
-    if (!GetFileVersionInfoW(path.c_str(), 0, size, buf.data())) return false;
-    VS_FIXEDFILEINFO* pInfo = nullptr; UINT infoSize = 0;
-    if (!VerQueryValueW(buf.data(), L"\\", (void**)&pInfo, &infoSize) || !pInfo) return false;
-    major = HIWORD(pInfo->dwFileVersionMS);
-    minor = LOWORD(pInfo->dwFileVersionMS);
-    patch = HIWORD(pInfo->dwFileVersionLS);
-    return true;
 }
 
 // ── Exe search helpers ────────────────────────────────────────────────────────
@@ -1204,36 +1241,6 @@ static void Worker()
             HANDLE h = CreateFileW(ClientMarker().c_str(), GENERIC_WRITE, 0,
                 nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-        }
-    }
-
-    // For existing installs: detect HermesProxy version from exe if version file absent
-    if (clientOk && ReadLocalHermesVersion().empty()) {
-        std::wstring stdHermes = g_clientPath + L"\\HermesProxy.exe";
-        std::wstring foundHermes;
-        if (GetFileAttributesW(stdHermes.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            foundHermes = stdHermes;
-        } else {
-            WIN32_FIND_DATAW sfd;
-            HANDLE sh = FindFirstFileW((g_clientPath + L"\\*").c_str(), &sfd);
-            if (sh != INVALID_HANDLE_VALUE) {
-                do {
-                    if (!(sfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-                    if (wcscmp(sfd.cFileName, L".") == 0 || wcscmp(sfd.cFileName, L"..") == 0) continue;
-                    std::wstring c = g_clientPath + L"\\" + sfd.cFileName + L"\\HermesProxy.exe";
-                    if (GetFileAttributesW(c.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                        foundHermes = c; break;
-                    }
-                } while (FindNextFileW(sh, &sfd));
-                FindClose(sh);
-            }
-        }
-        if (!foundHermes.empty()) {
-            int maj=0, min=0, pat=0;
-            if (GetExeVersion(foundHermes, maj, min, pat) && maj > 0) {
-                wchar_t ver[32]; swprintf_s(ver, L"v%d.%d.%d", maj, min, pat);
-                WriteLocalHermesVersion(std::wstring(ver));
-            }
         }
     }
 
