@@ -176,8 +176,6 @@ static bool g_freshInstall  = false;
 
 // ── Config helpers ─────────────────────────────────────────────────────────────
 static std::wstring ConfigPath()     { return g_configDir + L"\\launcher.ini"; }
-static std::wstring HermesVerPath()  { return g_clientPath + L"\\hermes_version.txt"; }
-static std::wstring AddonVerPath()   { return g_clientPath + L"\\wow_hc_addon_version.txt"; }
 static std::wstring ClientMarker()   { return g_clientPath + L"\\.launcher_installed"; }
 
 static void SaveConfig()
@@ -225,25 +223,6 @@ static bool GetExeVersion(const std::wstring& path, int& major, int& minor, int&
     return true;
 }
 
-static std::wstring ReadLocalHermesVersion()
-{
-    if (g_clientPath.empty()) return {};
-    std::wifstream f(HermesVerPath());
-    if (!f.is_open()) return {};
-    std::wstring v;
-    std::getline(f, v);
-    while (!v.empty() && (v.back() == L'\r' || v.back() == L'\n' || v.back() == L' '))
-        v.pop_back();
-    return v;
-}
-
-static void WriteLocalHermesVersion(const std::wstring& ver)
-{
-    std::wofstream f(HermesVerPath());
-    f << ver;
-}
-
-// EXE VERSIONINFO is ground truth; .txt is fallback for exes without a resource
 static std::wstring GetLocalHermesVersion()
 {
     auto fromExe = [](const std::wstring& path) -> std::wstring {
@@ -257,26 +236,26 @@ static std::wstring GetLocalHermesVersion()
     std::wstring v = fromExe(g_hermesExePath);
     if (v.empty() && !g_clientPath.empty())
         v = fromExe(g_clientPath + L"\\HermesProxy.exe");
-    if (v.empty()) v = ReadLocalHermesVersion();
     return v;
 }
 
-static std::wstring ReadLocalAddonVersion()
+static std::wstring ReadAddonTocVersion()
 {
     if (g_clientPath.empty()) return {};
-    std::wifstream f(AddonVerPath());
+    std::wstring tocPath = g_clientPath + L"\\_classic_era_\\Interface\\AddOns\\WOW_HC\\WOW_HC.toc";
+    std::wifstream f(tocPath);
     if (!f.is_open()) return {};
-    std::wstring v;
-    std::getline(f, v);
-    while (!v.empty() && (v.back() == L'\r' || v.back() == L'\n' || v.back() == L' '))
-        v.pop_back();
-    return v;
-}
-
-static void WriteLocalAddonVersion(const std::wstring& ver)
-{
-    std::wofstream f(AddonVerPath());
-    f << ver;
+    std::wstring line;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == L'\r' || line.back() == L'\n' || line.back() == L' '))
+            line.pop_back();
+        if (line.rfind(L"## Version:", 0) == 0) {
+            std::wstring ver = line.substr(11);
+            size_t start = ver.find_first_not_of(L" \t");
+            return start != std::wstring::npos ? ver.substr(start) : L"";
+        }
+    }
+    return {};
 }
 
 static void WriteLastCheckTime()
@@ -905,7 +884,7 @@ static void RefreshVersionLabels()
     SetVerLabel(g_hwndVerLauncher, L"Launcher " + lvW);
     std::wstring hv = GetLocalHermesVersion();
     SetVerLabel(g_hwndVerHermes, L"HermesProxy " + (hv.empty() ? L"" : hv));
-    std::wstring av = ReadLocalAddonVersion();
+    std::wstring av = ReadAddonTocVersion();
     SetVerLabel(g_hwndVerAddon, L"Addon " + (av.empty() ? L"" : av));
 }
 
@@ -1053,7 +1032,6 @@ static void RunHermesUpdateCheck()
         });
         DeleteFileW(tmpZip.c_str());
         if (ok) {
-            WriteLocalHermesVersion(remoteVer);
             // Update stored path in case this was a first-time install
             std::wstring newExe = hermesDir + L"\\HermesProxy.exe";
             if (GetFileAttributesW(newExe.c_str()) != INVALID_FILE_ATTRIBUTES)
@@ -1074,10 +1052,8 @@ static void RunAddonUpdateCheck()
 
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
-    std::wstring localVer  = ReadLocalAddonVersion();
-    std::wstring addonPath = g_clientPath + L"\\_classic_era_\\Interface\\AddOns\\WOW_HC";
-    bool folderMissing = GetFileAttributesW(addonPath.c_str()) == INVALID_FILE_ATTRIBUTES;
-    if (remoteVer.empty() || (!IsNewer(localVer, remoteVer) && !folderMissing)) return;
+    std::wstring localVer = ReadAddonTocVersion();
+    if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
     std::wstring payload = remoteVer + L"\n" + localVer;
     LRESULT r = SendMessageW(g_hwnd, WM_ASK_UPDATE, UC_ADDON,
@@ -1109,7 +1085,7 @@ static void RunAddonUpdateCheck()
             PostPct(70 + pct * 30 / 100);
         });
         DeleteFileW(tmpZip.c_str());
-        if (ok) { WriteLocalAddonVersion(remoteVer); PostPct(100); }
+        if (ok) { PostPct(100); }
     } else {
         DeleteFileW(tmpZip.c_str());
     }
