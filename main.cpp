@@ -1114,8 +1114,9 @@ struct WowInstallInfo {
     std::wstring clientDir;
 };
 
-static bool FindWowInstall(const std::wstring& folder, WowInstallInfo& info)
+static bool FindWowInstall(const std::wstring& folder, WowInstallInfo& info, int depth = 2)
 {
+    // Case 1: folder IS _classic_era_ (WowClassic.exe directly inside)
     {
         std::wstring p = folder + L"\\WowClassic.exe";
         if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -1125,6 +1126,7 @@ static bool FindWowInstall(const std::wstring& folder, WowInstallInfo& info)
             return true;
         }
     }
+    // Case 2: folder is client dir (contains _classic_era_)
     {
         std::wstring p = folder + L"\\_classic_era_\\WowClassic.exe";
         if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
@@ -1133,12 +1135,29 @@ static bool FindWowInstall(const std::wstring& folder, WowInstallInfo& info)
             return true;
         }
     }
+    // Case 3: folder is launcher install root (contains client\_classic_era_)
     {
         std::wstring p = folder + L"\\client\\_classic_era_\\WowClassic.exe";
         if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
             info.wowExePath = p;
             info.clientDir  = folder + L"\\client";
             return true;
+        }
+    }
+    // Case 4: scan immediate subdirectories so selecting a grandparent still works
+    if (depth > 0) {
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((folder + L"\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+                if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+                if (FindWowInstall(folder + L"\\" + fd.cFileName, info, depth - 1)) {
+                    FindClose(h);
+                    return true;
+                }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
         }
     }
     return false;
