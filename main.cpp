@@ -1691,6 +1691,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             std::wstring selected = path;
                             CoTaskMemFree(path);
 
+                            // Detect if the launcher exe is sitting inside the selected folder
+                            {
+                                wchar_t exeBuf[MAX_PATH] = {};
+                                GetModuleFileNameW(nullptr, exeBuf, MAX_PATH);
+                                std::wstring exeDir = exeBuf;
+                                auto slash = exeDir.find_last_of(L"\\/");
+                                if (slash != std::wstring::npos) exeDir.resize(slash);
+                                std::wstring sel = selected;
+                                if (!sel.empty() && (sel.back() == L'\\' || sel.back() == L'/')) sel.pop_back();
+                                if (sel.size() == exeDir.size() && _wcsicmp(sel.c_str(), exeDir.c_str()) == 0) {
+                                    MessageBoxW(hwnd,
+                                        L"The WOW HC Launcher is located inside the folder you selected.\r\n\r\n"
+                                        L"Please move the launcher (WOW-HC-Launcher.exe) somewhere else first "
+                                        L"(e.g. your Desktop or Downloads folder)"
+                                        L"for the WoW installation.",
+                                        L"Launcher Inside Installation Folder", MB_OK | MB_ICONERROR);
+                                    pItem->Release();
+                                    pDlg->Release();
+                                    break;
+                                }
+                            }
+
                             WowInstallInfo info;
                             if (FindWowInstall(selected, info)) {
                                 // ── Existing WoW installation detected ──────────
@@ -1844,7 +1866,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg)))) {
                     DWORD opts = 0; pDlg->GetOptions(&opts);
                     pDlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-                    pDlg->SetTitle(L"Select the _classic_era_ folder from your old WoW installation");
+                    pDlg->SetTitle(L"Select your old WoW installation folder (any parent of/or _classic_era_ folder works)");
                     if (SUCCEEDED(pDlg->Show(hwnd))) {
                         IShellItem* pItem = nullptr;
                         if (SUCCEEDED(pDlg->GetResult(&pItem))) {
@@ -1859,12 +1881,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
                 if (cancelled) break;
 
-                // Validate: WowClassic.exe must be directly in the selected folder
-                std::wstring wowExe = picked + L"\\WowClassic.exe";
-                if (GetFileAttributesW(wowExe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                // Search for _classic_era_ in/under the selected folder (same depth logic as Browse)
+                WowInstallInfo xferInfo;
+                if (FindWowInstall(picked, xferInfo)) {
+                    std::wstring classicEraDir = xferInfo.clientDir + L"\\_classic_era_";
                     // Check that this is a 1.14.x (Classic Era) build
                     int verMaj = 0, verMin = 0, verPatch = 0;
-                    if (GetExeVersion(wowExe, verMaj, verMin, verPatch)
+                    if (GetExeVersion(xferInfo.wowExePath, verMaj, verMin, verPatch)
                             && !(verMaj == 1 && verMin == 14)) {
                         wchar_t msg[320];
                         swprintf_s(msg,
@@ -1879,14 +1902,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     }
                     g_workerBusy = true;
                     RefreshPlayButton();
-                    std::thread([picked]() { TransferWorker(picked); }).detach();
+                    std::thread([classicEraDir]() { TransferWorker(classicEraDir); }).detach();
                     break;
                 }
 
                 MessageBoxW(hwnd,
-                    L"WowClassic.exe was not found in the selected folder.\n\n"
-                    L"Please select the \"_classic_era_\" folder that directly contains WowClassic.exe.",
-                    L"Wrong folder",
+                    L"A WoW Classic Era installation was not found in or under the selected folder.\n\n"
+                    L"You can select the _classic_era_ folder itself, its parent,\n"
+                    L"or the install root that contains it.",
+                    L"Installation Not Found",
                     MB_OK | MB_ICONWARNING);
                 // Loop reopens the dialog
             }
