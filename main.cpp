@@ -182,7 +182,8 @@ static std::wstring ClientMarker()   { return g_clientPath + L"\\.launcher_insta
 
 static void SaveConfig()
 {
-    const wchar_t* ini = ConfigPath().c_str();
+    std::wstring iniPath = ConfigPath();
+    const wchar_t* ini = iniPath.c_str();
     WritePrivateProfileStringW(L"Launcher", L"InstallPath",  g_installPath.c_str(),    ini);
     WritePrivateProfileStringW(L"Launcher", L"ClientPath",   g_clientPath.c_str(),     ini);
     WritePrivateProfileStringW(L"Launcher", L"HermesExePath", g_hermesExePath.c_str(), ini);
@@ -192,7 +193,8 @@ static void SaveConfig()
 static void LoadConfig()
 {
     wchar_t buf[MAX_PATH] = {};
-    const wchar_t* ini = ConfigPath().c_str();
+    std::wstring iniPath = ConfigPath();
+    const wchar_t* ini = iniPath.c_str();
     auto Rd = [&](const wchar_t* key) -> std::wstring {
         memset(buf, 0, sizeof(buf));
         GetPrivateProfileStringW(L"Launcher", key, L"", buf, MAX_PATH, ini);
