@@ -906,6 +906,29 @@ static void RefreshVersionLabels()
     SetVerLabel(g_hwndVerAddon, L"Addon " + (av.empty() ? L"" : av));
 }
 
+// ── Recording helpers ─────────────────────────────────────────────────────────
+// Returns true if the save folder is set (auto-populates default if not).
+// Shows a warning and returns false only when g_clientPath is also unknown.
+static bool EnsureRecordingSaveFolder(HWND hwnd)
+{
+    ReplaySettings s = RB_GetSettings();
+    if (!s.saveFolder.empty()) return true;
+
+    if (!g_clientPath.empty()) {
+        s.saveFolder = g_clientPath + L"\\_classic_era_\\Videos";
+        CreateDirectoryW(s.saveFolder.c_str(), nullptr);
+        RB_SetSettings(s);
+        SaveReplaySettings(s, ConfigPath());
+        return true;
+    }
+
+    MessageBoxW(hwnd,
+        L"No save folder is configured for recordings.\r\n"
+        L"Please click the Settings button (\x2699) to set one.",
+        L"Recording Save Folder", MB_OK | MB_ICONWARNING);
+    return false;
+}
+
 // ── Progress helper ────────────────────────────────────────────────────────────
 struct DlProgress {
     std::wstring label;
@@ -2099,8 +2122,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 std::thread(Worker).detach();
             }
             else if (installed && g_playReady.load()) {
-                if (RB_GetSettings().autoStartOnPlay && !RB_IsRunning())
+                if (RB_GetSettings().autoStartOnPlay && !RB_IsRunning()) {
+                    EnsureRecordingSaveFolder(hwnd);
                     RB_Start();
+                }
                 EnableWindow(g_hwndPlay, FALSE);
                 PostStatus(WS_LAUNCHING);
                 std::wstring hermesExe  = g_hermesExePath;
@@ -2138,6 +2163,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 RB_Stop();
             } else {
+                if (!EnsureRecordingSaveFolder(hwnd)) break;
                 RB_Start();
             }
         }
@@ -2237,6 +2263,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 RB_Stop();
             } else {
+                if (!EnsureRecordingSaveFolder(hwnd)) return 0;
                 RB_Start();
             }
         } else if (wp == HOTKEY_ID_RB_SAVE) {
@@ -2303,6 +2330,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_taskbarHasProgress = false;
         RefreshPlayButton();
         if (ok) PostStatus(WS_READY);
+        if (ok) EnsureRecordingSaveFolder(hwnd);
         if (g_pTaskbar)
             g_pTaskbar->SetProgressState(g_hwnd, ok ? TBPF_NOPROGRESS : TBPF_ERROR);
         if (ok) RefreshVersionLabels();
