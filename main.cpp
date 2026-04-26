@@ -781,7 +781,30 @@ static void LaunchExe(const std::wstring& exe, const std::wstring& args)
     if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, 0,
             nullptr, dir.empty() ? nullptr : dir.c_str(), &si, &pi)) {
         CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+        return;
     }
+    DWORD err = GetLastError();
+    // ERROR_ELEVATION_REQUIRED (740): exe has requireAdministrator manifest — retry via ShellExecuteEx which triggers UAC
+    if (err == ERROR_ELEVATION_REQUIRED) {
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(sei);
+        sei.fMask  = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"runas";
+        sei.lpFile = exe.c_str();
+        sei.lpParameters = args.empty() ? nullptr : args.c_str();
+        sei.lpDirectory  = dir.empty() ? nullptr : dir.c_str();
+        sei.nShow  = SW_SHOWNORMAL;
+        if (ShellExecuteExW(&sei)) {
+            if (sei.hProcess) CloseHandle(sei.hProcess);
+            return;
+        }
+        err = GetLastError();
+    }
+    wchar_t msg[512];
+    swprintf_s(msg, L"Failed to launch:\n%s\n\nError code: %lu\n\n"
+        L"If this keeps happening, try right-clicking the exe and selecting 'Run as administrator'.",
+        exe.c_str(), err);
+    MessageBoxW(g_hwnd, msg, L"Launch Error", MB_OK | MB_ICONERROR);
 }
 
 static void LaunchHermes(const std::wstring& exe)
