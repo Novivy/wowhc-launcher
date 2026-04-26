@@ -15,6 +15,10 @@ if(NOT DEFINED ENV{CI})
   set(ENV{LIB}
       "${_MSVC}/lib/x64;${_WINSDK}/Lib/${_SDKVER}/um/x64;${_WINSDK}/Lib/${_SDKVER}/ucrt/x64"
   )
+  # Set RC/MT with forward-slash paths before project() so CMake doesn't
+  # auto-detect them with backslashes — CMake 3.31 treats \P as invalid escape.
+  set(CMAKE_RC_COMPILER "${_WINSDK}/bin/${_SDKVER}/x64/rc.exe" CACHE FILEPATH "" FORCE)
+  set(CMAKE_MT          "${_WINSDK}/bin/${_SDKVER}/x64/mt.exe" CACHE FILEPATH "" FORCE)
   set(_HAS_LOCAL_PATHS TRUE)
 endif()
 
@@ -23,7 +27,14 @@ project(2026_wowhc_launcher LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(${PROJECT_NAME} WIN32 main.cpp app.rc)
+set(FFMPEG_DIR "${CMAKE_SOURCE_DIR}/third_party/ffmpeg")
+
+add_executable(${PROJECT_NAME} WIN32
+    main.cpp
+    replay_buffer.cpp
+    replay_ui.cpp
+    app.rc
+)
 
 # Static runtime: /MT for Release, /MTd for Debug — no VCRUNTIME DLL dependency
 set_property(TARGET ${PROJECT_NAME} PROPERTY
@@ -55,6 +66,9 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     LAUNCHER_VERSION_STR="${_VER_STR}"
 )
 
+target_include_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/include")
+target_link_directories(${PROJECT_NAME} BEFORE PRIVATE "${FFMPEG_DIR}/lib")
+
 if(_HAS_LOCAL_PATHS)
   target_include_directories(${PROJECT_NAME} PRIVATE
       "${_MSVC}/include"
@@ -81,4 +95,31 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ole32
     uuid
     gdiplus
+    d3d11
+    dxgi
+    avcodec
+    avformat
+    avutil
+    swscale
+    swresample
+    delayimp
+)
+
+# Delay-load FFmpeg DLLs so the launcher can start and auto-bootstrap them
+# if they are missing (new install or after a bare-EXE self-update).
+target_link_options(${PROJECT_NAME} PRIVATE
+    /DELAYLOAD:avcodec-62.dll
+    /DELAYLOAD:avformat-62.dll
+    /DELAYLOAD:avutil-60.dll
+    /DELAYLOAD:swscale-9.dll
+    /DELAYLOAD:swresample-6.dll
+)
+
+# Copy FFmpeg DLLs next to the built EXE
+file(GLOB FFMPEG_DLLS "${FFMPEG_DIR}/bin/*.dll")
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${FFMPEG_DLLS}
+        $<TARGET_FILE_DIR:${PROJECT_NAME}>
+    COMMENT "Copying FFmpeg DLLs to output directory"
 )

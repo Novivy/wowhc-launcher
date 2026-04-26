@@ -34,6 +34,9 @@
 #pragma comment(lib, "version.lib")
 #pragma comment(lib, "ws2_32.lib")
 
+#include "replay_buffer.h"
+#include "replay_ui.h"
+
 // ── Build-time config ──────────────────────────────────────────────────────────
 static constexpr wchar_t CLIENT_DOWNLOAD_URL[] =
     L"https://client.wow-hc.com/1.14.2/WOW-1.14.2.zip";
@@ -75,7 +78,12 @@ enum : UINT {
     ID_LINK_WEBSITE  = 107,
     ID_BTN_OPEN      = 108,
     ID_LINK_ADDONS   = 109,
-    ID_TIMER_UPDATE  = 200,
+    ID_BTN_RECORD        = 110,
+    ID_STATIC_RB_STATUS  = 111,
+    ID_BTN_SAVE_REPLAY      = 112,
+    ID_BTN_VIEW_VIDEOS      = 113,
+    ID_BTN_RECORD_SETTINGS  = 114,
+    ID_TIMER_UPDATE         = 200,
 };
 
 #define WM_WORKER_STATUS    (WM_APP + 1)  // wParam = WorkerStatus
@@ -172,7 +180,17 @@ static bool g_openHover     = false;
 static bool g_transferHover = false;
 static bool g_linkHover     = false;
 static bool g_addonsHover   = false;
-static bool g_freshInstall  = false;
+static bool g_recordHover         = false;
+static bool g_saveReplayHover     = false;
+static bool g_viewVideosHover     = false;
+static bool g_recordSettingsHover = false;
+static bool g_freshInstall     = false;
+static HWND  g_hwndRecord          = nullptr;
+static HWND  g_hwndSaveReplay      = nullptr;
+static HWND  g_hwndViewVideos      = nullptr;
+static HWND  g_hwndRecordSettings  = nullptr;
+static HICON g_hIconRecordingLarge = nullptr;
+static HICON g_hIconRecordingSmall = nullptr;
 
 // ── Config helpers ─────────────────────────────────────────────────────────────
 static std::wstring ConfigPath()     { return g_configDir + L"\\launcher.ini"; }
@@ -856,7 +874,7 @@ static void RefreshPlayButton()
     bool ready     = g_playReady.load();
     bool hasPath   = !g_clientPath.empty();
     bool busy      = g_workerBusy.load();
-    SetWindowTextW(g_hwndPlay, installed ? L"PLAY" : L"INSTALL");
+    SetWindowTextW(g_hwndPlay, installed ? L"START GAME" : L"INSTALL");
     bool enable = hasPath && (installed ? ready : !busy);
     EnableWindow(g_hwndPlay, enable ? TRUE : FALSE);
     if (g_hwndBrowse) EnableWindow(g_hwndBrowse, busy ? FALSE : TRUE);
@@ -941,6 +959,24 @@ static std::string FindExeAssetUrl(const std::string& json)
             std::string lower = url;
             std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
             if (lower.rfind(".exe") != std::string::npos) return url;
+        }
+        pos = found + 1;
+    }
+    return {};
+}
+
+static std::string FindFullZipAssetUrl(const std::string& json)
+{
+    size_t pos = 0;
+    while (true) {
+        size_t found = json.find("browser_download_url", pos);
+        if (found == std::string::npos) break;
+        std::string url = JsonString(json.substr(found), "browser_download_url");
+        if (!url.empty()) {
+            std::string lower = url;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            if (lower.find("full") != std::string::npos && lower.rfind(".zip") != std::string::npos)
+                return url;
         }
         pos = found + 1;
     }
@@ -1134,6 +1170,111 @@ static void RunLauncherUpdateCheck()
     }
 
     SendMessageW(g_hwnd, WM_APPLY_SELF_UPD, 0, (LPARAM)(new std::wstring(tmpExe)));
+}
+
+// ── FFmpeg DLL bootstrap ───────────────────────────────────────────────────────
+// Called at startup: if FFmpeg DLLs are missing (new user / post-self-update),
+// downloads WOW-HC-Launcher-Full.zip and extracts only the DLLs next to the EXE.
+// The EXE starts fine without them because they are delay-loaded.
+
+static std::wstring GetExeDir()
+{
+    wchar_t buf[MAX_PATH];
+    GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    std::wstring p(buf);
+    auto pos = p.rfind(L'\\');
+    return (pos != std::wstring::npos) ? p.substr(0, pos) : p;
+}
+
+static bool FFmpegDllsPresent()
+{
+    return GetFileAttributesW((GetExeDir() + L"\\avcodec-62.dll").c_str())
+           != INVALID_FILE_ATTRIBUTES;
+}
+
+static void CheckAndBootstrapFFmpegDlls()
+{
+    if (FFmpegDllsPresent()) return;
+
+    std::wstring exeDir = GetExeDir();
+
+    PostText(L"Downloading FFmpeg libraries (first-time setup)...");
+    PostPct(0);
+
+    // Get the Full ZIP URL from the latest release JSON; fall back to the
+    // predictable /releases/latest/download/ redirect that GitHub provides.
+    std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
+        + LAUNCHER_GH_OWNER + L"/" + LAUNCHER_GH_REPO + L"/releases/latest";
+    std::string json = HttpGet(apiUrl);
+    std::wstring zipUrl;
+    if (!json.empty()) {
+        std::string url = FindFullZipAssetUrl(json);
+        if (!url.empty()) zipUrl = std::wstring(url.begin(), url.end());
+    }
+    if (zipUrl.empty())
+        zipUrl = L"https://github.com/Novivy/wowhc-launcher/releases/latest/download/WOW-HC-Launcher-Full.zip";
+
+    std::wstring tmpZip = TempFile(L"WOW-HC-Launcher-Full.zip");
+    bool ok = HttpDownload(zipUrl, tmpZip, [](DWORD64 dl, DWORD64 tot) {
+        if (tot > 0) PostPct((int)(dl * 85 / tot));
+    });
+    if (!ok) {
+        DeleteFileW(tmpZip.c_str());
+        PostText(L"Failed to download FFmpeg libraries. Replay buffer will be unavailable.");
+        PostPct(0);
+        return;
+    }
+
+    PostText(L"Installing FFmpeg libraries...");
+    PostPct(85);
+
+    // Extract only .dll entries (skip the EXE in the ZIP) to the EXE directory.
+    auto escPS = [](const std::wstring& s) {
+        std::wstring r;
+        for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
+        return r;
+    };
+    std::wstring script =
+        L"Add-Type -AN System.IO.Compression.FileSystem\r\n"
+        L"try {\r\n"
+        L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(tmpZip) + L"')\r\n"
+        L"  foreach($e in $z.Entries){\r\n"
+        L"    if($e.Name -like '*.dll'){\r\n"
+        L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile("
+        L"$e,'" + escPS(exeDir) + L"\\'+$e.Name,$true)\r\n"
+        L"    }\r\n"
+        L"  }\r\n"
+        L"  $z.Dispose()\r\n"
+        L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
+
+    std::wstring scriptPath = TempFile(L"launcher_ffmpeg_install.ps1");
+    if (WritePsScript(scriptPath, script)) {
+        std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \""
+            + scriptPath + L"\"";
+        std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
+
+        STARTUPINFOW si = {}; si.cb = sizeof(si);
+        si.dwFlags     = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi = {};
+        if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+                CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 60000);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+        DeleteFileW(scriptPath.c_str());
+    }
+
+    DeleteFileW(tmpZip.c_str());
+    PostPct(100);
+
+    if (FFmpegDllsPresent())
+        PostText(L"FFmpeg libraries installed.");
+    else
+        PostText(L"FFmpeg install failed. Replay buffer will be unavailable.");
+    Sleep(1500);
+    PostPct(0);
 }
 
 // ── Exe search helpers ────────────────────────────────────────────────────────
@@ -1482,6 +1623,47 @@ static LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 
 static void EnsureDesktopShortcut(bool onlyIfAlreadyExists = false);
 
+// Composite icon: red dot drawn behind the round logo so it peeks through
+// the transparent corners of the circular logo.
+static HICON CreateRecordingIcon(int sz)
+{
+    std::unique_ptr<Gdiplus::Bitmap> logo(LoadPngFromResource(IDR_LOGO_ROUND));
+    if (!logo) return nullptr;
+
+    Gdiplus::Bitmap canvas(sz, sz, PixelFormat32bppARGB);
+
+    // Layer 1: red dot (behind logo layer) via LockBits for correct alpha
+    {
+        Gdiplus::BitmapData bd;
+        Gdiplus::Rect fr(0, 0, sz, sz);
+        canvas.LockBits(&fr, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bd);
+        auto* px = static_cast<DWORD*>(bd.Scan0);
+        float scale = sz / 32.0f;
+        float cx = 27.0f * scale, cy = 27.0f * scale, r = 6.0f * scale;
+        for (int y = 0; y < sz; y++)
+            for (int x = 0; x < sz; x++) {
+                float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+                float dist = sqrtf(dx * dx + dy * dy);
+                float a = std::max(0.0f, std::min(1.0f, r - dist + 0.5f));
+                DWORD av = (DWORD)(a * 255.0f + 0.5f);
+                px[y * sz + x] = (av << 24) | 0x00E03020;
+            }
+        canvas.UnlockBits(&bd);
+    }
+
+    // Layer 2: round logo composited on top (the "icon layer")
+    {
+        Gdiplus::Graphics g(&canvas);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+        g.DrawImage(logo.get(), 0, 0, sz, sz);
+    }
+
+    HICON hIcon = nullptr;
+    canvas.GetHICON(&hIcon);
+    return hIcon;
+}
+
 // ── Window procedure ───────────────────────────────────────────────────────────
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -1494,6 +1676,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_pTaskbar && g_taskbarHasProgress) {
             g_pTaskbar->SetProgressState(g_hwnd, TBPF_NORMAL);
             g_pTaskbar->SetProgressValue(g_hwnd, g_taskbarLastPct, 100);
+        }
+        // Restore recording icon (e.g. after Explorer restart)
+        if (RB_IsRunning()) {
+            if (!g_hIconRecordingLarge) g_hIconRecordingLarge = CreateRecordingIcon(GetSystemMetrics(SM_CXICON));
+            if (!g_hIconRecordingSmall) g_hIconRecordingSmall = CreateRecordingIcon(GetSystemMetrics(SM_CXSMICON));
+            SendMessageW(g_hwnd, WM_SETICON, ICON_BIG,   (LPARAM)g_hIconRecordingLarge);
+            SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hIconRecordingSmall);
         }
         return 0;
     }
@@ -1571,14 +1760,39 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_hwndOpen = CreateWindowExW(0, L"BUTTON", L"Open",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(410), D(268), D(82), D(22), hwnd,
+            D(410), D(268), D(80), D(22), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_OPEN, nullptr, nullptr);
         SF(g_hwndOpen, g_fontNormal);
 
-        // Play/Install — centered, taller primary action button
+        // Record row — Start/Stop + Save + Settings + View Videos, right-aligned x=197-490
+        g_hwndRecord = CreateWindowExW(0, L"BUTTON", L"Start Recording",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            D(197), D(332), D(100), D(26), hwnd,
+            (HMENU)(UINT_PTR)ID_BTN_RECORD, nullptr, nullptr);
+        SF(g_hwndRecord, g_fontNormal);
+
+        g_hwndSaveReplay = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
+            D(303), D(332), D(30), D(26), hwnd,
+            (HMENU)(UINT_PTR)ID_BTN_SAVE_REPLAY, nullptr, nullptr);
+        SF(g_hwndSaveReplay, g_fontNormal);
+
+        g_hwndRecordSettings = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            D(339), D(332), D(30), D(26), hwnd,
+            (HMENU)(UINT_PTR)ID_BTN_RECORD_SETTINGS, nullptr, nullptr);
+        SF(g_hwndRecordSettings, g_fontNormal);
+
+        g_hwndViewVideos = CreateWindowExW(0, L"BUTTON", L"View Videos",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            D(375), D(332), D(115), D(26), hwnd,
+            (HMENU)(UINT_PTR)ID_BTN_VIEW_VIDEOS, nullptr, nullptr);
+        SF(g_hwndViewVideos, g_fontNormal);
+
+        // Play/Install — right-aligned, 1.5× wider primary action button
         g_hwndPlay = CreateWindowExW(0, L"BUTTON", L"INSTALL",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(152), D(320), D(195), D(68), hwnd,
+            D(197), D(364), D(293), D(68), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_PLAY, nullptr, nullptr);
         SF(g_hwndPlay, g_fontPlay);
 
@@ -1586,29 +1800,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hwndTransfer = CreateWindowExW(0, L"BUTTON",
             L"Transfer UI/Macros/Addons/Settings from existing installation",
             WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
-            D(60), D(409), D(400), D(22), hwnd,
+            D(60), D(426), D(400), D(22), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_TRANSFER, nullptr, nullptr);
         SF(g_hwndTransfer, g_fontNormal);
 
         g_hwndLinkAddons = CreateWindowExW(0, L"STATIC", L"Get more Addons",
-            WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_NOTIFY,
-            D(290), D(385), D(200), D(14), hwnd,
+            WS_CHILD | WS_VISIBLE | SS_NOTIFY,
+            D(10), D(418), D(200), D(16), hwnd,
             (HMENU)(UINT_PTR)ID_LINK_ADDONS, nullptr, nullptr);
         SF(g_hwndLinkAddons, g_fontLink);
 
         g_hwndVerAddon = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(365), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+            D(10), D(382), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
         SF(g_hwndVerAddon, g_fontSmall);
 
         g_hwndVerHermes = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(375), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+            D(10), D(392), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
         SF(g_hwndVerHermes, g_fontSmall);
 
         g_hwndVerLauncher = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(385), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+            D(10), D(402), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
         SF(g_hwndVerLauncher, g_fontSmall);
 
 
@@ -1624,7 +1838,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowSubclass(g_hwndBrowse,   BtnSubclassProc, 1, (DWORD_PTR)&g_browseHover);
         SetWindowSubclass(g_hwndOpen,     BtnSubclassProc, 3, (DWORD_PTR)&g_openHover);
         SetWindowSubclass(g_hwndTransfer, BtnSubclassProc, 2, (DWORD_PTR)&g_transferHover);
-        SetWindowSubclass(g_hwndLinkAddons, BtnSubclassProc, 11, (DWORD_PTR)&g_addonsHover);
+        SetWindowSubclass(g_hwndLinkAddons,  BtnSubclassProc, 11, (DWORD_PTR)&g_addonsHover);
+        SetWindowSubclass(g_hwndRecord,         BtnSubclassProc, 12, (DWORD_PTR)&g_recordHover);
+        SetWindowSubclass(g_hwndSaveReplay,     BtnSubclassProc, 13, (DWORD_PTR)&g_saveReplayHover);
+        SetWindowSubclass(g_hwndViewVideos,     BtnSubclassProc, 14, (DWORD_PTR)&g_viewVideosHover);
+        SetWindowSubclass(g_hwndRecordSettings, BtnSubclassProc, 15, (DWORD_PTR)&g_recordSettingsHover);
 
         SetTimer(hwnd, ID_TIMER_UPDATE, 24u * 60u * 60u * 1000u, nullptr);
 
@@ -1636,6 +1854,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowTextW(g_hwndStatus, L"Checking for launcher update...");
         std::thread([]() {
             RunLauncherUpdateCheck();
+            CheckAndBootstrapFFmpegDlls();
             PostMessageW(g_hwnd, WM_STARTUP_CHECK_DONE, 0, 0);
         }).detach();
 
@@ -1709,7 +1928,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg)))) {
                 DWORD opts = 0; pDlg->GetOptions(&opts);
                 pDlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-                pDlg->SetTitle(L"Select your WoW Classic 1.14.2 folder, or an empty folder for a new installation");
+                pDlg->SetTitle(L"Select your WoWClassic.exe folder, or an empty folder for a new installation");
                 if (!g_clientPath.empty()) {
                     IShellItem* pInit = nullptr;
                     if (SUCCEEDED(SHCreateItemFromParsingName(g_clientPath.c_str(), nullptr, IID_PPV_ARGS(&pInit)))) {
@@ -1860,6 +2079,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 std::thread(Worker).detach();
             }
             else if (installed && g_playReady.load()) {
+                if (RB_GetSettings().autoStartOnPlay && !RB_IsRunning())
+                    RB_Start();
                 EnableWindow(g_hwndPlay, FALSE);
                 PostStatus(WS_LAUNCHING);
                 std::wstring hermesExe  = g_hermesExePath;
@@ -1886,6 +2107,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                 }).detach();
             }
+        }
+        else if (id == ID_BTN_RECORD) {
+            if (RB_IsRunning()) {
+                if (RB_GetSettings().promptSaveOnStop) {
+                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?",
+                        L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
+                    if (r == IDCANCEL) break;
+                    if (r == IDYES) { RB_SaveNow(); Sleep(100); }
+                }
+                RB_Stop();
+            } else {
+                RB_Start();
+            }
+        }
+        else if (id == ID_BTN_RECORD_SETTINGS) {
+            ShowReplayWindow(hwnd);
+        }
+        else if (id == ID_BTN_SAVE_REPLAY) {
+            RB_SaveNow();
+        }
+        else if (id == ID_BTN_VIEW_VIDEOS) {
+            std::wstring folder = RB_GetSettings().saveFolder;
+            if (!folder.empty())
+                ShellExecuteW(nullptr, L"explore", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            else
+                MessageBoxW(hwnd,
+                    L"No save folder configured.\nPlease set one in Record Settings.",
+                    L"No Folder Set", MB_OK | MB_ICONINFORMATION);
         }
         else if (id == ID_BTN_TRANSFER) {
             if (g_workerBusy.load()) break;
@@ -1952,6 +2201,49 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     }
+
+    case WM_HOTKEY:
+        if (wp == HOTKEY_ID_RB_STARTSTOP) {
+            if (RB_IsRunning()) {
+                if (RB_GetSettings().promptSaveOnStop) {
+                    HWND dlgOwner = GetReplayWindowHwnd();
+                    if (!dlgOwner) dlgOwner = hwnd;
+                    if (IsIconic(dlgOwner)) ShowWindow(dlgOwner, SW_RESTORE);
+                    SetForegroundWindow(dlgOwner);
+                    int r = MessageBoxW(dlgOwner, L"Save the replay before stopping?",
+                        L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
+                    if (r == IDCANCEL) return 0;
+                    if (r == IDYES) { RB_SaveNow(); Sleep(100); }
+                }
+                RB_Stop();
+            } else {
+                RB_Start();
+            }
+        } else if (wp == HOTKEY_ID_RB_SAVE) {
+            RB_SaveNow();
+        }
+        return 0;
+
+    case WM_RB_STATUS:
+        if (g_hwndRecord) {
+            SetWindowTextW(g_hwndRecord, wp ? L"Stop Recording" : L"Start Recording");
+            InvalidateRect(g_hwndRecord, nullptr, FALSE);
+        }
+        if (g_hwndSaveReplay) EnableWindow(g_hwndSaveReplay, wp ? TRUE : FALSE);
+        if (wp) {
+            if (!g_hIconRecordingLarge) g_hIconRecordingLarge = CreateRecordingIcon(GetSystemMetrics(SM_CXICON));
+            if (!g_hIconRecordingSmall) g_hIconRecordingSmall = CreateRecordingIcon(GetSystemMetrics(SM_CXSMICON));
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)g_hIconRecordingLarge);
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hIconRecordingSmall);
+        } else {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)g_hIconLarge);
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hIconSmall);
+        }
+        return 0;
+
+    case WM_APP + 30:
+        SaveReplaySettings(RB_GetSettings(), ConfigPath());
+        return 0;
 
     case WM_WORKER_STATUS:
     {
@@ -2090,29 +2382,46 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (dis->hwndItem != g_hwndPlay &&
             dis->hwndItem != g_hwndBrowse &&
             dis->hwndItem != g_hwndOpen &&
-            dis->hwndItem != g_hwndTransfer)
+            dis->hwndItem != g_hwndTransfer &&
+            dis->hwndItem != g_hwndRecord &&
+            dis->hwndItem != g_hwndSaveReplay &&
+            dis->hwndItem != g_hwndViewVideos &&
+            dis->hwndItem != g_hwndRecordSettings)
             break;
 
         RECT rc       = dis->rcItem;
         HDC  hdc      = dis->hDC;
         bool pressed  = (dis->itemState & ODS_SELECTED) != 0;
         bool disabled = (dis->itemState & ODS_DISABLED)  != 0;
-        bool isPlay   = (dis->hwndItem == g_hwndPlay);
-        bool hover    = !disabled && (isPlay ? g_playHover :
-                        (dis->hwndItem == g_hwndBrowse) ? g_browseHover :
-                        (dis->hwndItem == g_hwndOpen)   ? g_openHover : g_transferHover);
+        bool isPlay      = (dis->hwndItem == g_hwndPlay);
+        bool isRecord         = (dis->hwndItem == g_hwndRecord);
+        bool isSaveReplay     = (dis->hwndItem == g_hwndSaveReplay);
+        bool isViewVideos     = (dis->hwndItem == g_hwndViewVideos);
+        bool isRecordSettings = (dis->hwndItem == g_hwndRecordSettings);
+        bool isRecording = isRecord && RB_IsRunning();
+        bool hover    = !disabled && (isPlay             ? g_playHover :
+                        isRecord          ? g_recordHover :
+                        isSaveReplay      ? g_saveReplayHover :
+                        isViewVideos      ? g_viewVideosHover :
+                        isRecordSettings  ? g_recordSettingsHover :
+                        (dis->hwndItem == g_hwndBrowse)   ? g_browseHover :
+                        (dis->hwndItem == g_hwndOpen)     ? g_openHover :
+                        (dis->hwndItem == g_hwndTransfer) ? g_transferHover :
+                        false);
 
         COLORREF bg;
-        if (pressed)       bg = RGB(55, 55, 62);
-        else if (hover)    bg = isPlay ? RGB(68, 58, 30) : RGB(58, 58, 66);
-        else               bg = RGB(45, 45, 52);
+        if      (pressed)      bg = RGB(55, 55, 62);
+        else if (isRecording)  bg = hover ? RGB(110, 28, 28) : RGB(90, 18, 18);
+        else if (hover)        bg = isPlay ? RGB(68, 58, 30) : RGB(58, 58, 66);
+        else                   bg = RGB(45, 45, 52);
         COLORREF fg = disabled ? RGB(90,90,95) : CLR_TEXT;
 
         HBRUSH hbr = CreateSolidBrush(bg);
         FillRect(hdc, &rc, hbr);
         DeleteObject(hbr);
 
-        COLORREF borderClr = hover ? (isPlay ? RGB(140,105,20) : RGB(100,100,110)) : RGB(80,80,88);
+        COLORREF borderClr = isRecording ? (hover ? RGB(180, 60, 60) : RGB(150, 40, 40)) :
+                             hover ? (isPlay ? RGB(140,105,20) : RGB(100,100,110)) : RGB(80,80,88);
         HPEN hpen    = CreatePen(PS_SOLID, 1, borderClr);
         HPEN hpenOld = (HPEN)SelectObject(hdc, hpen);
         MoveToEx(hdc, rc.left,    rc.top,      nullptr);
@@ -2127,9 +2436,42 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetTextColor(hdc, fg);
         SelectObject(hdc, isPlay ? g_fontPlay : g_fontNormal);
 
-        wchar_t txt[128] = {};
-        GetWindowTextW(dis->hwndItem, txt, 128);
-        DrawTextW(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (isRecordSettings) {
+            static const wchar_t gearCh[2] = { 0xE713, 0 };
+            HFONT gearFont = CreateFontW(-MulDiv(13, g_dpi, 96), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                                          DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0,
+                                          L"Segoe MDL2 Assets");
+            HFONT oldFont = (HFONT)SelectObject(hdc, gearFont);
+            DrawTextW(hdc, gearCh, 1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(hdc, oldFont);
+            DeleteObject(gearFont);
+        } else if (isSaveReplay) {
+            // Draw save (down-arrow + baseline) icon
+            int cx = (rc.left + rc.right) / 2;
+            int cy = (rc.top + rc.bottom) / 2;
+            HBRUSH ibr = CreateSolidBrush(fg);
+            HPEN   ipn = CreatePen(PS_SOLID, 1, fg);
+            HPEN   opn = (HPEN)SelectObject(hdc, ipn);
+            HBRUSH obr = (HBRUSH)SelectObject(hdc, ibr);
+            // shaft
+            RECT shaft = { cx - 2, cy - 7, cx + 3, cy - 1 };
+            FillRect(hdc, &shaft, ibr);
+            // arrowhead
+            POINT tri[3] = { {cx - 6, cy - 2}, {cx + 7, cy - 2}, {cx, cy + 5} };
+            Polygon(hdc, tri, 3);
+            SelectObject(hdc, opn); DeleteObject(ipn);
+            SelectObject(hdc, obr); DeleteObject(ibr);
+            // baseline
+            HPEN lpn  = CreatePen(PS_SOLID, 2, fg);
+            HPEN olpn = (HPEN)SelectObject(hdc, lpn);
+            MoveToEx(hdc, cx - 7, cy + 7, nullptr);
+            LineTo  (hdc, cx + 8, cy + 7);
+            SelectObject(hdc, olpn); DeleteObject(lpn);
+        } else {
+            wchar_t txt[128] = {};
+            GetWindowTextW(dis->hwndItem, txt, 128);
+            DrawTextW(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
 
         if (dis->itemState & ODS_FOCUS)
             DrawFocusRect(hdc, &rc);
@@ -2182,17 +2524,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
         LONG w = MulDiv(514, g_dpi, 96);
-        LONG h = MulDiv(440, g_dpi, 96);
+        LONG h = MulDiv(483, g_dpi, 96);
         mmi->ptMinTrackSize = {w, h};
         mmi->ptMaxTrackSize = {w, h};
         break;
     }
 
     case WM_DESTROY:
+        RB_Shutdown();
         KillTimer(hwnd, ID_TIMER_UPDATE);
         if (g_pTaskbar) { g_pTaskbar->Release(); g_pTaskbar = nullptr; }
-        if (g_hIconLarge) { DestroyIcon(g_hIconLarge); g_hIconLarge = nullptr; }
-        if (g_hIconSmall) { DestroyIcon(g_hIconSmall); g_hIconSmall = nullptr; }
+        if (g_hIconLarge)          { DestroyIcon(g_hIconLarge);          g_hIconLarge          = nullptr; }
+        if (g_hIconSmall)          { DestroyIcon(g_hIconSmall);          g_hIconSmall          = nullptr; }
+        if (g_hIconRecordingLarge) { DestroyIcon(g_hIconRecordingLarge); g_hIconRecordingLarge = nullptr; }
+        if (g_hIconRecordingSmall) { DestroyIcon(g_hIconRecordingSmall); g_hIconRecordingSmall = nullptr; }
         if (g_fontLink)   { DeleteObject(g_fontLink);  g_fontLink   = nullptr; }
         if (g_fontSmall)  { DeleteObject(g_fontSmall); g_fontSmall  = nullptr; }
         PostQuitMessage(0);
@@ -2328,6 +2673,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     g_configDir = std::wstring(appdata) + L"\\WOWHCLauncher";
     CreateDirectoryW(g_configDir.c_str(), nullptr);
     LoadConfig();
+    ReplaySettings g_replaySettingsInit = LoadReplaySettings(ConfigPath());
+    if (g_replaySettingsInit.saveFolder.empty() && !g_clientPath.empty())
+        g_replaySettingsInit.saveFolder = g_clientPath + L"\\_classic_era_\\Videos";
     EnsureDesktopShortcut(true); // refresh shortcut target to current exe path if it exists
 
     // If a fully-installed client is saved but WowClassic.exe is gone, reset paths so
@@ -2374,7 +2722,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     RegisterClassExW(&wc);
 
     int WND_W = MulDiv(514, g_dpi, 96);
-    int WND_H = MulDiv(440, g_dpi, 96);
+    int WND_H = MulDiv(483, g_dpi, 96);
     int sx = GetSystemMetrics(SM_CXSCREEN);
     int sy = GetSystemMetrics(SM_CYSCREEN);
 
@@ -2382,6 +2730,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
         (sx - WND_W) / 2, (sy - WND_H) / 2, WND_W, WND_H,
         nullptr, nullptr, hInst, nullptr);
+
+    RB_Init(g_hwnd);
+    RB_ApplySettings(g_replaySettingsInit);
+    RB_RegisterHotkeys();
 
     BOOL darkMode = TRUE;
     DwmSetWindowAttribute(g_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));

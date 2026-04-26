@@ -21,6 +21,28 @@ jobs:
         with:
           arch: x64
 
+      - name: Download FFmpeg (GPL shared)
+        run: |
+          New-Item -ItemType Directory -Force -Path third_party | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip" `
+            -OutFile third_party\ffmpeg_download.zip
+          Expand-Archive -Path third_party\ffmpeg_download.zip `
+            -DestinationPath third_party\ffmpeg_extracted
+          $inner = Get-ChildItem third_party\ffmpeg_extracted |
+            Where-Object { $_.PSIsContainer } | Select-Object -First 1
+          Move-Item $inner.FullName third_party\ffmpeg
+          Remove-Item third_party\ffmpeg_download.zip -Force
+          Remove-Item third_party\ffmpeg_extracted -Recurse -Force -ErrorAction SilentlyContinue
+        shell: pwsh
+
+      - name: Generate app.ico from PNG
+        run: |
+          magick "assets\wow-hardcore-logo-round.png" `
+            -define icon:auto-resize=256,64,48,32,16 `
+            "assets\app.ico"
+        shell: pwsh
+
       - name: Configure CMake
         run: |
           cmake -G "Ninja" `
@@ -33,13 +55,24 @@ jobs:
         run: cmake --build build-release --config Release
         shell: pwsh
 
-      - name: Rename artifact
-        run: Copy-Item "build-release\2026_wowhc_launcher.exe" "WOW-HC-Launcher.exe"
+      - name: Package release
+        run: |
+          # Bare EXE for self-update (FindExeAssetUrl scans for .exe)
+          Copy-Item "build-release\2026_wowhc_launcher.exe" "WOW-HC-Launcher.exe"
+
+          # Full ZIP with EXE + FFmpeg DLLs for first-time users
+          New-Item -ItemType Directory -Path release-pkg | Out-Null
+          Copy-Item "build-release\2026_wowhc_launcher.exe" "release-pkg\WOW-HC-Launcher.exe"
+          Copy-Item "build-release\*.dll" "release-pkg\"
+          Compress-Archive -Path "release-pkg\*" -DestinationPath "WOW-HC-Launcher-Full.zip"
         shell: pwsh
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: WOW-HC-Launcher.exe
+          files: |
+            WOW-HC-Launcher.exe
+            WOW-HC-Launcher-Full.zip
           name: ${{ github.ref_name }}
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

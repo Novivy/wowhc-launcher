@@ -1,0 +1,10 @@
+cmake-build-debug/
+cmake-build-release/
+.idea/
+*.user
+
+# FFmpeg DLLs are large - redistribute alongside the EXE, not in git
+third_party/ffmpeg/bin/
+third_party/ffmpeg_download.zip
+third_party/ffmpeg/doc/
+third_party/ffmpeg/presets/
