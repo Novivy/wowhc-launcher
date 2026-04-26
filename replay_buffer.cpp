@@ -22,6 +22,7 @@ static HMODULE g_ff_avutil   = nullptr;
 static HMODULE g_ff_avcodec  = nullptr;
 static HMODULE g_ff_avformat = nullptr;
 static HMODULE g_ff_swscale  = nullptr;
+static std::wstring g_ffmpegDllDir;
 
 static AVFrame*           (*ff_av_frame_alloc)              ()                                                                     = nullptr;
 static void               (*ff_av_frame_free)               (AVFrame**)                                                            = nullptr;
@@ -96,15 +97,19 @@ static bool LoadFFmpegDynamic()
 {
     if (g_ff_avcodec) return true;
 
-    wchar_t exeDir[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
-    if (wchar_t* sl = wcsrchr(exeDir, L'\\')) sl[1] = L'\0';
+    std::wstring dllDir;
+    if (!g_ffmpegDllDir.empty()) {
+        dllDir = g_ffmpegDllDir;
+        if (dllDir.back() != L'\\') dllDir += L'\\';
+    } else {
+        wchar_t exeDirBuf[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exeDirBuf, MAX_PATH);
+        if (wchar_t* sl = wcsrchr(exeDirBuf, L'\\')) sl[1] = L'\0';
+        dllDir = exeDirBuf;
+    }
 
     auto Load = [&](const wchar_t* dll) -> HMODULE {
-        wchar_t full[MAX_PATH];
-        wcscpy_s(full, exeDir);
-        wcscat_s(full, dll);
-        return LoadLibraryW(full);
+        return LoadLibraryW((dllDir + dll).c_str());
     };
 
     // Load in dependency order: avutil first, then consumers
@@ -194,7 +199,7 @@ static Gdiplus::Bitmap* g_osdBitmap = nullptr;
 static OsdAccent g_osdAccent = OSD_GREEN;
 static std::wstring g_osdText;
 static constexpr UINT OSD_TIMER = 50;
-static constexpr UINT OSD_SHOW_MS = 4250;
+static constexpr UINT OSD_SHOW_MS = 3000;
 
 #define WM_OSD_SHOWTEXT (WM_APP + 50)  // lParam = new wstring*, wParam = isError
 
@@ -965,6 +970,8 @@ void RB_UnregisterHotkeys()
     UnregisterHotKey(g_rbHwnd, HOTKEY_ID_RB_STARTSTOP);
     UnregisterHotKey(g_rbHwnd, HOTKEY_ID_RB_SAVE);
 }
+
+void RB_SetDllDir(const std::wstring& dir) { g_ffmpegDllDir = dir; }
 
 // ── Settings persistence ──────────────────────────────────────────────────────
 void SaveReplaySettings(const ReplaySettings& s, const std::wstring& iniPath)

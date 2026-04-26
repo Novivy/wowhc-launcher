@@ -1186,17 +1186,22 @@ static std::wstring GetExeDir()
     return (pos != std::wstring::npos) ? p.substr(0, pos) : p;
 }
 
-static bool FFmpegDllsPresent()
+static bool FFmpegDllsPresent(const std::wstring& dir)
 {
-    return GetFileAttributesW((GetExeDir() + L"\\avcodec-62.dll").c_str())
+    return GetFileAttributesW((dir + L"\\avcodec-62.dll").c_str())
            != INVALID_FILE_ATTRIBUTES;
 }
 
 static void CheckAndBootstrapFFmpegDlls()
 {
-    if (FFmpegDllsPresent()) return;
+    if (g_clientPath.empty()) return;
 
-    std::wstring exeDir = GetExeDir();
+    std::wstring dllDir = g_clientPath;
+
+    if (FFmpegDllsPresent(dllDir)) {
+        RB_SetDllDir(dllDir);
+        return;
+    }
 
     PostText(L"Downloading FFmpeg libraries (first-time setup)...");
     PostPct(0);
@@ -1238,7 +1243,7 @@ static void CheckAndBootstrapFFmpegDlls()
     PostText(L"Installing FFmpeg libraries...");
     PostPct(85);
 
-    // Extract only .dll entries (skip the EXE in the ZIP) to the EXE directory.
+    // Extract only .dll entries (skip the EXE in the ZIP) to the client folder.
     auto escPS = [](const std::wstring& s) {
         std::wstring r;
         for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
@@ -1251,7 +1256,7 @@ static void CheckAndBootstrapFFmpegDlls()
         L"  foreach($e in $z.Entries){\r\n"
         L"    if($e.Name -like '*.dll'){\r\n"
         L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile("
-        L"$e,'" + escPS(exeDir) + L"\\'+$e.Name,$true)\r\n"
+        L"$e,'" + escPS(dllDir) + L"\\'+$e.Name,$true)\r\n"
         L"    }\r\n"
         L"  }\r\n"
         L"  $z.Dispose()\r\n"
@@ -1279,10 +1284,12 @@ static void CheckAndBootstrapFFmpegDlls()
     DeleteFileW(tmpZip.c_str());
     PostPct(100);
 
-    if (FFmpegDllsPresent())
+    if (FFmpegDllsPresent(dllDir)) {
+        RB_SetDllDir(dllDir);
         PostText(L"FFmpeg libraries installed.");
-    else
+    } else {
         PostText(L"FFmpeg install failed. Replay buffer will be unavailable.");
+    }
     Sleep(1500);
     PostPct(0);
 }
@@ -1463,6 +1470,9 @@ static void Worker()
         PostMessageW(g_hwnd, WM_SET_INSTALL_MODE, 1, 0);
         PostPct(100);
     }
+
+    // ── 1b. Ensure FFmpeg DLLs are present in the client folder ──────────────────
+    CheckAndBootstrapFFmpegDlls();
 
     // ── 2+3. Check HermesProxy and addon updates on every startup ──────────────────────────
     PostStatus(WS_CHECKING);

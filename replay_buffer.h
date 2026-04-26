@@ -45,6 +45,7 @@ void                     RB_ShowOsd(const std::wstring& text, OsdAccent accent =
 #define RB_HK_SAVE_FAILED      0x2
 int                      RB_RegisterHotkeys();  // returns 0 on success, bitmask of failures
 void                     RB_UnregisterHotkeys();
+void                     RB_SetDllDir(const std::wstring& dir); // set directory to load FFmpeg DLLs from
 void                     SaveReplaySettings(const ReplaySettings& s, const std::wstring& iniPath);
 ReplaySettings           LoadReplaySettings(const std::wstring& iniPath);
 std::wstring             FormatHotkey(UINT vk, UINT mods);
