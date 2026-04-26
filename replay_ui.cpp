@@ -43,6 +43,7 @@ enum : UINT {
 
 // ── Module state ──────────────────────────────────────────────────────────────
 static HWND g_ruiHwnd         = nullptr;
+static HWND g_ruiOwner        = nullptr; // main window (WS_OVERLAPPED owner, not retrievable via GetParent)
 static HWND g_ruiComboMonitor = nullptr;
 static HWND g_ruiEditMinutes  = nullptr;
 static HWND g_ruiEditFps      = nullptr;
@@ -284,7 +285,8 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE: {
-        g_ruiHwnd = hwnd;
+        g_ruiHwnd  = hwnd;
+        g_ruiOwner = GetWindow(hwnd, GW_OWNER);
 
         auto MkFont = [](int pt, int w) -> HFONT {
             LOGFONTW lf = {};
@@ -487,7 +489,7 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             RB_SetSettings(s);
             RB_UnregisterHotkeys();
             RegisterHotkeysWithFeedback(hwnd);
-            SendMessageW(GetParent(hwnd), WM_APP + 30, 0, 0);
+            SendMessageW(g_ruiOwner, WM_APP + 30, 0, 0);
 
             if (RB_IsRunning()) {
                 if (RB_GetSettings().promptSaveOnStop) {
@@ -576,7 +578,7 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ReplaySettings s = CollectSettings();
             RB_SetSettings(s);
             int hkFail = RB_RegisterHotkeys();
-            SendMessageW(GetParent(hwnd), WM_APP + 30, 0, 0); // save (with cleared VKs if conflict)
+            SendMessageW(g_ruiOwner, WM_APP + 30, 0, 0); // save (with cleared VKs if conflict)
             if (hkFail & RB_HK_STARTSTOP_FAILED) {
                 g_hkStart = { 0, 0, false };
                 UpdateHotkeyEdit(g_ruiEditHkStart, g_hkStart);
@@ -608,7 +610,8 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_ruiFontSmall) { DeleteObject(g_ruiFontSmall); g_ruiFontSmall = nullptr; }
         if (g_ruiBrBg)      { DeleteObject(g_ruiBrBg);      g_ruiBrBg      = nullptr; }
         if (g_ruiBrBg2)     { DeleteObject(g_ruiBrBg2);     g_ruiBrBg2     = nullptr; }
-        g_ruiHwnd = nullptr;
+        g_ruiHwnd  = nullptr;
+        g_ruiOwner = nullptr;
         break;
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
