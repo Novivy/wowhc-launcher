@@ -562,20 +562,6 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 1;
     }
 
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        HPEN hpen    = CreatePen(PS_SOLID, 1, RUI_SEP);
-        HPEN hpenOld = (HPEN)SelectObject(hdc, hpen);
-        int sepY = DU(368);
-        RECT crc; GetClientRect(hwnd, &crc);
-        MoveToEx(hdc, DU(10), sepY, nullptr);
-        LineTo(hdc, crc.right - DU(10), sepY);
-        SelectObject(hdc, hpenOld); DeleteObject(hpen);
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
         LONG w = DU(574);

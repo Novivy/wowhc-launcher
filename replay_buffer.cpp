@@ -5,6 +5,7 @@
 #include <shlobj.h>
 #include <dxgi1_2.h>
 #include <d3d11.h>
+#include <gdiplus.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -189,12 +190,36 @@ static bool LoadFFmpegDynamic()
 static HWND   g_osdHwnd      = nullptr;
 static HFONT  g_osdFont      = nullptr;
 static HFONT  g_osdTitleFont = nullptr;
+static Gdiplus::Bitmap* g_osdBitmap = nullptr;
 static OsdAccent g_osdAccent = OSD_GREEN;
 static std::wstring g_osdText;
 static constexpr UINT OSD_TIMER = 50;
-static constexpr UINT OSD_SHOW_MS = 2500;
+static constexpr UINT OSD_SHOW_MS = 4250;
 
 #define WM_OSD_SHOWTEXT (WM_APP + 50)  // lParam = new wstring*, wParam = isError
+
+// Forward declarations needed by OsdWndProc
+static ReplaySettings g_rbSettings;
+static std::vector<MonitorDesc> g_monitorCache;
+
+static Gdiplus::Bitmap* LoadOsdPng(int resId)
+{
+    HRSRC hRes = FindResourceW(nullptr, MAKEINTRESOURCEW(resId), L"PNG");
+    if (!hRes) return nullptr;
+    HGLOBAL hData = LoadResource(nullptr, hRes);
+    if (!hData) return nullptr;
+    DWORD size = SizeofResource(nullptr, hRes);
+    HGLOBAL hCopy = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!hCopy) return nullptr;
+    memcpy(GlobalLock(hCopy), LockResource(hData), size);
+    GlobalUnlock(hCopy);
+    IStream* pStream = nullptr;
+    CreateStreamOnHGlobal(hCopy, TRUE, &pStream);
+    auto* bmp = Gdiplus::Bitmap::FromStream(pStream);
+    pStream->Release();
+    if (!bmp || bmp->GetLastStatus() != Gdiplus::Ok) { delete bmp; return nullptr; }
+    return bmp;
+}
 
 static LRESULT CALLBACK OsdWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -204,9 +229,20 @@ static LRESULT CALLBACK OsdWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_osdText   = *s;
         g_osdAccent = (OsdAccent)(int)wp;
         delete s;
-        // Reposition to top-right of primary monitor each time it shows
-        int sw = GetSystemMetrics(SM_CXSCREEN);
-        SetWindowPos(hwnd, HWND_TOPMOST, sw - 470, 20, 0, 0,
+        // Position on the configured recording monitor
+        RECT rcMon = { 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+        {
+            int monIdx = g_rbSettings.monitorIndex;
+            if (!g_monitorCache.empty()) {
+                if (monIdx < 0 || monIdx >= (int)g_monitorCache.size()) monIdx = 0;
+                MONITORINFO mi = { sizeof(mi) };
+                if (GetMonitorInfoW(g_monitorCache[monIdx].hmon, &mi))
+                    rcMon = mi.rcMonitor;
+            }
+        }
+        RECT wrc; GetWindowRect(hwnd, &wrc);
+        int ow = wrc.right - wrc.left;
+        SetWindowPos(hwnd, HWND_TOPMOST, rcMon.right - ow - 20, rcMon.top + 20, 0, 0,
                      SWP_NOSIZE | SWP_NOACTIVATE);
         InvalidateRect(hwnd, nullptr, TRUE);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -238,13 +274,33 @@ static LRESULT CALLBACK OsdWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         FillRect(hdc, &accent, hbrAccent);
         DeleteObject(hbrAccent);
 
+        // Vertically center the title+message block with equal top/bottom padding
+        int titleH = 30;
+        int textH  = 22;
+        int gap    = 4;
+        int blockH = titleH + gap + textH;
+        int topY   = rc.top + (rc.bottom - rc.top - blockH) / 2;
+
+        constexpr int ICON_X  = 22;
+        constexpr int ICON_SZ = 28;
+        if (g_osdBitmap) {
+            Gdiplus::Graphics g(hdc);
+            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+            int iy = topY + (titleH - ICON_SZ) / 2;
+            Gdiplus::RectF dst((Gdiplus::REAL)(rc.left + ICON_X), (Gdiplus::REAL)iy,
+                               (Gdiplus::REAL)ICON_SZ, (Gdiplus::REAL)ICON_SZ);
+            g.DrawImage(g_osdBitmap, dst);
+        }
+
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(220, 220, 225));
         if (g_osdTitleFont) SelectObject(hdc, g_osdTitleFont);
-        RECT titleRc = { rc.left + 24, rc.top, rc.right - 16, rc.top + 22 };
+        RECT titleRc = { rc.left + ICON_X + ICON_SZ + 6, topY - 4, rc.right - 16, topY + titleH - 4 };
         DrawTextW(hdc, L"WOW-HC", -1, &titleRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         if (g_osdFont) SelectObject(hdc, g_osdFont);
-        RECT textRc = { rc.left + 24, rc.top + 24, rc.right - 16, rc.bottom };
+        RECT textRc = { rc.left + ICON_X, topY + titleH + gap, rc.right - 16, topY + titleH + gap + textH };
         DrawTextW(hdc, g_osdText.c_str(), -1, &textRc,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         EndPaint(hwnd, &ps);
@@ -289,10 +345,12 @@ static void CreateOsdWindow(HWND hMainWnd)
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         L"WOWHCReplayOSD", nullptr,
         WS_POPUP,
-        0, 0, 450, 80,
+        0, 0, 225, 80,
         hMainWnd, nullptr, GetModuleHandleW(nullptr), nullptr);
 
     SetLayeredWindowAttributes(g_osdHwnd, 0, 235, LWA_ALPHA);
+
+    g_osdBitmap = LoadOsdPng(202);
 }
 
 // ── Stored packet ─────────────────────────────────────────────────────────────
@@ -307,15 +365,12 @@ struct StoredPacket {
 
 // ── Module globals ────────────────────────────────────────────────────────────
 static HWND          g_rbHwnd    = nullptr;
-static ReplaySettings g_rbSettings;
 static std::atomic<bool> g_rbRunning{false};
 static std::atomic<bool> g_rbSaveRequested{false};
 static std::thread   g_rbThread;
 
 static std::deque<StoredPacket> g_packets;
 static std::mutex    g_packetMutex;
-
-static std::vector<MonitorDesc> g_monitorCache;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static std::wstring DefaultVideosFolder()
@@ -434,7 +489,7 @@ static void DoSave(std::deque<StoredPacket> pkts, AVRational timeBase,
     avformat_free_context(fmtCtx);
     avcodec_parameters_free(&codecpar);
 
-    RB_ShowOsd(L"Replay saved!");
+    RB_ShowOsd(L"Last " + std::to_wstring(g_rbSettings.minutes) + L" minutes of gameplay saved to disk");
 }
 
 // ── Encoder auto-detect ───────────────────────────────────────────────────────
@@ -603,7 +658,7 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     DWORD64 lastFrameTick = 0;
     int64_t framePts      = 0;
 
-    RB_ShowOsd(L"● Recording started", OSD_RED);
+    RB_ShowOsd(L"Recording Started", OSD_RED);
     PostMessageW(g_rbHwnd, WM_RB_STATUS, 1, 0);
 
     while (g_rbRunning.load()) {
@@ -727,7 +782,7 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     d3dDevice->Release();
 
     PostMessageW(g_rbHwnd, WM_RB_STATUS, 0, 0);
-    RB_ShowOsd(L"■ Recording stopped", OSD_ORANGE);
+    RB_ShowOsd(L"Recording Stopped", OSD_ORANGE);
     g_rbRunning = false;
 }
 
@@ -813,7 +868,7 @@ bool RB_Start()
     if (g_osdHwnd) {
         MONITORINFO mi = { sizeof(mi) };
         GetMonitorInfoW(monitors[idx].hmon, &mi);
-        int w = 900, h = 138;
+        int w = 450, h = 80;
         int x = mi.rcMonitor.right  - w - 20;
         int y = mi.rcMonitor.top + 20;
         SetWindowPos(g_osdHwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
