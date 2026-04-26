@@ -39,6 +39,7 @@ enum : UINT {
     RID_BTN_SAVENOW    = 310,
     RID_STATIC_STATUS  = 311,
     RID_TIMER_POLL     = 312,
+    RID_BTN_CLOSE      = 316,
 };
 
 // ── Module state ──────────────────────────────────────────────────────────────
@@ -55,6 +56,7 @@ static HWND g_ruiEditHkStart     = nullptr;
 static HWND g_ruiEditHkSave   = nullptr;
 static HWND g_ruiBtnStartStop = nullptr;
 static HWND g_ruiBtnSave      = nullptr;
+static HWND g_ruiBtnClose     = nullptr;
 static HWND g_ruiStatus       = nullptr;
 
 static HFONT g_ruiFontNorm  = nullptr;
@@ -67,6 +69,7 @@ static bool g_ruiHkStartHover  = false;
 static bool g_ruiHkSaveHover   = false;
 static bool g_ruiBtnSSHover    = false;
 static bool g_ruiBtnSvHover    = false;
+static bool g_ruiBtnCloseHover = false;
 static bool g_ruiBtnFolderHover= false;
 
 // Hotkey capture state
@@ -426,6 +429,12 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             (HMENU)(UINT_PTR)RID_BTN_SAVENOW, nullptr, nullptr);
         SF(g_ruiBtnSave, g_ruiFontBold);
 
+        g_ruiBtnClose = CreateWindowExW(0, L"BUTTON", L"Save && Close",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            D(384), D(462), D(160), D(36), hwnd,
+            (HMENU)(UINT_PTR)RID_BTN_CLOSE, nullptr, nullptr);
+        SF(g_ruiBtnClose, g_ruiFontBold);
+
         g_ruiStatus = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
             D(14), D(522), D(432), D(18), hwnd,
@@ -434,6 +443,7 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         SetWindowSubclass(g_ruiBtnStartStop, BtnSubRui, 30, (DWORD_PTR)&g_ruiBtnSSHover);
         SetWindowSubclass(g_ruiBtnSave,      BtnSubRui, 31, (DWORD_PTR)&g_ruiBtnSvHover);
+        SetWindowSubclass(g_ruiBtnClose,     BtnSubRui, 33, (DWORD_PTR)&g_ruiBtnCloseHover);
         SetWindowSubclass(g_ruiBtnFolder,    BtnSubRui, 32, (DWORD_PTR)&g_ruiBtnFolderHover);
 
         SetTimer(hwnd, RID_TIMER_POLL, 400, nullptr);
@@ -513,6 +523,10 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             RB_SaveNow();
             break;
         }
+        if (id == RID_BTN_CLOSE) {
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+            break;
+        }
         break;
     }
 
@@ -522,6 +536,8 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             DrawDarkButton(dis, g_ruiBtnSSHover, true);
         else if (dis->hwndItem == g_ruiBtnSave)
             DrawDarkButton(dis, g_ruiBtnSvHover, false);
+        else if (dis->hwndItem == g_ruiBtnClose)
+            DrawDarkButton(dis, g_ruiBtnCloseHover, false);
         else if (dis->hwndItem == g_ruiBtnFolder)
             DrawDarkButton(dis, g_ruiBtnFolderHover, false);
         else break;
