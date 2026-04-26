@@ -67,7 +67,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/include")
-target_link_directories(${PROJECT_NAME} BEFORE PRIVATE "${FFMPEG_DIR}/lib")
+# FFmpeg libs are loaded dynamically via LoadLibrary; no import libs needed
 
 if(_HAS_LOCAL_PATHS)
   target_include_directories(${PROJECT_NAME} PRIVATE
@@ -97,22 +97,6 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     gdiplus
     d3d11
     dxgi
-    avcodec
-    avformat
-    avutil
-    swscale
-    swresample
-    delayimp
-)
-
-# Delay-load FFmpeg DLLs so the launcher can start and auto-bootstrap them
-# if they are missing (new install or after a bare-EXE self-update).
-target_link_options(${PROJECT_NAME} PRIVATE
-    /DELAYLOAD:avcodec-62.dll
-    /DELAYLOAD:avformat-62.dll
-    /DELAYLOAD:avutil-60.dll
-    /DELAYLOAD:swscale-9.dll
-    /DELAYLOAD:swresample-6.dll
 )
 
 # Copy FFmpeg DLLs next to the built EXE

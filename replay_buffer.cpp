@@ -14,6 +14,164 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+// ── FFmpeg dynamic loading ────────────────────────────────────────────────────
+// Load FFmpeg DLLs via LoadLibrary so the EXE starts without them present.
+// RB_Start() calls LoadFFmpegDynamic() before engaging any FFmpeg code.
+static HMODULE g_ff_avutil   = nullptr;
+static HMODULE g_ff_avcodec  = nullptr;
+static HMODULE g_ff_avformat = nullptr;
+static HMODULE g_ff_swscale  = nullptr;
+
+static AVFrame*           (*ff_av_frame_alloc)              ()                                                                     = nullptr;
+static void               (*ff_av_frame_free)               (AVFrame**)                                                            = nullptr;
+static int                (*ff_av_frame_make_writable)      (AVFrame*)                                                             = nullptr;
+static int                (*ff_av_frame_get_buffer)         (AVFrame*, int)                                                        = nullptr;
+static int                (*ff_av_opt_set)                  (void*, const char*, const char*, int)                                 = nullptr;
+static int                (*ff_av_dict_set)                 (AVDictionary**, const char*, const char*, int)                        = nullptr;
+static void               (*ff_av_dict_free)                (AVDictionary**)                                                       = nullptr;
+static const AVCodec*     (*ff_avcodec_find_encoder_by_name)(const char*)                                                          = nullptr;
+static AVCodecContext*    (*ff_avcodec_alloc_context3)       (const AVCodec*)                                                      = nullptr;
+static int                (*ff_avcodec_open2)               (AVCodecContext*, const AVCodec*, AVDictionary**)                      = nullptr;
+static void               (*ff_avcodec_free_context)        (AVCodecContext**)                                                     = nullptr;
+static AVCodecParameters* (*ff_avcodec_parameters_alloc)    ()                                                                     = nullptr;
+static int                (*ff_avcodec_parameters_from_context)(AVCodecParameters*, const AVCodecContext*)                         = nullptr;
+static int                (*ff_avcodec_parameters_copy)     (AVCodecParameters*, const AVCodecParameters*)                         = nullptr;
+static void               (*ff_avcodec_parameters_free)     (AVCodecParameters**)                                                  = nullptr;
+static int                (*ff_avcodec_send_frame)          (AVCodecContext*, const AVFrame*)                                      = nullptr;
+static int                (*ff_avcodec_receive_packet)      (AVCodecContext*, AVPacket*)                                           = nullptr;
+static AVPacket*          (*ff_av_packet_alloc)             ()                                                                     = nullptr;
+static void               (*ff_av_packet_free)              (AVPacket**)                                                           = nullptr;
+static void               (*ff_av_packet_unref)             (AVPacket*)                                                            = nullptr;
+static int                (*ff_av_new_packet)               (AVPacket*, int)                                                       = nullptr;
+static void               (*ff_av_packet_rescale_ts)        (AVPacket*, AVRational, AVRational)                                    = nullptr;
+static int                (*ff_avformat_alloc_output_context2)(AVFormatContext**, const AVOutputFormat*, const char*, const char*) = nullptr;
+static AVStream*          (*ff_avformat_new_stream)         (AVFormatContext*, const AVCodec*)                                     = nullptr;
+static void               (*ff_avformat_free_context)       (AVFormatContext*)                                                     = nullptr;
+static int                (*ff_avformat_write_header)       (AVFormatContext*, AVDictionary**)                                     = nullptr;
+static int                (*ff_avio_open)                   (AVIOContext**, const char*, int)                                      = nullptr;
+static int                (*ff_avio_closep)                 (AVIOContext**)                                                        = nullptr;
+static int                (*ff_av_write_trailer)            (AVFormatContext*)                                                     = nullptr;
+static int                (*ff_av_interleaved_write_frame)  (AVFormatContext*, AVPacket*)                                          = nullptr;
+static SwsContext*        (*ff_sws_getContext)(int, int, AVPixelFormat, int, int, AVPixelFormat, int, SwsFilter*, SwsFilter*, const double*) = nullptr;
+static void               (*ff_sws_freeContext)(SwsContext*)                                                                       = nullptr;
+static int                (*ff_sws_scale)(SwsContext*, const uint8_t* const*, const int*, int, int, uint8_t* const*, const int*)   = nullptr;
+
+// Redirect FFmpeg function names to pointers (placed after includes so headers see originals)
+#define av_frame_alloc                  ff_av_frame_alloc
+#define av_frame_free                   ff_av_frame_free
+#define av_frame_make_writable          ff_av_frame_make_writable
+#define av_frame_get_buffer             ff_av_frame_get_buffer
+#define av_opt_set                      ff_av_opt_set
+#define av_dict_set                     ff_av_dict_set
+#define av_dict_free                    ff_av_dict_free
+#define avcodec_find_encoder_by_name    ff_avcodec_find_encoder_by_name
+#define avcodec_alloc_context3          ff_avcodec_alloc_context3
+#define avcodec_open2                   ff_avcodec_open2
+#define avcodec_free_context            ff_avcodec_free_context
+#define avcodec_parameters_alloc        ff_avcodec_parameters_alloc
+#define avcodec_parameters_from_context ff_avcodec_parameters_from_context
+#define avcodec_parameters_copy         ff_avcodec_parameters_copy
+#define avcodec_parameters_free         ff_avcodec_parameters_free
+#define avcodec_send_frame              ff_avcodec_send_frame
+#define avcodec_receive_packet          ff_avcodec_receive_packet
+#define av_packet_alloc                 ff_av_packet_alloc
+#define av_packet_free                  ff_av_packet_free
+#define av_packet_unref                 ff_av_packet_unref
+#define av_new_packet                   ff_av_new_packet
+#define av_packet_rescale_ts            ff_av_packet_rescale_ts
+#define avformat_alloc_output_context2  ff_avformat_alloc_output_context2
+#define avformat_new_stream             ff_avformat_new_stream
+#define avformat_free_context           ff_avformat_free_context
+#define avformat_write_header           ff_avformat_write_header
+#define avio_open                       ff_avio_open
+#define avio_closep                     ff_avio_closep
+#define av_write_trailer                ff_av_write_trailer
+#define av_interleaved_write_frame      ff_av_interleaved_write_frame
+#define sws_getContext                  ff_sws_getContext
+#define sws_freeContext                 ff_sws_freeContext
+#define sws_scale                       ff_sws_scale
+
+static bool LoadFFmpegDynamic()
+{
+    if (g_ff_avcodec) return true;
+
+    wchar_t exeDir[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
+    if (wchar_t* sl = wcsrchr(exeDir, L'\\')) sl[1] = L'\0';
+
+    auto Load = [&](const wchar_t* dll) -> HMODULE {
+        wchar_t full[MAX_PATH];
+        wcscpy_s(full, exeDir);
+        wcscat_s(full, dll);
+        return LoadLibraryW(full);
+    };
+
+    // Load in dependency order: avutil first, then consumers
+    HMODULE avutil   = Load(L"avutil-60.dll");
+    HMODULE swres    = Load(L"swresample-6.dll");
+    HMODULE swscale  = Load(L"swscale-9.dll");
+    HMODULE avcodec  = Load(L"avcodec-62.dll");
+    HMODULE avformat = Load(L"avformat-62.dll");
+
+    if (!avutil || !swres || !swscale || !avcodec || !avformat) {
+        if (avformat) FreeLibrary(avformat);
+        if (avcodec)  FreeLibrary(avcodec);
+        if (swscale)  FreeLibrary(swscale);
+        if (swres)    FreeLibrary(swres);
+        if (avutil)   FreeLibrary(avutil);
+        return false;
+    }
+
+    g_ff_avutil   = avutil;
+    g_ff_avcodec  = avcodec;
+    g_ff_avformat = avformat;
+    g_ff_swscale  = swscale;
+
+#define GP(mod, name) ff_##name = (decltype(ff_##name))GetProcAddress(mod, #name)
+    GP(avutil,   av_frame_alloc);             GP(avutil,   av_frame_free);
+    GP(avutil,   av_frame_make_writable);     GP(avutil,   av_frame_get_buffer);
+    GP(avutil,   av_opt_set);                 GP(avutil,   av_dict_set);
+    GP(avutil,   av_dict_free);
+    GP(avcodec,  avcodec_find_encoder_by_name); GP(avcodec, avcodec_alloc_context3);
+    GP(avcodec,  avcodec_open2);              GP(avcodec,  avcodec_free_context);
+    GP(avcodec,  avcodec_parameters_alloc);   GP(avcodec,  avcodec_parameters_from_context);
+    GP(avcodec,  avcodec_parameters_copy);    GP(avcodec,  avcodec_parameters_free);
+    GP(avcodec,  avcodec_send_frame);         GP(avcodec,  avcodec_receive_packet);
+    GP(avcodec,  av_packet_alloc);            GP(avcodec,  av_packet_free);
+    GP(avcodec,  av_packet_unref);            GP(avcodec,  av_new_packet);
+    GP(avcodec,  av_packet_rescale_ts);
+    GP(avformat, avformat_alloc_output_context2); GP(avformat, avformat_new_stream);
+    GP(avformat, avformat_free_context);      GP(avformat, avformat_write_header);
+    GP(avformat, avio_open);                  GP(avformat, avio_closep);
+    GP(avformat, av_write_trailer);           GP(avformat, av_interleaved_write_frame);
+    GP(swscale,  sws_getContext);             GP(swscale,  sws_freeContext);
+    GP(swscale,  sws_scale);
+#undef GP
+
+    if (!ff_av_frame_alloc || !ff_av_frame_free || !ff_av_frame_make_writable ||
+        !ff_av_frame_get_buffer || !ff_av_opt_set || !ff_av_dict_set || !ff_av_dict_free ||
+        !ff_avcodec_find_encoder_by_name || !ff_avcodec_alloc_context3 || !ff_avcodec_open2 ||
+        !ff_avcodec_free_context || !ff_avcodec_parameters_alloc ||
+        !ff_avcodec_parameters_from_context || !ff_avcodec_parameters_copy ||
+        !ff_avcodec_parameters_free || !ff_avcodec_send_frame || !ff_avcodec_receive_packet ||
+        !ff_av_packet_alloc || !ff_av_packet_free || !ff_av_packet_unref ||
+        !ff_av_new_packet || !ff_av_packet_rescale_ts ||
+        !ff_avformat_alloc_output_context2 || !ff_avformat_new_stream ||
+        !ff_avformat_free_context || !ff_avformat_write_header ||
+        !ff_avio_open || !ff_avio_closep || !ff_av_write_trailer || !ff_av_interleaved_write_frame ||
+        !ff_sws_getContext || !ff_sws_freeContext || !ff_sws_scale)
+    {
+        FreeLibrary(g_ff_avformat); g_ff_avformat = nullptr;
+        FreeLibrary(g_ff_avcodec);  g_ff_avcodec  = nullptr;
+        FreeLibrary(g_ff_swscale);  g_ff_swscale  = nullptr;
+        FreeLibrary(g_ff_avutil);   g_ff_avutil   = nullptr;
+        FreeLibrary(swres);
+        return false;
+    }
+
+    return true;
+}
+
 #include <string>
 #include <vector>
 #include <deque>
@@ -634,6 +792,11 @@ std::vector<MonitorDesc> RB_EnumMonitors()
 bool RB_Start()
 {
     if (g_rbRunning.load()) return true;
+
+    if (!LoadFFmpegDynamic()) {
+        RB_ShowOsd(L"Recording DLLs not ready yet — download in progress.", OSD_ORANGE);
+        return false;
+    }
 
     auto monitors = RB_EnumMonitors();
     int idx = g_rbSettings.monitorIndex;
