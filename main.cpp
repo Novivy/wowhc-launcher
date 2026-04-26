@@ -2155,6 +2155,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 std::wstring arctiumExe = g_arctiumExePath;
                 std::thread([hermesExe, arctiumExe]() {
 
+                    if (IsProcessRunning(L"WowClassic.exe")) {
+                        KillProcess(L"WowClassic.exe");
+                        Sleep(500);
+                    }
                     if (IsProcessRunning(L"HermesProxy.exe")) {
                         KillProcess(L"HermesProxy.exe");
                         Sleep(500);
