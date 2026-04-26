@@ -1201,18 +1201,28 @@ static void CheckAndBootstrapFFmpegDlls()
     PostText(L"Downloading FFmpeg libraries (first-time setup)...");
     PostPct(0);
 
-    // Get the Full ZIP URL from the latest release JSON; fall back to the
-    // predictable /releases/latest/download/ redirect that GitHub provides.
-    std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
-        + LAUNCHER_GH_OWNER + L"/" + LAUNCHER_GH_REPO + L"/releases/latest";
-    std::string json = HttpGet(apiUrl);
+    // Query the release that shipped this exact EXE version first so pre-release
+    // tags work too (/releases/latest only returns non-prerelease).
+    const char* verA = LAUNCHER_VERSION_STR;
+    std::wstring verW(verA, verA + strlen(verA));
+    std::wstring repoBase = std::wstring(L"https://api.github.com/repos/")
+        + LAUNCHER_GH_OWNER + L"/" + LAUNCHER_GH_REPO;
+    std::wstring apiUrls[] = {
+        repoBase + L"/releases/tags/" + verW,
+        repoBase + L"/releases/latest"
+    };
     std::wstring zipUrl;
-    if (!json.empty()) {
-        std::string url = FindFullZipAssetUrl(json);
-        if (!url.empty()) zipUrl = std::wstring(url.begin(), url.end());
+    for (const auto& apiUrl : apiUrls) {
+        std::string json = HttpGet(apiUrl);
+        if (!json.empty()) {
+            std::string url = FindFullZipAssetUrl(json);
+            if (!url.empty()) { zipUrl = std::wstring(url.begin(), url.end()); break; }
+        }
     }
     if (zipUrl.empty())
-        zipUrl = L"https://github.com/Novivy/wowhc-launcher/releases/latest/download/WOW-HC-Launcher-Full.zip";
+        zipUrl = L"https://github.com/" + std::wstring(LAUNCHER_GH_OWNER) + L"/"
+               + std::wstring(LAUNCHER_GH_REPO) + L"/releases/download/" + verW
+               + L"/WOW-HC-Launcher-Full.zip";
 
     std::wstring tmpZip = TempFile(L"WOW-HC-Launcher-Full.zip");
     bool ok = HttpDownload(zipUrl, tmpZip, [](DWORD64 dl, DWORD64 tot) {
