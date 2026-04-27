@@ -9,6 +9,7 @@
 #include <shlwapi.h>
 #include <gdiplus.h>
 #include <dwmapi.h>
+#include <richedit.h>
 
 #include <string>
 #include <vector>
@@ -83,6 +84,7 @@ enum : UINT {
     ID_BTN_SAVE_REPLAY      = 112,
     ID_BTN_VIEW_VIDEOS      = 113,
     ID_BTN_RECORD_SETTINGS  = 114,
+    ID_EDIT_CONSOLE         = 115,
     ID_TIMER_UPDATE         = 200,
 };
 
@@ -95,6 +97,8 @@ enum : UINT {
 #define WM_ASK_UPDATE       (WM_APP + 7)  // wParam = UpdateComponent, lParam = new wstring* "remote\nlocal"
 #define WM_APPLY_SELF_UPD   (WM_APP + 8)  // lParam = new wstring* (new exe path)
 #define WM_STARTUP_CHECK_DONE (WM_APP + 9) // startup launcher-update check finished
+#define WM_HERMES_LINE        (WM_APP + 10) // lParam = new std::wstring* (one output line)
+#define WM_HERMES_CLOSED      (WM_APP + 11) // HermesProxy terminated — collapse console
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
@@ -157,6 +161,7 @@ static HICON             g_hIconLarge        = nullptr;
 static HICON             g_hIconSmall        = nullptr;
 static HBRUSH            g_hbrBg             = nullptr;
 static HBRUSH            g_hbrBg2            = nullptr;
+static HBRUSH            g_hbrConsoleBg      = nullptr;
 
 static std::wstring g_installPath;
 static std::wstring g_clientPath;
@@ -191,6 +196,25 @@ static HWND  g_hwndViewVideos      = nullptr;
 static HWND  g_hwndRecordSettings  = nullptr;
 static HICON g_hIconRecordingLarge = nullptr;
 static HICON g_hIconRecordingSmall = nullptr;
+
+static HWND   g_hwndConsole     = nullptr;
+static HFONT  g_fontConsole     = nullptr;
+static HANDLE g_hermesProcess   = nullptr;
+static HANDLE g_hermesPipeRead  = nullptr;
+static bool   g_consoleExpanded = false;
+static int    g_consoleLineCount = 0;
+static HMODULE g_hRichEdit      = nullptr;
+
+// Standard 16-color terminal palette (Windows Console defaults)
+static const COLORREF g_ansiColors[16] = {
+    RGB(12,  12,  12),  RGB(197, 15,  31),  RGB(19,  161, 14),  RGB(193, 156, 0),
+    RGB(0,   55,  218), RGB(136, 23,  152), RGB(58,  150, 221), RGB(204, 204, 204),
+    RGB(118, 118, 118), RGB(231, 72,  86),  RGB(22,  198, 12),  RGB(249, 241, 165),
+    RGB(59,  120, 255), RGB(180, 0,   158), RGB(97,  214, 214), RGB(242, 242, 242),
+};
+
+static constexpr int WND_H_BASE     = 483;
+static constexpr int WND_H_EXPANDED = 570;
 
 // ── Config helpers ─────────────────────────────────────────────────────────────
 static std::wstring ConfigPath()     { return g_configDir + L"\\launcher.ini"; }
@@ -754,6 +778,31 @@ static void KillProcess(const wchar_t* exeName)
     CloseHandle(snap);
 }
 
+// Polls up to timeoutMs for a process named exeName whose parent PID is parentPid.
+// Returns the child PID, or 0 on timeout.
+static DWORD WaitForChildProcess(DWORD parentPid, const wchar_t* exeName, DWORD timeoutMs)
+{
+    for (DWORD elapsed = 0; elapsed < timeoutMs; elapsed += 500) {
+        Sleep(500);
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == INVALID_HANDLE_VALUE) continue;
+        PROCESSENTRY32W pe = {}; pe.dwSize = sizeof(pe);
+        DWORD found = 0;
+        if (Process32FirstW(snap, &pe)) {
+            do {
+                if (_wcsicmp(pe.szExeFile, exeName) == 0 &&
+                    pe.th32ParentProcessID == parentPid) {
+                    found = pe.th32ProcessID;
+                    break;
+                }
+            } while (Process32NextW(snap, &pe));
+        }
+        CloseHandle(snap);
+        if (found) return found;
+    }
+    return 0;
+}
+
 static bool IsPortInUse(int port)
 {
     WSADATA wsa;
@@ -770,7 +819,8 @@ static bool IsPortInUse(int port)
     return inUse;
 }
 
-static void LaunchExe(const std::wstring& exe, const std::wstring& args)
+// Launches exe and returns its process handle (caller must CloseHandle), or nullptr on failure.
+static HANDLE LaunchExeGetHandle(const std::wstring& exe, const std::wstring& args)
 {
     std::wstring cmd = L"\"" + exe + L"\"";
     if (!args.empty()) { cmd += L' '; cmd += args; }
@@ -780,8 +830,8 @@ static void LaunchExe(const std::wstring& exe, const std::wstring& args)
     PROCESS_INFORMATION pi = {};
     if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, 0,
             nullptr, dir.empty() ? nullptr : dir.c_str(), &si, &pi)) {
-        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-        return;
+        CloseHandle(pi.hThread);
+        return pi.hProcess;
     }
     DWORD err = GetLastError();
     // ERROR_ELEVATION_REQUIRED (740): exe has requireAdministrator manifest — retry via ShellExecuteEx which triggers UAC
@@ -795,8 +845,7 @@ static void LaunchExe(const std::wstring& exe, const std::wstring& args)
         sei.lpDirectory  = dir.empty() ? nullptr : dir.c_str();
         sei.nShow  = SW_SHOWNORMAL;
         if (ShellExecuteExW(&sei)) {
-            if (sei.hProcess) CloseHandle(sei.hProcess);
-            return;
+            return sei.hProcess; // may be nullptr; caller handles that
         }
         err = GetLastError();
     }
@@ -805,11 +854,176 @@ static void LaunchExe(const std::wstring& exe, const std::wstring& args)
         L"If this keeps happening, try right-clicking the exe and selecting 'Run as administrator'.",
         exe.c_str(), err);
     MessageBoxW(g_hwnd, msg, L"Launch Error", MB_OK | MB_ICONERROR);
+    return nullptr;
+}
+
+static void LaunchExe(const std::wstring& exe, const std::wstring& args)
+{
+    HANDLE h = LaunchExeGetHandle(exe, args);
+    if (h) CloseHandle(h);
 }
 
 static void LaunchHermes(const std::wstring& exe)
 {
     LaunchExe(exe, L"");
+}
+
+static COLORREF Ansi256ToColor(int idx)
+{
+    if (idx < 16)  return g_ansiColors[idx];
+    if (idx >= 232) { int v = 8 + (idx - 232) * 10; return RGB(v, v, v); }
+    idx -= 16;
+    auto ch = [](int x) -> int { return x ? 55 + x * 40 : 0; };
+    return RGB(ch(idx / 36), ch((idx / 6) % 6), ch(idx % 6));
+}
+
+static void AppendAnsiLine(HWND hwnd, const std::wstring& line)
+{
+    auto setColor = [hwnd](COLORREF c) {
+        CHARFORMAT2W cf = {};
+        cf.cbSize     = sizeof(cf);
+        cf.dwMask     = CFM_COLOR | CFM_EFFECTS;
+        cf.crTextColor = c;
+        cf.dwEffects  = 0;
+        SendMessageW(hwnd, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+    };
+
+    // Prepend newline separator if not the first line
+    LRESULT textLen = SendMessageW(hwnd, WM_GETTEXTLENGTH, 0, 0);
+    SendMessageW(hwnd, EM_SETSEL, textLen, textLen);
+    if (textLen > 0) {
+        setColor(CLR_TEXT);
+        SendMessageW(hwnd, EM_REPLACESEL, FALSE, (LPARAM)L"\n");
+    }
+
+    COLORREF curColor = CLR_TEXT;
+    std::wstring buf;
+    size_t i = 0;
+
+    auto flush = [&]() {
+        if (buf.empty()) return;
+        SendMessageW(hwnd, EM_SETSEL, -1, -1);
+        setColor(curColor);
+        SendMessageW(hwnd, EM_REPLACESEL, FALSE, (LPARAM)buf.c_str());
+        buf.clear();
+    };
+
+    while (i < line.size()) {
+        if (line[i] == L'\x1b' && i + 1 < line.size() && line[i + 1] == L'[') {
+            flush();
+            i += 2;
+            std::wstring params;
+            while (i < line.size() && (iswdigit(line[i]) || line[i] == L';'))
+                params += line[i++];
+            if (i < line.size()) ++i; // skip command letter
+
+            std::vector<int> nums;
+            int cur = 0; bool any = false;
+            for (wchar_t c : params) {
+                if (c == L';') { nums.push_back(any ? cur : 0); cur = 0; any = false; }
+                else           { cur = cur * 10 + (c - L'0'); any = true; }
+            }
+            nums.push_back(any ? cur : 0);
+
+            for (size_t n = 0; n < nums.size(); ++n) {
+                int code = nums[n];
+                if      (code == 0)                curColor = CLR_TEXT;
+                else if (code == 39)               curColor = CLR_TEXT;
+                else if (code >= 30 && code <= 37) curColor = g_ansiColors[code - 30];
+                else if (code >= 90 && code <= 97) curColor = g_ansiColors[code - 90 + 8];
+                else if (code == 38 && n + 1 < nums.size()) {
+                    if (nums[n+1] == 2 && n + 4 < nums.size()) {
+                        curColor = RGB(nums[n+2], nums[n+3], nums[n+4]); n += 4;
+                    } else if (nums[n+1] == 5 && n + 2 < nums.size()) {
+                        curColor = Ansi256ToColor(nums[n+2]); n += 2;
+                    }
+                }
+            }
+        } else {
+            buf += line[i++];
+        }
+    }
+    flush();
+    SendMessageW(hwnd, EM_SCROLLCARET, 0, 0);
+}
+
+static std::string StripAnsi(const std::string& in)
+{
+    std::string out; out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ) {
+        if (in[i] == '\x1b' && i + 1 < in.size() && in[i+1] == '[') {
+            i += 2;
+            while (i < in.size() && !isalpha((unsigned char)in[i])) ++i;
+            if (i < in.size()) ++i;
+        } else { out += in[i++]; }
+    }
+    return out;
+}
+
+static void LaunchHermesWithPipe(const std::wstring& exe)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
+    HANDLE hR = nullptr, hW = nullptr;
+    if (!CreatePipe(&hR, &hW, &sa, 0)) {
+        LaunchExe(exe, L"");
+        return;
+    }
+    SetHandleInformation(hR, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si = {}; si.cb = sizeof(si);
+    si.dwFlags    = STARTF_USESTDHANDLES;
+    si.hStdOutput = hW;
+    si.hStdError  = hW;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+
+    PROCESS_INFORMATION pi = {};
+    std::wstring cmd = L"\"" + exe + L"\"";
+    std::wstring dir = exe.substr(0, exe.rfind(L'\\'));
+    BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr,
+                             TRUE, CREATE_NO_WINDOW, nullptr,
+                             dir.empty() ? nullptr : dir.c_str(), &si, &pi);
+    CloseHandle(hW);
+
+    if (!ok) {
+        CloseHandle(hR);
+        LaunchExe(exe, L"");
+        PostMessageW(g_hwnd, WM_HERMES_LINE, 0,
+            (LPARAM)(new std::wstring(L"[pipe launch failed - started externally]")));
+        return;
+    }
+
+    if (g_hermesProcess)  { CloseHandle(g_hermesProcess); }
+    if (g_hermesPipeRead) { CloseHandle(g_hermesPipeRead); }
+    g_hermesProcess  = pi.hProcess;
+    g_hermesPipeRead = hR;
+    CloseHandle(pi.hThread);
+
+    PostMessageW(g_hwnd, WM_HERMES_LINE, 0,
+        (LPARAM)(new std::wstring(L"--- HermesProxy starting ---")));
+
+    HANDLE hReadCopy = hR;
+    std::thread([hReadCopy]() {
+        char buf[1024]; DWORD nRead;
+        std::string partial;
+        while (ReadFile(hReadCopy, buf, sizeof(buf) - 1, &nRead, nullptr) && nRead > 0) {
+            buf[nRead] = 0;
+            partial += std::string(buf, nRead);
+            size_t pos;
+            while ((pos = partial.find('\n')) != std::string::npos) {
+                std::string line = partial.substr(0, pos);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (!line.empty()) {
+                    int wlen = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, nullptr, 0);
+                    if (wlen > 1) {
+                        auto* ws = new std::wstring(wlen - 1, L'\0');
+                        MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, ws->data(), wlen);
+                        PostMessageW(g_hwnd, WM_HERMES_LINE, 0, (LPARAM)ws);
+                    }
+                }
+                partial = partial.substr(pos + 1);
+            }
+        }
+    }).detach();
 }
 
 // ── Size / speed formatting ────────────────────────────────────────────────────
@@ -1891,7 +2105,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             D(10), D(402), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
         SF(g_hwndVerLauncher, g_fontSmall);
 
-
+        // Console output panel — hidden until HermesProxy starts
+        g_fontConsole = CreateFontW(-MulDiv(11, g_dpi, 96), 0, 0, 0,
+            FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+            FIXED_PITCH | FF_MODERN, L"Consolas");
+        g_hwndConsole = CreateWindowExW(0, L"RICHEDIT50W", L"",
+            WS_CHILD | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_NOHIDESEL,
+            D(6), D(455), D(540), D(200), hwnd,
+            (HMENU)(UINT_PTR)ID_EDIT_CONSOLE, nullptr, nullptr);
+        SendMessageW(g_hwndConsole, EM_SETBKGNDCOLOR, 0, RGB(0, 0, 0));
+        if (g_fontConsole) SendMessageW(g_hwndConsole, WM_SETFONT, (WPARAM)g_fontConsole, TRUE);
+        {
+            CHARFORMAT2W cf = {};
+            cf.cbSize = sizeof(cf);
+            cf.dwMask = CFM_COLOR | CFM_EFFECTS;
+            cf.crTextColor = CLR_TEXT;
+            cf.dwEffects = 0;
+            SendMessageW(g_hwndConsole, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+        }
 
 
 
@@ -1940,6 +2172,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             LineTo  (hdc, MulDiv(510, g_dpi, 96), sepY);
             SelectObject(hdc, hpenOld);
             DeleteObject(hpen);
+        }
+
+        if (g_consoleExpanded && g_hbrConsoleBg) {
+            RECT rc; GetClientRect(hwnd, &rc);
+            rc.top = MulDiv(449, g_dpi, 96);
+            FillRect(hdc, &rc, g_hbrConsoleBg);
         }
 
         if (g_logoBitmap) {
@@ -2172,11 +2410,34 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                         return;
                     }
-                    LaunchHermes(hermesExe);
+                    LaunchHermesWithPipe(hermesExe);
                     Sleep(1500);
-                    LaunchExe(arctiumExe, L"--staticseed --version=ClassicEra");
+                    // Keep Arctium's handle so we know exactly which process we started
+                    // and can find the WowClassic.exe it spawns by parent PID.
+                    HANDLE hArctium = LaunchExeGetHandle(arctiumExe, L"--staticseed --version=ClassicEra");
                     Sleep(2000);
                     PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+
+                    if (hArctium) {
+                        DWORD arctiumPid = GetProcessId(hArctium);
+                        std::thread([hArctium, arctiumPid]() {
+                            // Wait up to 60s for the WowClassic.exe that OUR Arctium spawned.
+                            // Keeping hArctium open prevents PID reuse until we've found the child.
+                            DWORD wowPid = WaitForChildProcess(arctiumPid, L"WowClassic.exe", 60000);
+                            CloseHandle(hArctium);
+                            if (!wowPid) return;
+
+                            HANDLE hWow = OpenProcess(SYNCHRONIZE, FALSE, wowPid);
+                            if (!hWow) return;
+                            WaitForSingleObject(hWow, INFINITE);
+                            CloseHandle(hWow);
+
+                            // The specific WowClassic.exe we tracked has closed — stop HermesProxy.
+                            HANDLE hH = g_hermesProcess;
+                            if (hH) TerminateProcess(hH, 0);
+                            PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                        }).detach();
+                    }
                 }).detach();
             }
         }
@@ -2588,6 +2849,54 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return (LRESULT)g_hbrBg;
     }
 
+    case WM_HERMES_LINE:
+    {
+        auto* ws = reinterpret_cast<std::wstring*>(lp);
+        if (!ws) break;
+
+        if (!g_consoleExpanded) {
+            g_consoleExpanded = true;
+            ShowWindow(g_hwndConsole, SW_SHOW);
+            SetWindowPos(hwnd, nullptr, 0, 0,
+                MulDiv(514,              g_dpi, 96),
+                MulDiv(WND_H_EXPANDED,   g_dpi, 96),
+                SWP_NOMOVE | SWP_NOZORDER);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+
+        ++g_consoleLineCount;
+        if (g_consoleLineCount > 5) {
+            // Delete first line by selecting up to the start of line 1
+            LRESULT line1 = SendMessageW(g_hwndConsole, EM_LINEINDEX, 1, 0);
+            if (line1 > 0) {
+                SendMessageW(g_hwndConsole, EM_SETSEL, 0, line1);
+                SendMessageW(g_hwndConsole, EM_REPLACESEL, FALSE, (LPARAM)L"");
+            }
+            --g_consoleLineCount;
+        }
+
+        AppendAnsiLine(g_hwndConsole, *ws);
+
+        delete ws;
+        break;
+    }
+
+    case WM_HERMES_CLOSED:
+    {
+        if (g_consoleExpanded) {
+            g_consoleExpanded = false;
+            g_consoleLineCount = 0;
+            ShowWindow(g_hwndConsole, SW_HIDE);
+            SetWindowTextW(g_hwndConsole, L"");
+            SetWindowPos(hwnd, nullptr, 0, 0,
+                MulDiv(514,          g_dpi, 96),
+                MulDiv(WND_H_BASE,   g_dpi, 96),
+                SWP_NOMOVE | SWP_NOZORDER);
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        break;
+    }
+
     case WM_ERASEBKGND:
     {
         RECT rc; GetClientRect(hwnd, &rc);
@@ -2599,7 +2908,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
         LONG w = MulDiv(514, g_dpi, 96);
-        LONG h = MulDiv(483, g_dpi, 96);
+        LONG h = MulDiv(g_consoleExpanded ? WND_H_EXPANDED : WND_H_BASE, g_dpi, 96);
         mmi->ptMinTrackSize = {w, h};
         mmi->ptMaxTrackSize = {w, h};
         break;
@@ -2608,13 +2917,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         RB_Shutdown();
         KillTimer(hwnd, ID_TIMER_UPDATE);
+        if (g_hermesProcess)  { TerminateProcess(g_hermesProcess, 0); CloseHandle(g_hermesProcess); g_hermesProcess = nullptr; }
+        if (g_hermesPipeRead) { CloseHandle(g_hermesPipeRead); g_hermesPipeRead = nullptr; }
         if (g_pTaskbar) { g_pTaskbar->Release(); g_pTaskbar = nullptr; }
         if (g_hIconLarge)          { DestroyIcon(g_hIconLarge);          g_hIconLarge          = nullptr; }
         if (g_hIconSmall)          { DestroyIcon(g_hIconSmall);          g_hIconSmall          = nullptr; }
         if (g_hIconRecordingLarge) { DestroyIcon(g_hIconRecordingLarge); g_hIconRecordingLarge = nullptr; }
         if (g_hIconRecordingSmall) { DestroyIcon(g_hIconRecordingSmall); g_hIconRecordingSmall = nullptr; }
-        if (g_fontLink)   { DeleteObject(g_fontLink);  g_fontLink   = nullptr; }
-        if (g_fontSmall)  { DeleteObject(g_fontSmall); g_fontSmall  = nullptr; }
+        if (g_fontLink)    { DeleteObject(g_fontLink);    g_fontLink    = nullptr; }
+        if (g_fontSmall)   { DeleteObject(g_fontSmall);   g_fontSmall   = nullptr; }
+        if (g_fontConsole) { DeleteObject(g_fontConsole); g_fontConsole = nullptr; }
         PostQuitMessage(0);
         break;
 
@@ -2743,6 +3055,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
 
+    g_hRichEdit = LoadLibraryW(L"MSFTEDIT.DLL");
+
     wchar_t appdata[MAX_PATH];
     SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata);
     g_configDir = std::wstring(appdata) + L"\\WOWHCLauncher";
@@ -2782,8 +3096,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
         }
     }
 
-    g_hbrBg  = CreateSolidBrush(CLR_BG);
-    g_hbrBg2 = CreateSolidBrush(CLR_BG2);
+    g_hbrBg        = CreateSolidBrush(CLR_BG);
+    g_hbrBg2       = CreateSolidBrush(CLR_BG2);
+    g_hbrConsoleBg = CreateSolidBrush(RGB(0, 0, 0));
 
     WNDCLASSEXW wc = {};
     wc.cbSize        = sizeof(wc);
@@ -2826,8 +3141,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     g_logoBitmap = nullptr;
     if (g_gdiplusToken) Gdiplus::GdiplusShutdown(g_gdiplusToken);
 
-    if (g_hbrBg)  { DeleteObject(g_hbrBg);  g_hbrBg  = nullptr; }
-    if (g_hbrBg2) { DeleteObject(g_hbrBg2); g_hbrBg2 = nullptr; }
+    if (g_hbrBg)        { DeleteObject(g_hbrBg);        g_hbrBg        = nullptr; }
+    if (g_hbrBg2)       { DeleteObject(g_hbrBg2);       g_hbrBg2       = nullptr; }
+    if (g_hbrConsoleBg) { DeleteObject(g_hbrConsoleBg); g_hbrConsoleBg = nullptr; }
+    if (g_hRichEdit)    { FreeLibrary(g_hRichEdit);     g_hRichEdit    = nullptr; }
 
     ReleaseMutex(hMutex);
     CloseHandle(hMutex);
