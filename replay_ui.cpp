@@ -64,6 +64,7 @@ static HFONT g_ruiFontBold  = nullptr;
 static HFONT g_ruiFontSmall = nullptr;
 static HBRUSH g_ruiBrBg     = nullptr;
 static HBRUSH g_ruiBrBg2    = nullptr;
+static UINT   g_ruiCurrentDpi = 96;
 
 static bool g_ruiHkStartHover  = false;
 static bool g_ruiHkSaveHover   = false;
@@ -291,9 +292,10 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_ruiHwnd  = hwnd;
         g_ruiOwner = GetWindow(hwnd, GW_OWNER);
 
+        g_ruiCurrentDpi = GetDpiForWindow(hwnd);
         auto MkFont = [](int pt, int w) -> HFONT {
             LOGFONTW lf = {};
-            lf.lfHeight  = -MulDiv(pt, GetDpiForWindow(GetDesktopWindow()), 72);
+            lf.lfHeight  = -MulDiv(pt, g_ruiCurrentDpi, 72);
             lf.lfWeight  = w;
             lf.lfCharSet = DEFAULT_CHARSET;
             lf.lfQuality = CLEARTYPE_QUALITY;
@@ -306,7 +308,7 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_ruiBrBg  = CreateSolidBrush(RUI_BG);
         g_ruiBrBg2 = CreateSolidBrush(RUI_BG2);
 
-        auto D   = [](int px) { return MulDiv(px, GetDpiForWindow(GetDesktopWindow()), 96); };
+        auto D   = [](int px) { return MulDiv(px, g_ruiCurrentDpi, 96); };
         auto SF  = [](HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); };
         auto Lbl = [&](const wchar_t* t, int x, int y, int w, int h) {
             HWND hl = CreateWindowExW(0, L"STATIC", t,
@@ -582,11 +584,69 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-        LONG w = DU(574);
-        LONG h = DU(552);
+        UINT dpi = GetDpiForWindow(hwnd);
+        LONG w = MulDiv(574, dpi, 96);
+        LONG h = MulDiv(552, dpi, 96);
         mmi->ptMinTrackSize = { w, h };
         mmi->ptMaxTrackSize = { w, h };
         break;
+    }
+
+    case WM_DPICHANGED: {
+        UINT oldDpi = g_ruiCurrentDpi;
+        UINT newDpi = LOWORD(wp);
+        g_ruiCurrentDpi = newDpi;
+
+        // Resize window to the rect Windows suggests
+        RECT* r = reinterpret_cast<RECT*>(lp);
+        SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+
+        // Rescale every child control position/size proportionally
+        struct RD { UINT o, n; };
+        RD rd = { oldDpi, newDpi };
+        EnumChildWindows(hwnd, [](HWND child, LPARAM lp) -> BOOL {
+            auto* d = reinterpret_cast<RD*>(lp);
+            RECT cr; GetWindowRect(child, &cr);
+            POINT pt = { cr.left, cr.top };
+            ScreenToClient(GetParent(child), &pt);
+            int x = MulDiv(pt.x,             d->n, d->o);
+            int y = MulDiv(pt.y,             d->n, d->o);
+            int w = MulDiv(cr.right - cr.left, d->n, d->o);
+            int h = MulDiv(cr.bottom - cr.top, d->n, d->o);
+            SetWindowPos(child, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&rd));
+
+        // Recreate fonts at new DPI
+        auto MkF = [newDpi](int pt, int wt) -> HFONT {
+            LOGFONTW lf = {}; lf.lfHeight = -MulDiv(pt, newDpi, 72); lf.lfWeight = wt;
+            lf.lfCharSet = DEFAULT_CHARSET; lf.lfQuality = CLEARTYPE_QUALITY;
+            wcscpy_s(lf.lfFaceName, L"Segoe UI"); return CreateFontIndirectW(&lf);
+        };
+        HFONT newNorm  = MkF(9, FW_NORMAL);
+        HFONT newBold  = MkF(9, FW_SEMIBOLD);
+        HFONT newSmall = MkF(8, FW_NORMAL);
+
+        // Reassign fonts by matching each control's current font to the right new one
+        struct FD { HFONT oN, oB, oS, nN, nB, nS; };
+        FD fd = { g_ruiFontNorm, g_ruiFontBold, g_ruiFontSmall, newNorm, newBold, newSmall };
+        EnumChildWindows(hwnd, [](HWND child, LPARAM lp) -> BOOL {
+            auto* d = reinterpret_cast<FD*>(lp);
+            HFONT cur = reinterpret_cast<HFONT>(SendMessageW(child, WM_GETFONT, 0, 0));
+            HFONT rep = d->nN;
+            if (cur == d->oB) rep = d->nB;
+            else if (cur == d->oS) rep = d->nS;
+            SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(rep), TRUE);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&fd));
+
+        DeleteObject(g_ruiFontNorm);  g_ruiFontNorm  = newNorm;
+        DeleteObject(g_ruiFontBold);  g_ruiFontBold  = newBold;
+        DeleteObject(g_ruiFontSmall); g_ruiFontSmall = newSmall;
+
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
     }
 
     case WM_CLOSE:
