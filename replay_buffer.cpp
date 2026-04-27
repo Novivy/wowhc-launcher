@@ -23,6 +23,27 @@ static HMODULE g_ff_avcodec  = nullptr;
 static HMODULE g_ff_avformat = nullptr;
 static HMODULE g_ff_swscale  = nullptr;
 static std::wstring g_ffmpegDllDir;
+static std::wstring g_rbLogPath;
+
+static void RbLog(const wchar_t* fmt, ...)
+{
+    if (g_rbLogPath.empty()) return;
+    SYSTEMTIME t; GetLocalTime(&t);
+    wchar_t header[32], body[512];
+    swprintf_s(header, L"[%02d:%02d:%02d] ", t.wHour, t.wMinute, t.wSecond);
+    va_list a; va_start(a, fmt); vswprintf_s(body, fmt, a); va_end(a);
+    std::wstring line = header + std::wstring(body) + L"\r\n";
+    int sz = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (sz <= 1) return;
+    std::string u8(sz - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, u8.data(), sz, nullptr, nullptr);
+    HANDLE hf = CreateFileW(g_rbLogPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD written; WriteFile(hf, u8.c_str(), (DWORD)u8.size(), &written, nullptr);
+        CloseHandle(hf);
+    }
+}
 
 static AVFrame*           (*ff_av_frame_alloc)              ()                                                                     = nullptr;
 static void               (*ff_av_frame_free)               (AVFrame**)                                                            = nullptr;
@@ -107,9 +128,13 @@ static bool LoadFFmpegDynamic()
         if (wchar_t* sl = wcsrchr(exeDirBuf, L'\\')) sl[1] = L'\0';
         dllDir = exeDirBuf;
     }
+    RbLog(L"LoadFFmpeg: searching dir='%s'", dllDir.c_str());
 
     auto Load = [&](const wchar_t* dll) -> HMODULE {
-        return LoadLibraryW((dllDir + dll).c_str());
+        HMODULE h = LoadLibraryW((dllDir + dll).c_str());
+        if (!h) RbLog(L"LoadFFmpeg: FAILED to load %s (error %lu)", dll, GetLastError());
+        else    RbLog(L"LoadFFmpeg: loaded %s", dll);
+        return h;
     };
 
     // Load in dependency order: avutil first, then consumers
@@ -972,6 +997,7 @@ void RB_UnregisterHotkeys()
 }
 
 void RB_SetDllDir(const std::wstring& dir) { g_ffmpegDllDir = dir; }
+void RB_SetLogPath(const std::wstring& path) { g_rbLogPath = path; }
 
 // ── Settings persistence ──────────────────────────────────────────────────────
 void SaveReplaySettings(const ReplaySettings& s, const std::wstring& iniPath)

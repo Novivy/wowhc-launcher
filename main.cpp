@@ -173,6 +173,7 @@ static std::wstring g_clientPath;
 static std::wstring g_hermesExePath;    // full path to HermesProxy.exe
 static std::wstring g_arctiumExePath;   // full path to "Arctium WoW Launcher.exe"
 static std::wstring g_configDir;
+static std::wstring g_logPath;
 
 static std::atomic<bool> g_workerBusy{false};
 static std::atomic<bool> g_playReady{false};
@@ -226,6 +227,26 @@ static constexpr int WND_H_EXPANDED = 570;
 
 // ── Config helpers ─────────────────────────────────────────────────────────────
 static std::wstring ConfigPath()     { return g_configDir + L"\\launcher.ini"; }
+
+static void AppendLog(const wchar_t* fmt, ...)
+{
+    if (g_logPath.empty()) return;
+    SYSTEMTIME t; GetLocalTime(&t);
+    wchar_t header[32], body[1024];
+    swprintf_s(header, L"[%02d:%02d:%02d] ", t.wHour, t.wMinute, t.wSecond);
+    va_list a; va_start(a, fmt); vswprintf_s(body, fmt, a); va_end(a);
+    std::wstring line = header + std::wstring(body) + L"\r\n";
+    int sz = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (sz <= 1) return;
+    std::string u8(sz - 1, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, u8.data(), sz, nullptr, nullptr);
+    HANDLE hf = CreateFileW(g_logPath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD written; WriteFile(hf, u8.c_str(), (DWORD)u8.size(), &written, nullptr);
+        CloseHandle(hf);
+    }
+}
 static std::wstring ClientMarker()   { return g_clientPath + L"\\.launcher_installed"; }
 static std::wstring GetAddonsDir()
 {
@@ -388,7 +409,7 @@ static std::string FindAssetUrl(const std::string& json)
     std::string fallback;
     size_t pos = 0;
     while (true) {
-        size_t found = json.find("browser_download_url", pos);
+        size_t found = json.find("\"browser_download_url\"", pos);
         if (found == std::string::npos) break;
         std::string url = JsonString(json.substr(found), "browser_download_url");
         if (!url.empty()) {
@@ -995,6 +1016,19 @@ static std::string StripAnsi(const std::string& in)
     return out;
 }
 
+static std::wstring StripAnsiW(const std::wstring& in)
+{
+    std::wstring out; out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ) {
+        if (in[i] == L'\x1b' && i + 1 < in.size() && in[i+1] == L'[') {
+            i += 2;
+            while (i < in.size() && !iswalpha(in[i])) ++i;
+            if (i < in.size()) ++i;
+        } else { out += in[i++]; }
+    }
+    return out;
+}
+
 static void LaunchHermesWithPipe(const std::wstring& exe)
 {
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
@@ -1258,6 +1292,7 @@ static std::wstring GetLauncherVersion()
 
 static bool IsDevBuild()
 {
+    return false;
     return strstr(LAUNCHER_VERSION_STR, "-dev") != nullptr;
 }
 
@@ -1266,7 +1301,7 @@ static std::string FindExeAssetUrl(const std::string& json)
 {
     size_t pos = 0;
     while (true) {
-        size_t found = json.find("browser_download_url", pos);
+        size_t found = json.find("\"browser_download_url\"", pos);
         if (found == std::string::npos) break;
         std::string url = JsonString(json.substr(found), "browser_download_url");
         if (!url.empty()) {
@@ -1283,7 +1318,7 @@ static std::string FindFullZipAssetUrl(const std::string& json)
 {
     size_t pos = 0;
     while (true) {
-        size_t found = json.find("browser_download_url", pos);
+        size_t found = json.find("\"browser_download_url\"", pos);
         if (found == std::string::npos) break;
         std::string url = JsonString(json.substr(found), "browser_download_url");
         if (!url.empty()) {
@@ -1514,16 +1549,23 @@ static bool FFmpegDllsPresent(const std::wstring& dir)
 
 static void CheckAndBootstrapFFmpegDlls()
 {
-    if (g_clientPath.empty()) return;
+    AppendLog(L"FFmpeg bootstrap: clientPath='%s'", g_clientPath.c_str());
+    if (g_clientPath.empty()) { AppendLog(L"FFmpeg bootstrap: clientPath empty, skipping"); return; }
 
     std::wstring dllDir = g_clientPath;
 
+    RB_SetDllDir(dllDir); // set dir early so future LoadFFmpegDynamic() calls look in the right place
+
     if (FFmpegDllsPresent(dllDir)) {
-        RB_SetDllDir(dllDir);
+        AppendLog(L"FFmpeg bootstrap: DLLs already present in '%s'", dllDir.c_str());
         return;
     }
+    AppendLog(L"FFmpeg bootstrap: DLLs not present in '%s'", dllDir.c_str());
 
-    if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return;
+    if (IsDevBuild()) {
+        AppendLog(L"FFmpeg bootstrap: dev build, skipping download");
+        PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits.");
+        return;
     }
 
     PostText(L"Downloading FFmpeg libraries (first-time setup)...");
@@ -1544,20 +1586,28 @@ static void CheckAndBootstrapFFmpegDlls()
     std::wstring tmpZip = TempFile(L"WOW-HC-Launcher-Full.zip");
     bool ok = false;
     for (const auto& apiUrl : apiUrls) {
+        AppendLog(L"FFmpeg bootstrap: trying API %s", apiUrl.c_str());
         std::string json = HttpGet(apiUrl);
-        if (json.empty()) continue;
+        if (json.empty()) { AppendLog(L"FFmpeg bootstrap: empty response (404 or network error)"); continue; }
+        AppendLog(L"FFmpeg bootstrap: got API response (%zu bytes)", json.size());
         std::string url = FindFullZipAssetUrl(json);
-        if (url.empty()) continue;
+        if (url.empty()) {
+            AppendLog(L"FFmpeg bootstrap: no *full*.zip asset found in response");
+            continue;
+        }
+        AppendLog(L"FFmpeg bootstrap: found zip asset: %hs", url.c_str());
         std::wstring zipUrl(url.begin(), url.end());
         ok = HttpDownload(zipUrl, tmpZip, [](DWORD64 dl, DWORD64 tot) {
             if (tot > 0) PostPct((int)(dl * 85 / tot));
         });
+        AppendLog(L"FFmpeg bootstrap: download %s", ok ? L"succeeded" : L"failed");
         if (ok) break;
         DeleteFileW(tmpZip.c_str()); // discard partial file before retrying
     }
     if (!ok) {
+        AppendLog(L"FFmpeg bootstrap: all attempts failed");
         DeleteFileW(tmpZip.c_str());
-        PostText(L"Failed to download FFmpeg libraries. Replay buffer will be unavailable.");
+        PostText(L"Failed to download FFmpeg libraries. Click Start Recording to retry.");
         PostPct(0);
         return;
     }
@@ -1607,9 +1657,11 @@ static void CheckAndBootstrapFFmpegDlls()
     PostPct(100);
 
     if (FFmpegDllsPresent(dllDir)) {
+        AppendLog(L"FFmpeg bootstrap: installation succeeded");
         RB_SetDllDir(dllDir);
         PostText(L"FFmpeg libraries installed.");
     } else {
+        AppendLog(L"FFmpeg bootstrap: DLLs still missing after extraction");
         PostText(L"FFmpeg install failed. Replay buffer will be unavailable.");
     }
     Sleep(1500);
@@ -2995,7 +3047,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 RB_Stop();
             } else {
                 if (!EnsureRecordingSaveFolder(hwnd)) break;
-                RB_Start();
+                if (!RB_Start())
+                    std::thread(CheckAndBootstrapFFmpegDlls).detach();
             }
         }
         else if (id == ID_BTN_RECORD_SETTINGS) {
@@ -3109,7 +3162,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 RB_Stop();
             } else {
                 if (!EnsureRecordingSaveFolder(hwnd)) return 0;
-                RB_Start();
+                if (!RB_Start())
+                    std::thread(CheckAndBootstrapFFmpegDlls).detach();
             }
         } else if (wp == HOTKEY_ID_RB_SAVE) {
             RB_SaveNow();
@@ -3429,6 +3483,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             --g_consoleLineCount;
         }
 
+        AppendLog(L"[Hermes] %s", StripAnsiW(*ws).c_str());
         AppendAnsiLine(g_hwndConsole, *ws);
 
         delete ws;
@@ -3436,6 +3491,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_HERMES_CLOSED:
+        AppendLog(L"[Hermes] --- process closed ---");
     {
         if (g_consoleExpanded) {
             g_consoleExpanded = false;
@@ -3634,6 +3690,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata);
     g_configDir = std::wstring(appdata) + L"\\WOWHCLauncher";
     CreateDirectoryW(g_configDir.c_str(), nullptr);
+
+    g_logPath = g_configDir + L"\\launcher.log";
+    { // truncate log at each startup
+        HANDLE hf = CreateFileW(g_logPath.c_str(), GENERIC_WRITE, 0,
+            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
+    }
+    AppendLog(L"=== Launcher started (version %hs) ===", LAUNCHER_VERSION_STR);
+    RB_SetLogPath(g_logPath);
+
     LoadConfig();
     ReplaySettings g_replaySettingsInit = LoadReplaySettings(ConfigPath());
     if (g_replaySettingsInit.saveFolder.empty() && !g_clientPath.empty())
