@@ -3705,12 +3705,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
 
     int WND_W = MulDiv(514, g_dpi, 96);
     int WND_H = MulDiv(483, g_dpi, 96);
-    int sx = GetSystemMetrics(SM_CXSCREEN);
-    int sy = GetSystemMetrics(SM_CYSCREEN);
+    RECT wa = {};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int waW = wa.right - wa.left;
+    int waH = wa.bottom - wa.top;
+    int xpos = wa.left + ((waW > WND_W) ? (waW - WND_W) / 2 : 0);
+    int ypos = wa.top  + ((waH > WND_H) ? (waH - WND_H) / 2 : 0);
 
     g_hwnd = CreateWindowExW(0, L"WOWHCLauncherWnd", APP_NAME,
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        (sx - WND_W) / 2, (sy - WND_H) / 2, WND_W, WND_H,
+        xpos, ypos, WND_W, WND_H,
         nullptr, nullptr, hInst, nullptr);
 
     RB_Init(g_hwnd);
