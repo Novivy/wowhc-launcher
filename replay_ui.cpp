@@ -660,7 +660,8 @@ void ShowReplayWindow(HWND hParent)
     int h = MulDiv(552, dpi, 96);
 
     RECT pr; GetWindowRect(hParent, &pr);
-    int x = pr.left + (pr.right - pr.left - w) / 2;
+    int offset = MulDiv(100, dpi, 96);
+    int x = pr.left + (pr.right - pr.left - w) / 2 + offset;
     int y = pr.top  + (pr.bottom - pr.top - h) / 2;
 
     HWND hwnd = CreateWindowExW(0,

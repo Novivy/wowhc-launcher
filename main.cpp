@@ -43,6 +43,9 @@ static constexpr wchar_t CLIENT_DOWNLOAD_URL[] =
     L"https://client.wow-hc.com/1.14.2/WOW-1.14.2.zip";
    // L"https://dl.wow-hc.com/clients/WOW-Classic-1.14.2.zip";
 
+static constexpr wchar_t CLIENT_112_DOWNLOAD_URL[] =
+    L"https://client.wow-hc.com/1.12.1/WOW-1.12.1.zip";
+
 static constexpr wchar_t APP_NAME[]        = L"WOW-HC Launcher";
 static constexpr wchar_t HERMES_GH_OWNER[] = L"Novivy";
 static constexpr wchar_t HERMES_GH_REPO[]  = L"HermesProxy";
@@ -101,6 +104,8 @@ enum : UINT {
 #define WM_HERMES_CLOSED      (WM_APP + 11) // HermesProxy terminated — collapse console
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
+
+enum ClientType : int { CT_UNKNOWN = 0, CT_114 = 1, CT_112 = 2 };
 
 enum WorkerStatus : int {
     WS_CHECKING = 0,
@@ -190,12 +195,15 @@ static bool g_saveReplayHover     = false;
 static bool g_viewVideosHover     = false;
 static bool g_recordSettingsHover = false;
 static bool g_freshInstall     = false;
+static ClientType g_clientType = CT_UNKNOWN;
+static std::wstring g_wowTweakedExePath;   // full path to Wow_tweaked.exe (1.12.1 only)
+static ClientType g_pendingInstallType    = CT_UNKNOWN; // chosen version before folder pick
+static bool       g_pendingExistingInstall = false;     // true when Browse opened for existing-install flow
 static HWND  g_hwndRecord          = nullptr;
 static HWND  g_hwndSaveReplay      = nullptr;
 static HWND  g_hwndViewVideos      = nullptr;
 static HWND  g_hwndRecordSettings  = nullptr;
-static HICON g_hIconRecordingLarge = nullptr;
-static HICON g_hIconRecordingSmall = nullptr;
+static HICON g_hIconRecordingOverlay = nullptr;
 
 static HWND   g_hwndConsole     = nullptr;
 static HFONT  g_fontConsole     = nullptr;
@@ -219,6 +227,18 @@ static constexpr int WND_H_EXPANDED = 570;
 // ── Config helpers ─────────────────────────────────────────────────────────────
 static std::wstring ConfigPath()     { return g_configDir + L"\\launcher.ini"; }
 static std::wstring ClientMarker()   { return g_clientPath + L"\\.launcher_installed"; }
+static std::wstring GetAddonsDir()
+{
+    if (g_clientType == CT_112) {
+        // Launcher-downloaded ZIPs always have _classic_era_.
+        // Existing flat installs (Wow_tweaked.exe at clientPath root) don't.
+        std::wstring era = g_clientPath + L"\\_classic_era_";
+        if (GetFileAttributesW(era.c_str()) != INVALID_FILE_ATTRIBUTES)
+            return era + L"\\Interface\\AddOns";
+        return g_clientPath + L"\\Interface\\AddOns";
+    }
+    return g_clientPath + L"\\_classic_era_\\Interface\\AddOns";
+}
 
 static void SaveConfig()
 {
@@ -228,6 +248,9 @@ static void SaveConfig()
     WritePrivateProfileStringW(L"Launcher", L"ClientPath",   g_clientPath.c_str(),     ini);
     WritePrivateProfileStringW(L"Launcher", L"HermesExePath", g_hermesExePath.c_str(), ini);
     WritePrivateProfileStringW(L"Launcher", L"ArticulumExePath", g_arctiumExePath.c_str(), ini);
+    wchar_t ctBuf[8]; swprintf_s(ctBuf, L"%d", (int)g_clientType);
+    WritePrivateProfileStringW(L"Launcher", L"ClientType", ctBuf, ini);
+    WritePrivateProfileStringW(L"Launcher", L"WowTweakedExePath", g_wowTweakedExePath.c_str(), ini);
 }
 
 static void LoadConfig()
@@ -244,9 +267,19 @@ static void LoadConfig()
     g_clientPath     = Rd(L"ClientPath");
     g_hermesExePath  = Rd(L"HermesExePath");
     g_arctiumExePath = Rd(L"ArticulumExePath");
+    g_wowTweakedExePath = Rd(L"WowTweakedExePath");
+    {
+        wchar_t ctBuf[8] = {};
+        GetPrivateProfileStringW(L"Launcher", L"ClientType", L"0", ctBuf, 8, ini);
+        int ct = _wtoi(ctBuf);
+        g_clientType = (ct == 1) ? CT_114 : (ct == 2) ? CT_112 : CT_UNKNOWN;
+    }
     // Backward compat: derive ClientPath from old InstallPath-only configs
     if (g_clientPath.empty() && !g_installPath.empty())
         g_clientPath = g_installPath + L"\\client";
+    // Backward compat: assume CT_114 for old configs that have HermesExePath
+    if (g_clientType == CT_UNKNOWN && !g_hermesExePath.empty())
+        g_clientType = CT_114;
 }
 
 // ── EXE version reader ────────────────────────────────────────────────────────
@@ -284,7 +317,7 @@ static std::wstring GetLocalHermesVersion()
 static std::wstring ReadAddonTocVersion()
 {
     if (g_clientPath.empty()) return {};
-    std::wstring tocPath = g_clientPath + L"\\_classic_era_\\Interface\\AddOns\\WOW_HC\\WOW_HC.toc";
+    std::wstring tocPath = GetAddonsDir() + L"\\WOW_HC\\WOW_HC.toc";
     std::wifstream f(tocPath);
     if (!f.is_open()) return {};
     std::wstring line;
@@ -474,7 +507,9 @@ static std::string HttpGet(const std::wstring& url)
                 swprintf_s(msg, L"GitHub API rate limit reached (HTTP %lu).%ls\n\nThe update check will be skipped for now.",
                     statusCode, resetInfo.c_str());
                 MessageBoxW(g_hwnd, msg, L"Update Check", MB_OK | MB_ICONINFORMATION);
-            } else {
+            } else if (statusCode != 404) {
+                // 404 = "not found" is a valid/expected response (e.g. dev-build tag).
+                // Only surface unexpected error codes.
                 swprintf_s(msg, L"Update check failed: GitHub API returned HTTP %lu.", statusCode);
                 PostText(msg);
             }
@@ -1101,7 +1136,8 @@ static void PostText(std::wstring text)
 static void RefreshTransferButton()
 {
     if (!g_hwndTransfer) return;
-    bool enabled = g_clientInstalled.load() && !g_workerBusy.load() && !g_clientPath.empty();
+    bool enabled = g_clientInstalled.load() && !g_workerBusy.load() && !g_clientPath.empty()
+                   && (g_clientType == CT_114);
     EnableWindow(g_hwndTransfer, enabled ? TRUE : FALSE);
 }
 
@@ -1137,10 +1173,16 @@ static void RefreshVersionLabels()
     const char* lv = LAUNCHER_VERSION_STR;
     std::wstring lvW(lv, lv + strlen(lv));
     SetVerLabel(g_hwndVerLauncher, L"Launcher " + lvW);
-    std::wstring hv = GetLocalHermesVersion();
-    SetVerLabel(g_hwndVerHermes, L"HermesProxy " + (hv.empty() ? L"" : hv));
-    std::wstring av = ReadAddonTocVersion();
-    SetVerLabel(g_hwndVerAddon, L"Addon " + (av.empty() ? L"" : av));
+    if (g_clientType == CT_112) {
+        SetVerLabel(g_hwndVerHermes, L"");
+        std::wstring av112 = ReadAddonTocVersion();
+        SetVerLabel(g_hwndVerAddon, L"Addon " + (av112.empty() ? L"" : av112));
+    } else {
+        std::wstring hv = GetLocalHermesVersion();
+        SetVerLabel(g_hwndVerHermes, L"HermesProxy " + (hv.empty() ? L"" : hv));
+        std::wstring av = ReadAddonTocVersion();
+        SetVerLabel(g_hwndVerAddon, L"Addon " + (av.empty() ? L"" : av));
+    }
 }
 
 // ── Recording helpers ─────────────────────────────────────────────────────────
@@ -1152,7 +1194,14 @@ static bool EnsureRecordingSaveFolder(HWND hwnd)
     if (!s.saveFolder.empty()) return true;
 
     if (!g_clientPath.empty()) {
-        s.saveFolder = g_clientPath + L"\\_classic_era_\\Videos";
+        if (g_clientType == CT_112) {
+            std::wstring era = g_clientPath + L"\\_classic_era_";
+            s.saveFolder = (GetFileAttributesW(era.c_str()) != INVALID_FILE_ATTRIBUTES)
+                ? era + L"\\Videos"
+                : g_clientPath + L"\\Videos";
+        } else {
+            s.saveFolder = g_clientPath + L"\\_classic_era_\\Videos";
+        }
         CreateDirectoryW(s.saveFolder.c_str(), nullptr);
         RB_SetSettings(s);
         SaveReplaySettings(s, ConfigPath());
@@ -1205,6 +1254,11 @@ static std::wstring GetLauncherVersion()
 {
     const char* v = LAUNCHER_VERSION_STR;
     return std::wstring(v, v + strlen(v));
+}
+
+static bool IsDevBuild()
+{
+    return strstr(LAUNCHER_VERSION_STR, "-dev") != nullptr;
 }
 
 // ── EXE asset URL (for self-update) ────────────────────────────────────────────
@@ -1268,6 +1322,7 @@ static void ApplyLauncherUpdate(const std::wstring& newExePath)
 // ── Per-component update helpers (callable from worker or timer thread) ─────────
 static void RunHermesUpdateCheck()
 {
+    if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return; }
     std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
         + HERMES_GH_OWNER + L"/" + HERMES_GH_REPO + L"/releases/latest";
     std::string json = HttpGet(apiUrl);
@@ -1341,6 +1396,7 @@ static void RunHermesUpdateCheck()
 
 static void RunAddonUpdateCheck()
 {
+    if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return; }
     std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
         + ADDON_GH_OWNER + L"/" + ADDON_GH_REPO + L"/releases/latest";
     std::string json = HttpGet(apiUrl);
@@ -1370,9 +1426,12 @@ static void RunAddonUpdateCheck()
 
     if (ok) {
         PostStatus(WS_EX_ADDON);
-        std::wstring addonsDir = g_clientPath + L"\\_classic_era_\\Interface\\AddOns";
-        CreateDirectoryW((g_clientPath + L"\\_classic_era_").c_str(), nullptr);
-        CreateDirectoryW((g_clientPath + L"\\_classic_era_\\Interface").c_str(), nullptr);
+        std::wstring addonsDir = GetAddonsDir();
+        // Ensure parent chain exists up to the addons directory
+        std::wstring interfaceDir = addonsDir.substr(0, addonsDir.rfind(L'\\'));
+        std::wstring gameDir      = interfaceDir.substr(0, interfaceDir.rfind(L'\\'));
+        CreateDirectoryW(gameDir.c_str(), nullptr);
+        CreateDirectoryW(interfaceDir.c_str(), nullptr);
         CreateDirectoryW(addonsDir.c_str(), nullptr);
         std::wstring addonDest = addonsDir + L"\\WOW_HC";
         DeleteDirRecursive(addonDest);
@@ -1391,6 +1450,7 @@ static void RunAddonUpdateCheck()
 // Safe to call from any thread. Skips if a worker operation is in progress.
 static void RunLauncherUpdateCheck()
 {
+    if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return; }
     if (g_workerBusy.load()) return;
 
     // Clean up any leftover .old from a previous self-update
@@ -1463,11 +1523,15 @@ static void CheckAndBootstrapFFmpegDlls()
         return;
     }
 
+    if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return;
+    }
+
     PostText(L"Downloading FFmpeg libraries (first-time setup)...");
     PostPct(0);
 
-    // Query the release that shipped this exact EXE version first so pre-release
-    // tags work too (/releases/latest only returns non-prerelease).
+    // Try version-specific release first (so pre-release tags work too), then
+    // fall back to /releases/latest if the tag was deleted or the asset download
+    // fails. Both the API 404 and a failed download trigger the next candidate.
     const char* verA = LAUNCHER_VERSION_STR;
     std::wstring verW(verA, verA + strlen(verA));
     std::wstring repoBase = std::wstring(L"https://api.github.com/repos/")
@@ -1476,23 +1540,21 @@ static void CheckAndBootstrapFFmpegDlls()
         repoBase + L"/releases/tags/" + verW,
         repoBase + L"/releases/latest"
     };
-    std::wstring zipUrl;
-    for (const auto& apiUrl : apiUrls) {
-        std::string json = HttpGet(apiUrl);
-        if (!json.empty()) {
-            std::string url = FindFullZipAssetUrl(json);
-            if (!url.empty()) { zipUrl = std::wstring(url.begin(), url.end()); break; }
-        }
-    }
-    if (zipUrl.empty())
-        zipUrl = L"https://github.com/" + std::wstring(LAUNCHER_GH_OWNER) + L"/"
-               + std::wstring(LAUNCHER_GH_REPO) + L"/releases/download/" + verW
-               + L"/WOW-HC-Launcher-Full.zip";
 
     std::wstring tmpZip = TempFile(L"WOW-HC-Launcher-Full.zip");
-    bool ok = HttpDownload(zipUrl, tmpZip, [](DWORD64 dl, DWORD64 tot) {
-        if (tot > 0) PostPct((int)(dl * 85 / tot));
-    });
+    bool ok = false;
+    for (const auto& apiUrl : apiUrls) {
+        std::string json = HttpGet(apiUrl);
+        if (json.empty()) continue;
+        std::string url = FindFullZipAssetUrl(json);
+        if (url.empty()) continue;
+        std::wstring zipUrl(url.begin(), url.end());
+        ok = HttpDownload(zipUrl, tmpZip, [](DWORD64 dl, DWORD64 tot) {
+            if (tot > 0) PostPct((int)(dl * 85 / tot));
+        });
+        if (ok) break;
+        DeleteFileW(tmpZip.c_str()); // discard partial file before retrying
+    }
     if (!ok) {
         DeleteFileW(tmpZip.c_str());
         PostText(L"Failed to download FFmpeg libraries. Replay buffer will be unavailable.");
@@ -1589,15 +1651,18 @@ static std::wstring FindExeNearby(const std::wstring& clientDir, const wchar_t* 
 struct WowInstallInfo {
     std::wstring wowExePath;
     std::wstring clientDir;
+    ClientType   type;
 };
 
 static bool FindWowInstall(const std::wstring& folder, WowInstallInfo& info, int depth = 2)
 {
+    // ── 1.14.2: WowClassic.exe inside _classic_era_ ───────────────────────────
     // Case 1: folder IS _classic_era_ (WowClassic.exe directly inside)
     {
         std::wstring p = folder + L"\\WowClassic.exe";
         if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
             info.wowExePath = p;
+            info.type = CT_114;
             size_t sep = folder.rfind(L'\\');
             info.clientDir = (sep != std::wstring::npos) ? folder.substr(0, sep) : folder;
             return true;
@@ -1609,6 +1674,7 @@ static bool FindWowInstall(const std::wstring& folder, WowInstallInfo& info, int
         if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
             info.wowExePath = p;
             info.clientDir  = folder;
+            info.type = CT_114;
             return true;
         }
     }
@@ -1618,6 +1684,40 @@ static bool FindWowInstall(const std::wstring& folder, WowInstallInfo& info, int
         if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
             info.wowExePath = p;
             info.clientDir  = folder + L"\\client";
+            info.type = CT_114;
+            return true;
+        }
+    }
+    // ── 1.12.1: Wow_tweaked.exe inside _classic_era_ (same layout as 1.14.2) ──
+    // Case D: Wow_tweaked.exe directly in the selected folder.
+    // clientDir = the folder itself so GetAddonsDir() can probe whether
+    // _classic_era_ is a subfolder (launcher-installed) or not (flat install).
+    {
+        std::wstring p = folder + L"\\Wow_tweaked.exe";
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            info.wowExePath = p;
+            info.clientDir  = folder;
+            info.type = CT_112;
+            return true;
+        }
+    }
+    // Case E: folder is client dir (contains _classic_era_\Wow_tweaked.exe)
+    {
+        std::wstring p = folder + L"\\_classic_era_\\Wow_tweaked.exe";
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            info.wowExePath = p;
+            info.clientDir  = folder;
+            info.type = CT_112;
+            return true;
+        }
+    }
+    // Case F: folder is launcher install root (contains client\_classic_era_\Wow_tweaked.exe)
+    {
+        std::wstring p = folder + L"\\client\\_classic_era_\\Wow_tweaked.exe";
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            info.wowExePath = p;
+            info.clientDir  = folder + L"\\client";
+            info.type = CT_112;
             return true;
         }
     }
@@ -1645,14 +1745,16 @@ static void PeriodicUpdateCheck()
 {
     RunLauncherUpdateCheck();
     if (!g_clientPath.empty()) {
-        RunHermesUpdateCheck();
-        RunAddonUpdateCheck();
-        WriteLastCheckTime();
-        // Refresh exe paths in case an update installed/moved files
-        if (g_hermesExePath.empty() || GetFileAttributesW(g_hermesExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            std::wstring f = FindExeInTree(g_clientPath, L"HermesProxy.exe", 2);
-            if (!f.empty()) { g_hermesExePath = f; SaveConfig(); }
+        if (g_clientType == CT_114) {
+            RunHermesUpdateCheck();
+            // Refresh hermes path in case an update moved it
+            if (g_hermesExePath.empty() || GetFileAttributesW(g_hermesExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                std::wstring f = FindExeInTree(g_clientPath, L"HermesProxy.exe", 2);
+                if (!f.empty()) { g_hermesExePath = f; SaveConfig(); }
+            }
         }
+        RunAddonUpdateCheck(); // addon check runs for both versions
+        WriteLastCheckTime();
     }
     if (g_playReady.load()) { PostStatus(WS_READY); PostPct(100); }
 }
@@ -1667,15 +1769,25 @@ static void Worker()
     bool clientOk = false;
     if (!g_clientPath.empty()) {
         clientOk = GetFileAttributesW(ClientMarker().c_str()) != INVALID_FILE_ATTRIBUTES;
-        if (!clientOk) {
+        if (!clientOk && g_clientType == CT_114) {
             std::wstring arctium = g_clientPath + L"\\Arctium WoW Launcher.exe";
             if (GetFileAttributesW(arctium.c_str()) != INVALID_FILE_ATTRIBUTES)
                 clientOk = true;
         }
-        if (!clientOk) {
+        if (!clientOk && g_clientType == CT_114) {
             std::wstring wowExe = g_clientPath + L"\\_classic_era_\\WowClassic.exe";
             if (GetFileAttributesW(wowExe.c_str()) != INVALID_FILE_ATTRIBUTES)
                 clientOk = true;
+        }
+        if (!clientOk && g_clientType == CT_112) {
+            std::wstring def = g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe";
+            std::wstring probe = (!g_wowTweakedExePath.empty() &&
+                GetFileAttributesW(g_wowTweakedExePath.c_str()) != INVALID_FILE_ATTRIBUTES)
+                ? g_wowTweakedExePath : def;
+            if (GetFileAttributesW(probe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                clientOk = true;
+                if (g_wowTweakedExePath != probe) g_wowTweakedExePath = probe;
+            }
         }
         if (clientOk && GetFileAttributesW(ClientMarker().c_str()) == INVALID_FILE_ATTRIBUTES) {
             HANDLE h = CreateFileW(ClientMarker().c_str(), GENERIC_WRITE, 0,
@@ -1694,7 +1806,8 @@ static void Worker()
         CreateDirectoryW(g_installPath.c_str(), nullptr);
         std::wstring tmpZip = InstallTempFile(L"wowclient_dl.zip");
         DlProgress dlClient{L"Downloading WoW client...", 65};
-        bool ok = HttpDownload(CLIENT_DOWNLOAD_URL, tmpZip,
+        const wchar_t* dlUrl = (g_clientType == CT_112) ? CLIENT_112_DOWNLOAD_URL : CLIENT_DOWNLOAD_URL;
+        bool ok = HttpDownload(dlUrl, tmpZip,
             [&dlClient](DWORD64 dl, DWORD64 tot) { dlClient(dl, tot); });
 
         if (!ok) {
@@ -1725,6 +1838,17 @@ static void Worker()
             nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hm != INVALID_HANDLE_VALUE) CloseHandle(hm);
 
+        // For 1.12.1, locate Wow_tweaked.exe (same structure: _classic_era_\Wow_tweaked.exe)
+        if (g_clientType == CT_112) {
+            std::wstring def = g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe";
+            if (GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES)
+                g_wowTweakedExePath = def;
+            else {
+                std::wstring found = FindExeInTree(g_clientPath, L"Wow_tweaked.exe", 3);
+                if (!found.empty()) g_wowTweakedExePath = found;
+            }
+        }
+
         g_clientInstalled = true;
         g_freshInstall    = true;
         PostMessageW(g_hwnd, WM_SET_INSTALL_MODE, 1, 0);
@@ -1734,47 +1858,74 @@ static void Worker()
     // ── 1b. Ensure FFmpeg DLLs are present in the client folder ──────────────────
     CheckAndBootstrapFFmpegDlls();
 
-    // ── 2+3. Check HermesProxy and addon updates on every startup ──────────────────────────
+    // ── 2+3. Check HermesProxy and addon updates (1.14.2 only) ─────────────────
     PostStatus(WS_CHECKING);
     PostPct(0);
-    RunHermesUpdateCheck();
-    RunAddonUpdateCheck();
+    if (g_clientType == CT_114) {
+        RunHermesUpdateCheck();
+        // Refresh Arctium/Hermes paths for new installs if not yet found
+        if (g_arctiumExePath.empty() || GetFileAttributesW(g_arctiumExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            std::wstring found = FindExeInTree(g_clientPath, L"Arctium WoW Launcher.exe", 2);
+            if (!found.empty()) g_arctiumExePath = found;
+        }
+        if (g_hermesExePath.empty() || GetFileAttributesW(g_hermesExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            std::wstring found = FindExeInTree(g_clientPath, L"HermesProxy.exe", 2);
+            if (!found.empty()) g_hermesExePath = found;
+        }
+    }
+    RunAddonUpdateCheck(); // addon is compatible with both 1.14.2 and 1.12.1
     WriteLastCheckTime();
-
-    // After Hermes update/install: refresh Arctium path for new installs if it wasn't found yet
-    if (g_arctiumExePath.empty() || GetFileAttributesW(g_arctiumExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::wstring found = FindExeInTree(g_clientPath, L"Arctium WoW Launcher.exe", 2);
-        if (!found.empty()) g_arctiumExePath = found;
-    }
-    if (g_hermesExePath.empty() || GetFileAttributesW(g_hermesExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::wstring found = FindExeInTree(g_clientPath, L"HermesProxy.exe", 2);
-        if (!found.empty()) g_hermesExePath = found;
-    }
     SaveConfig();
 
     // ── 4. Verify all required executables are present ───────────────────────────
     g_workerBusy = false;
-    bool hermesOk  = !g_hermesExePath.empty()  &&
-        GetFileAttributesW(g_hermesExePath.c_str())  != INVALID_FILE_ATTRIBUTES;
-    bool arctiumOk = !g_arctiumExePath.empty() &&
-        GetFileAttributesW(g_arctiumExePath.c_str()) != INVALID_FILE_ATTRIBUTES;
-    bool addonOk   = GetFileAttributesW(
-        (g_clientPath + L"\\_classic_era_\\Interface\\AddOns\\WOW_HC").c_str()) != INVALID_FILE_ATTRIBUTES;
 
-    bool allReady = hermesOk && arctiumOk && addonOk;
-
-    if (allReady) {
-        PostStatus(WS_READY);
-        PostPct(100);
+    if (g_clientType == CT_112) {
+        // 1.12.1: only need Wow_tweaked.exe (lives in _classic_era_ same as WowClassic.exe)
+        if (g_wowTweakedExePath.empty() || GetFileAttributesW(g_wowTweakedExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            std::wstring def = g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe";
+            if (GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES)
+                g_wowTweakedExePath = def;
+            else {
+                std::wstring found = FindExeInTree(g_clientPath, L"Wow_tweaked.exe", 3);
+                if (!found.empty()) g_wowTweakedExePath = found;
+            }
+            if (!g_wowTweakedExePath.empty()) SaveConfig();
+        }
+        bool wowOk = !g_wowTweakedExePath.empty() &&
+            GetFileAttributesW(g_wowTweakedExePath.c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (wowOk) {
+            PostStatus(WS_READY);
+            PostPct(100);
+        } else {
+            PostText(L"Missing: Wow_tweaked.exe");
+            PostStatus(WS_ERROR);
+        }
+        PostMessageW(g_hwnd, WM_WORKER_DONE, wowOk ? 1 : 0, 0);
     } else {
-        std::wstring missing;
-        if (!hermesOk)  missing += L"HermesProxy.exe  ";
-        if (!arctiumOk) missing += L"Arctium WoW Launcher.exe  ";
-        if (!addonOk)   missing += L"WOW_HC addon";
-        PostText(L"Missing components: " + missing);
-        PostStatus(WS_ERROR);
+        // 1.14.2: need HermesProxy + Arctium + addon
+        bool hermesOk  = !g_hermesExePath.empty()  &&
+            GetFileAttributesW(g_hermesExePath.c_str())  != INVALID_FILE_ATTRIBUTES;
+        bool arctiumOk = !g_arctiumExePath.empty() &&
+            GetFileAttributesW(g_arctiumExePath.c_str()) != INVALID_FILE_ATTRIBUTES;
+        bool addonOk   = GetFileAttributesW(
+            (GetAddonsDir() + L"\\WOW_HC").c_str()) != INVALID_FILE_ATTRIBUTES;
+
+        bool allReady = hermesOk && arctiumOk && addonOk;
+
+        if (allReady) {
+            PostStatus(WS_READY);
+            PostPct(100);
+        } else {
+            std::wstring missing;
+            if (!hermesOk)  missing += L"HermesProxy.exe  ";
+            if (!arctiumOk) missing += L"Arctium WoW Launcher.exe  ";
+            if (!addonOk)   missing += L"WOW_HC addon";
+            PostText(L"Missing components: " + missing);
+            PostStatus(WS_ERROR);
+        }
+        PostMessageW(g_hwnd, WM_WORKER_DONE, allReady ? 1 : 0, 0);
     }
-    PostMessageW(g_hwnd, WM_WORKER_DONE, allReady ? 1 : 0, 0);
 }
 
 // ── Transfer worker ────────────────────────────────────────────────────────────
@@ -1903,42 +2054,319 @@ static LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 
 static void EnsureDesktopShortcut(bool onlyIfAlreadyExists = false);
 
-// Composite icon: red dot drawn behind the round logo so it peeks through
-// the transparent corners of the circular logo.
-static HICON CreateRecordingIcon(int sz)
+// ── Version picker dialog ──────────────────────────────────────────────────────
+struct VPState { ClientType result; bool done; };
+
+static LRESULT CALLBACK VersionPickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
-    std::unique_ptr<Gdiplus::Bitmap> logo(LoadPngFromResource(IDR_LOGO_ROUND));
-    if (!logo) return nullptr;
+    switch (msg) {
+    case WM_CREATE: {
+        auto D = [hwnd](int px) { return MulDiv(px, GetDpiForWindow(hwnd), 96); };
+        auto SF = [](HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); };
 
+        HWND hDesc = CreateWindowExW(0, L"STATIC",
+            L"Choose which WoW client version to install:",
+            WS_CHILD|WS_VISIBLE, D(14), D(14), D(366), D(18), hwnd,
+            nullptr, nullptr, nullptr);
+        SF(hDesc, g_fontNormal);
+
+        HWND hR1 = CreateWindowExW(0, L"BUTTON",
+            L"Modern 1.14.2",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTORADIOBUTTON|WS_GROUP,
+            D(14), D(54), D(366), D(20), hwnd, (HMENU)1001, nullptr, nullptr);
+        SF(hR1, g_fontNormal);
+        SendMessageW(hR1, BM_SETCHECK, BST_CHECKED, 0);
+
+        HWND hSub1 = CreateWindowExW(0, L"STATIC",
+            L"(recommended)",
+            WS_CHILD|WS_VISIBLE, D(32), D(76), D(352), D(16), hwnd,
+            nullptr, nullptr, nullptr);
+        SF(hSub1, g_fontSmall);
+
+        HWND hR2 = CreateWindowExW(0, L"BUTTON",
+            L"Vanilla 1.12.1",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTORADIOBUTTON,
+            D(14), D(104), D(366), D(20), hwnd, (HMENU)1002, nullptr, nullptr);
+        SF(hR2, g_fontNormal);
+
+        HWND hSub2 = CreateWindowExW(0, L"STATIC",
+            L"",
+            WS_CHILD|WS_VISIBLE, D(32), D(126), D(352), D(16), hwnd,
+            nullptr, nullptr, nullptr);
+        SF(hSub2, g_fontSmall);
+
+        HWND hBack = CreateWindowExW(0, L"BUTTON", L"Back",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,
+            D(107), D(186), D(86), D(26), hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+        SF(hBack, g_fontNormal);
+
+        HWND hOk = CreateWindowExW(0, L"BUTTON", L"Continue",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,
+            D(201), D(186), D(86), D(26), hwnd, (HMENU)IDOK, nullptr, nullptr);
+        SF(hOk, g_fontNormal);
+
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+            (LONG_PTR)((LPCREATESTRUCT)lp)->lpCreateParams);
+        break;
+    }
+    case WM_COMMAND: {
+        VPState* st = (VPState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        WORD id = LOWORD(wp);
+        if (id == IDOK) {
+            HWND hR1 = GetDlgItem(hwnd, 1001);
+            st->result = (SendMessageW(hR1, BM_GETCHECK, 0, 0) == BST_CHECKED) ? CT_114 : CT_112;
+            st->done = true;
+            DestroyWindow(hwnd);
+        } else if (id == IDCANCEL) {
+            st->result = CT_UNKNOWN;
+            st->done = true;
+            DestroyWindow(hwnd);
+        }
+        break;
+    }
+    case WM_DESTROY: {
+        VPState* st = (VPState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        if (st) st->done = true;
+        PostMessageW(g_hwnd, WM_NULL, 0, 0); // wake the nested loop
+        break;
+    }
+    case WM_ERASEBKGND: {
+        RECT rc; GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, g_hbrBg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wp;
+        SetBkColor(hdc, CLR_BG);
+        SetTextColor(hdc, CLR_TEXT);
+        SetBkMode(hdc, TRANSPARENT);
+        return (LRESULT)g_hbrBg;
+    }
+    case WM_CTLCOLORBTN:
+        SetBkColor((HDC)wp, CLR_BG);
+        SetTextColor((HDC)wp, CLR_TEXT);
+        return (LRESULT)g_hbrBg;
+    case WM_SETCURSOR: {
+        wchar_t cls[32] = {};
+        GetClassNameW((HWND)wp, cls, 32);
+        if (wcscmp(cls, L"Button") == 0) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        break;
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static ClientType ShowVersionPickerDialog(HWND hParent)
+{
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = VersionPickerProc;
+        wc.hInstance     = GetModuleHandleW(nullptr);
+        wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = g_hbrBg;
+        wc.lpszClassName = L"WOWHCVersionPicker";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    UINT dpi = GetDpiForWindow(hParent ? hParent : GetDesktopWindow());
+    int w = MulDiv(394, dpi, 96);
+    int h = MulDiv(270, dpi, 96);
+    RECT pr; GetWindowRect(hParent, &pr);
+    int x = pr.left + (pr.right - pr.left - w) / 2;
+    int y = pr.top  + (pr.bottom - pr.top - h) / 2;
+
+    VPState state = { CT_UNKNOWN, false };
+    EnableWindow(hParent, FALSE);
+
+    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WOWHCVersionPicker",
+        L"Choose WoW Client Version",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        x, y, w, h, hParent, nullptr, GetModuleHandleW(nullptr), &state);
+
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG m;
+    while (!state.done && GetMessageW(&m, nullptr, 0, 0)) {
+        if (IsWindow(hwnd) && IsDialogMessageW(hwnd, &m)) continue;
+        TranslateMessage(&m); DispatchMessageW(&m);
+    }
+
+    EnableWindow(hParent, TRUE);
+    SetForegroundWindow(hParent);
+    return state.result;
+}
+
+// ── Install mode picker (New Install vs Existing Install) ─────────────────────
+// Returns true = new install, false = existing install, or -1 (cast to bool via
+// a tri-state int) via the VPState pattern. We reuse VPState: result CT_114 =
+// "new install", CT_112 = "existing install", CT_UNKNOWN = cancelled.
+
+static LRESULT CALLBACK InstallModeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        auto D = [hwnd](int px) { return MulDiv(px, GetDpiForWindow(hwnd), 96); };
+        auto SF = [](HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); };
+
+        HWND hDesc = CreateWindowExW(0, L"STATIC",
+            L"How would you like to get started?",
+            WS_CHILD|WS_VISIBLE, D(14), D(14), D(366), D(18), hwnd,
+            nullptr, nullptr, nullptr);
+        SF(hDesc, g_fontNormal);
+
+        HWND hR1 = CreateWindowExW(0, L"BUTTON",
+            L"New installation  -  Download and Install a fresh client",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTORADIOBUTTON|WS_GROUP,
+            D(14), D(54), D(366), D(20), hwnd, (HMENU)2001, nullptr, nullptr);
+        SF(hR1, g_fontNormal);
+        SendMessageW(hR1, BM_SETCHECK, BST_CHECKED, 0); // default
+
+        HWND hSub1 = CreateWindowExW(0, L"STATIC",
+            L"Choose your preferred version on the next screen.",
+            WS_CHILD|WS_VISIBLE, D(32), D(76), D(352), D(16), hwnd,
+            nullptr, nullptr, nullptr);
+        SF(hSub1, g_fontSmall);
+
+        HWND hR2 = CreateWindowExW(0, L"BUTTON",
+            L"Existing installation  -  Point to an existing folder",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTORADIOBUTTON,
+            D(14), D(120), D(366), D(20), hwnd, (HMENU)2002, nullptr, nullptr);
+        SF(hR2, g_fontNormal);
+
+        HWND hSub2 = CreateWindowExW(0, L"STATIC",
+            L"Version is auto-detected from the selected folder.",
+            WS_CHILD|WS_VISIBLE, D(32), D(142), D(352), D(16), hwnd,
+            nullptr, nullptr, nullptr);
+        SF(hSub2, g_fontSmall);
+
+        HWND hOk = CreateWindowExW(0, L"BUTTON", L"Continue",
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,
+            D(154), D(186), D(86), D(26), hwnd, (HMENU)IDOK, nullptr, nullptr);
+        SF(hOk, g_fontNormal);
+
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+            (LONG_PTR)((LPCREATESTRUCT)lp)->lpCreateParams);
+        break;
+    }
+    case WM_COMMAND: {
+        VPState* st = (VPState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        WORD id = LOWORD(wp);
+        if (id == IDOK) {
+            HWND hR1 = GetDlgItem(hwnd, 2001);
+            // CT_114 = "new install" sentinel, CT_112 = "existing install" sentinel
+            st->result = (SendMessageW(hR1, BM_GETCHECK, 0, 0) == BST_CHECKED) ? CT_114 : CT_112;
+            st->done = true;
+            DestroyWindow(hwnd);
+        }
+        break;
+    }
+    case WM_DESTROY: {
+        VPState* st = (VPState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        if (st) st->done = true;
+        PostMessageW(g_hwnd, WM_NULL, 0, 0);
+        break;
+    }
+    case WM_ERASEBKGND: {
+        RECT rc; GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, g_hbrBg);
+        return 1;
+    }
+    case WM_CTLCOLORSTATIC: {
+        SetBkColor((HDC)wp, CLR_BG);
+        SetTextColor((HDC)wp, CLR_TEXT);
+        SetBkMode((HDC)wp, TRANSPARENT);
+        return (LRESULT)g_hbrBg;
+    }
+    case WM_CTLCOLORBTN:
+        SetBkColor((HDC)wp, CLR_BG);
+        SetTextColor((HDC)wp, CLR_TEXT);
+        return (LRESULT)g_hbrBg;
+    case WM_SETCURSOR: {
+        wchar_t cls[32] = {};
+        GetClassNameW((HWND)wp, cls, 32);
+        if (wcscmp(cls, L"Button") == 0) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        break;
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// Returns CT_114 = "new install", CT_112 = "existing install", CT_UNKNOWN = cancelled
+static ClientType ShowInstallModeDialog(HWND hParent)
+{
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = InstallModeProc;
+        wc.hInstance     = GetModuleHandleW(nullptr);
+        wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = g_hbrBg;
+        wc.lpszClassName = L"WOWHCInstallMode";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    UINT dpi = GetDpiForWindow(hParent ? hParent : GetDesktopWindow());
+    int w = MulDiv(394, dpi, 96);
+    int h = MulDiv(270, dpi, 96);
+    RECT pr; GetWindowRect(hParent, &pr);
+    int x = pr.left + (pr.right - pr.left - w) / 2;
+    int y = pr.top  + (pr.bottom - pr.top - h) / 2;
+
+    VPState state = { CT_UNKNOWN, false };
+    EnableWindow(hParent, FALSE);
+
+    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WOWHCInstallMode",
+        L"Get Started",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        x, y, w, h, hParent, nullptr, GetModuleHandleW(nullptr), &state);
+
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG m;
+    while (!state.done && GetMessageW(&m, nullptr, 0, 0)) {
+        if (IsWindow(hwnd) && IsDialogMessageW(hwnd, &m)) continue;
+        TranslateMessage(&m); DispatchMessageW(&m);
+    }
+
+    EnableWindow(hParent, TRUE);
+    SetForegroundWindow(hParent);
+    return state.result;
+}
+
+// Small red circle on a transparent background, used as a taskbar overlay badge.
+static HICON CreateRecordingOverlayIcon(int sz)
+{
     Gdiplus::Bitmap canvas(sz, sz, PixelFormat32bppARGB);
-
-    // Layer 1: red dot (behind logo layer) via LockBits for correct alpha
-    {
-        Gdiplus::BitmapData bd;
-        Gdiplus::Rect fr(0, 0, sz, sz);
-        canvas.LockBits(&fr, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bd);
-        auto* px = static_cast<DWORD*>(bd.Scan0);
-        float scale = sz / 32.0f;
-        float cx = 27.0f * scale, cy = 27.0f * scale, r = 6.0f * scale;
-        for (int y = 0; y < sz; y++)
-            for (int x = 0; x < sz; x++) {
-                float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
-                float dist = sqrtf(dx * dx + dy * dy);
-                float a = std::max(0.0f, std::min(1.0f, r - dist + 0.5f));
-                DWORD av = (DWORD)(a * 255.0f + 0.5f);
-                px[y * sz + x] = (av << 24) | 0x00E03020;
-            }
-        canvas.UnlockBits(&bd);
-    }
-
-    // Layer 2: round logo composited on top (the "icon layer")
-    {
-        Gdiplus::Graphics g(&canvas);
-        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-        g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
-        g.DrawImage(logo.get(), 0, 0, sz, sz);
-    }
-
+    Gdiplus::BitmapData bd;
+    Gdiplus::Rect fr(0, 0, sz, sz);
+    canvas.LockBits(&fr, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bd);
+    auto* px = static_cast<DWORD*>(bd.Scan0);
+    float cx = sz * 0.65f, cy = sz * 0.75f, r = sz * 0.315f;
+    for (int y = 0; y < sz; y++)
+        for (int x = 0; x < sz; x++) {
+            float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+            float a = std::max(0.0f, std::min(1.0f, r - sqrtf(dx*dx + dy*dy) + 0.5f));
+            DWORD av = (DWORD)(a * 255.0f + 0.5f);
+            px[y * sz + x] = (av << 24) | 0x00DD2010;
+        }
+    canvas.UnlockBits(&bd);
     HICON hIcon = nullptr;
     canvas.GetHICON(&hIcon);
     return hIcon;
@@ -1957,12 +2385,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_pTaskbar->SetProgressState(g_hwnd, TBPF_NORMAL);
             g_pTaskbar->SetProgressValue(g_hwnd, g_taskbarLastPct, 100);
         }
-        // Restore recording icon (e.g. after Explorer restart)
+        // Restore recording overlay badge (e.g. after Explorer restart)
         if (RB_IsRunning()) {
-            if (!g_hIconRecordingLarge) g_hIconRecordingLarge = CreateRecordingIcon(GetSystemMetrics(SM_CXICON));
-            if (!g_hIconRecordingSmall) g_hIconRecordingSmall = CreateRecordingIcon(GetSystemMetrics(SM_CXSMICON));
-            SendMessageW(g_hwnd, WM_SETICON, ICON_BIG,   (LPARAM)g_hIconRecordingLarge);
-            SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hIconRecordingSmall);
+            if (!g_hIconRecordingOverlay) g_hIconRecordingOverlay = CreateRecordingOverlayIcon(GetSystemMetrics(SM_CXSMICON));
+            g_pTaskbar->SetOverlayIcon(g_hwnd, g_hIconRecordingOverlay, L"Recording");
         }
         return 0;
     }
@@ -2221,18 +2647,55 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
 
         if (id == ID_BTN_OPEN) {
-            std::wstring openPath = g_clientPath + L"\\_classic_era_";
+            std::wstring era = g_clientPath + L"\\_classic_era_";
+            std::wstring openPath = (GetFileAttributesW(era.c_str()) != INVALID_FILE_ATTRIBUTES)
+                ? era : g_clientPath;
             ShellExecuteW(nullptr, L"explore", openPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             break;
         }
 
         if (id == ID_BTN_BROWSE) {
+            {
+                bool doFolderPick = false;
+                while (true) {
+                    ClientType mode = ShowInstallModeDialog(hwnd);
+                    if (mode == CT_UNKNOWN) break;
+                    if (mode == CT_114) {
+                        ClientType chosen = ShowVersionPickerDialog(hwnd);
+                        if (chosen == CT_UNKNOWN) continue; // Back → re-show InstallMode
+                        g_pendingInstallType     = chosen;
+                        g_pendingExistingInstall = false;
+                        doFolderPick = true;
+                        break;
+                    } else {
+                        g_pendingExistingInstall = true;
+                        g_pendingInstallType     = CT_UNKNOWN;
+                        doFolderPick = true;
+                        break;
+                    }
+                }
+                if (!doFolderPick) break;
+            }
             IFileOpenDialog* pDlg = nullptr;
             if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
                     CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg)))) {
                 DWORD opts = 0; pDlg->GetOptions(&opts);
                 pDlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-                pDlg->SetTitle(L"Select your WoWClassic.exe folder, or an empty folder for a new installation");
+                {
+                    std::wstring dlgTitle;
+                    if (g_pendingExistingInstall) {
+                        dlgTitle = L"Select your existing WoW installation folder";
+                        g_pendingExistingInstall = false;
+                    } else if (g_pendingInstallType == CT_114) {
+                        dlgTitle = L"Select a folder to install WoW Classic Era 1.14.2";
+                    } else if (g_pendingInstallType == CT_112) {
+                        dlgTitle = L"Select a folder to install WoW Vanilla 1.12.1";
+                    } else {
+                        dlgTitle = L"Select your WoW installation folder, or an empty folder for a new installation";
+                        g_pendingExistingInstall = false;
+                    }
+                    pDlg->SetTitle(dlgTitle.c_str());
+                }
                 if (!g_clientPath.empty()) {
                     IShellItem* pInit = nullptr;
                     if (SUCCEEDED(SHCreateItemFromParsingName(g_clientPath.c_str(), nullptr, IID_PPV_ARGS(&pInit)))) {
@@ -2274,48 +2737,81 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             WowInstallInfo info;
                             if (FindWowInstall(selected, info)) {
                                 // ── Existing WoW installation detected ──────────
-                                int verMaj=0, verMin=0, verPatch=0;
-                                bool gotVer = GetExeVersion(info.wowExePath, verMaj, verMin, verPatch);
-                                bool versionOk = gotVer && (verMaj == 1 && verMin == 14 && verPatch == 2);
+                                if (info.type == CT_114) {
+                                    int verMaj=0, verMin=0, verPatch=0;
+                                    bool gotVer = GetExeVersion(info.wowExePath, verMaj, verMin, verPatch);
+                                    bool versionOk = gotVer && (verMaj == 1 && verMin == 14 && verPatch == 2);
 
-                                if (gotVer && !versionOk) {
-                                    wchar_t msg[320];
-                                    swprintf_s(msg,
-                                        L"This WoW installation (version %d.%d.%d) is not compatible.\r\n\r\n"
-                                        L"Only WoW Classic Era 1.14.2 is supported.\r\n"
-                                        L"Please select an empty folder for a fresh installation instead.",
-                                        verMaj, verMin, verPatch);
-                                    MessageBoxW(hwnd, msg, L"Incompatible Installation", MB_OK | MB_ICONERROR);
-                                } else if (!gotVer) {
-                                    int ans = MessageBoxW(hwnd,
-                                        L"Could not read the version of WowClassic.exe.\r\n\r\n"
-                                        L"Continue using this installation?\r\n"
-                                        L"(Only WoW Classic Era 1.14.2 is compatible)",
-                                        L"Version Unknown", MB_YESNO | MB_ICONWARNING);
-                                    versionOk = (ans == IDYES);
-                                }
+                                    if (gotVer && !versionOk) {
+                                        wchar_t msg[320];
+                                        swprintf_s(msg,
+                                            L"This WoW installation (version %d.%d.%d) is not compatible.\r\n\r\n"
+                                            L"Only WoW Classic Era 1.14.2 is supported for this client type.\r\n"
+                                            L"Please select an empty folder for a fresh installation instead.",
+                                            verMaj, verMin, verPatch);
+                                        MessageBoxW(hwnd, msg, L"Incompatible Installation", MB_OK | MB_ICONERROR);
+                                    } else if (!gotVer) {
+                                        int ans = MessageBoxW(hwnd,
+                                            L"Could not read the version of WowClassic.exe.\r\n\r\n"
+                                            L"Continue using this installation?\r\n"
+                                            L"(Only WoW Classic Era 1.14.2 is compatible)",
+                                            L"Version Unknown", MB_YESNO | MB_ICONWARNING);
+                                        versionOk = (ans == IDYES);
+                                    }
 
-                                if (versionOk) {
-                                    // Search for HermesProxy.exe and Arctium in/near clientDir
-                                    std::wstring foundHermes  = FindExeNearby(info.clientDir, L"HermesProxy.exe");
-                                    std::wstring foundArctium = FindExeNearby(info.clientDir, L"Arctium WoW Launcher.exe");
+                                    if (versionOk) {
+                                        std::wstring foundHermes  = FindExeNearby(info.clientDir, L"HermesProxy.exe");
+                                        std::wstring foundArctium = FindExeNearby(info.clientDir, L"Arctium WoW Launcher.exe");
 
-                                    if (foundHermes.empty() || foundArctium.empty()) {
-                                        // Build list of what's missing
-                                        std::wstring missing;
-                                        if (foundHermes.empty())  missing += L"  - HermesProxy.exe\r\n";
-                                        if (foundArctium.empty()) missing += L"  - Arctium WoW Launcher.exe\r\n";
-                                        std::wstring mbMsg =
-                                            std::wstring(L"The following file(s) were not found in or near the selected folder:\r\n\r\n")
-                                            + missing
-                                            + L"\r\nIf they are installed in a parent folder, please select that folder instead.\r\n"
-                                              L"Otherwise choose an empty folder and the launcher will install everything.";
-                                        MessageBoxW(hwnd, mbMsg.c_str(), L"Missing Files", MB_OK | MB_ICONWARNING);
-                                    } else if (g_clientPath != info.clientDir) {
-                                        g_clientPath     = info.clientDir;
-                                        g_installPath    = info.clientDir;
-                                        g_hermesExePath  = foundHermes;
-                                        g_arctiumExePath = foundArctium;
+                                        if (foundHermes.empty() || foundArctium.empty()) {
+                                            std::wstring missing;
+                                            if (foundHermes.empty())  missing += L"  - HermesProxy.exe\r\n";
+                                            if (foundArctium.empty()) missing += L"  - Arctium WoW Launcher.exe\r\n";
+                                            std::wstring mbMsg =
+                                                std::wstring(L"The following file(s) were not found in or near the selected folder:\r\n\r\n")
+                                                + missing
+                                                + L"\r\nIf they are installed in a parent folder, please select that folder instead.\r\n"
+                                                  L"Otherwise choose an empty folder and the launcher will install everything.";
+                                            MessageBoxW(hwnd, mbMsg.c_str(), L"Missing Files", MB_OK | MB_ICONWARNING);
+                                        } else if (g_clientPath != info.clientDir) {
+                                            g_clientPath        = info.clientDir;
+                                            g_installPath       = info.clientDir;
+                                            g_hermesExePath     = foundHermes;
+                                            g_arctiumExePath    = foundArctium;
+                                            g_clientType        = CT_114;
+                                            g_wowTweakedExePath.clear();
+                                            SetWindowTextW(g_hwndPath, g_installPath.c_str());
+                                            ResetLastCheckTime();
+                                            SaveConfig();
+                                            if (!g_workerBusy.load()) {
+                                                g_workerBusy = true;
+                                                std::thread(Worker).detach();
+                                            }
+                                            RefreshPlayButton();
+                                        }
+                                    }
+                                } else { // CT_112
+                                    int verMaj=0, verMin=0, verPatch=0;
+                                    bool gotVer = GetExeVersion(info.wowExePath, verMaj, verMin, verPatch);
+                                    bool versionOk = !gotVer || (verMaj == 1 && verMin == 12);
+
+                                    if (gotVer && !versionOk) {
+                                        wchar_t msg[320];
+                                        swprintf_s(msg,
+                                            L"Wow_tweaked.exe version %d.%d.%d does not appear to be 1.12.x.\r\n\r\n"
+                                            L"Continue using this installation anyway?",
+                                            verMaj, verMin, verPatch);
+                                        versionOk = (MessageBoxW(hwnd, msg,
+                                            L"Version Mismatch", MB_YESNO | MB_ICONWARNING) == IDYES);
+                                    }
+
+                                    if (versionOk && g_clientPath != info.clientDir) {
+                                        g_clientPath        = info.clientDir;
+                                        g_installPath       = info.clientDir;
+                                        g_clientType        = CT_112;
+                                        g_hermesExePath.clear();
+                                        g_arctiumExePath.clear();
+                                        g_wowTweakedExePath = info.wowExePath;
                                         SetWindowTextW(g_hwndPath, g_installPath.c_str());
                                         ResetLastCheckTime();
                                         SaveConfig();
@@ -2328,6 +2824,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 }
                             } else {
                                 // ── No WoW found — new installation ─────────────
+                                // Determine version (from startup flow or ask now)
+                                ClientType newType = g_pendingInstallType;
+                                g_pendingInstallType = CT_UNKNOWN;
+                                if (newType == CT_UNKNOWN) {
+                                    newType = ShowVersionPickerDialog(hwnd);
+                                    if (newType == CT_UNKNOWN) {
+                                        pItem->Release();
+                                        pDlg->Release();
+                                        break;
+                                    }
+                                }
+
                                 std::wstring effectivePath = selected + L"\\WOW-HC";
                                 if (g_installPath != effectivePath) {
                                     WIN32_FIND_DATAW findData;
@@ -2349,10 +2857,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                             L"Please select a different location or clear the existing WOW-HC folder.",
                                             L"Folder Not Empty", MB_OK | MB_ICONWARNING);
                                     } else {
-                                        g_installPath    = effectivePath;
-                                        g_clientPath     = effectivePath + L"\\client";
-                                        g_hermesExePath  = g_clientPath + L"\\HermesProxy.exe";
-                                        g_arctiumExePath = g_clientPath + L"\\Arctium WoW Launcher.exe";
+                                        g_clientType        = newType;
+                                        g_installPath       = effectivePath;
+                                        g_clientPath        = effectivePath + L"\\client";
+                                        g_wowTweakedExePath.clear();
+                                        if (newType == CT_114) {
+                                            g_hermesExePath  = g_clientPath + L"\\HermesProxy.exe";
+                                            g_arctiumExePath = g_clientPath + L"\\Arctium WoW Launcher.exe";
+                                        } else {
+                                            g_hermesExePath.clear();
+                                            g_arctiumExePath.clear();
+                                        }
                                         SetWindowTextW(g_hwndPath, g_installPath.c_str());
                                         ResetLastCheckTime();
                                         SaveConfig();
@@ -2389,56 +2904,84 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 EnableWindow(g_hwndPlay, FALSE);
                 PostStatus(WS_LAUNCHING);
-                std::wstring hermesExe  = g_hermesExePath;
-                std::wstring arctiumExe = g_arctiumExePath;
-                std::thread([hermesExe, arctiumExe]() {
 
-                    if (IsProcessRunning(L"WowClassic.exe")) {
-                        KillProcess(L"WowClassic.exe");
-                        Sleep(500);
+                if (g_clientType == CT_112) {
+                    // ── 1.12.1: launch Wow_tweaked.exe directly ─────────────
+                    std::wstring wowExe = g_wowTweakedExePath;
+                    if (wowExe.empty()) {
+                        std::wstring def = g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe";
+                        if (GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES)
+                            wowExe = def;
+                        else {
+                            std::wstring found = FindExeInTree(g_clientPath, L"Wow_tweaked.exe", 3);
+                            if (!found.empty()) wowExe = found;
+                        }
+                        if (!wowExe.empty()) { g_wowTweakedExePath = wowExe; SaveConfig(); }
                     }
-                    if (IsProcessRunning(L"HermesProxy.exe")) {
-                        KillProcess(L"HermesProxy.exe");
-                        Sleep(500);
-                    }
-                    if (IsPortInUse(8084)) {
-                        MessageBoxW(g_hwnd,
-                            L"Port 8084 is already in use by another application.\r\n"
-                            L"HermesProxy needs this port to run.\r\n\r\n"
-                            L"Please close the application using port 8084 and try again.",
-                            L"Port 8084 Unavailable", MB_OK | MB_ICONWARNING);
+                    std::thread([wowExe]() {
+                        if (!wowExe.empty()) {
+                            LaunchExe(wowExe, L"");
+                        } else {
+                            MessageBoxW(g_hwnd,
+                                L"Wow_tweaked.exe was not found in the client folder.\r\n"
+                                L"Please re-select your installation path.",
+                                L"Launch Error", MB_OK | MB_ICONERROR);
+                        }
                         PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
-                        return;
-                    }
-                    LaunchHermesWithPipe(hermesExe);
-                    Sleep(1500);
-                    // Keep Arctium's handle so we know exactly which process we started
-                    // and can find the WowClassic.exe it spawns by parent PID.
-                    HANDLE hArctium = LaunchExeGetHandle(arctiumExe, L"--staticseed --version=ClassicEra");
-                    Sleep(2000);
-                    PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                    }).detach();
+                } else {
+                    // ── 1.14.2: start HermesProxy + Arctium ─────────────────
+                    std::wstring hermesExe  = g_hermesExePath;
+                    std::wstring arctiumExe = g_arctiumExePath;
+                    std::thread([hermesExe, arctiumExe]() {
 
-                    if (hArctium) {
-                        DWORD arctiumPid = GetProcessId(hArctium);
-                        std::thread([hArctium, arctiumPid]() {
-                            // Wait up to 60s for the WowClassic.exe that OUR Arctium spawned.
-                            // Keeping hArctium open prevents PID reuse until we've found the child.
-                            DWORD wowPid = WaitForChildProcess(arctiumPid, L"WowClassic.exe", 60000);
-                            CloseHandle(hArctium);
-                            if (!wowPid) return;
+                        if (IsProcessRunning(L"WowClassic.exe")) {
+                            KillProcess(L"WowClassic.exe");
+                            Sleep(500);
+                        }
+                        if (IsProcessRunning(L"HermesProxy.exe")) {
+                            KillProcess(L"HermesProxy.exe");
+                            Sleep(500);
+                        }
+                        if (IsPortInUse(8084)) {
+                            MessageBoxW(g_hwnd,
+                                L"Port 8084 is already in use by another application.\r\n"
+                                L"HermesProxy needs this port to run.\r\n\r\n"
+                                L"Please close the application using port 8084 and try again.",
+                                L"Port 8084 Unavailable", MB_OK | MB_ICONWARNING);
+                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                            return;
+                        }
+                        LaunchHermesWithPipe(hermesExe);
+                        Sleep(1500);
+                        // Keep Arctium's handle so we know exactly which process we started
+                        // and can find the WowClassic.exe it spawns by parent PID.
+                        HANDLE hArctium = LaunchExeGetHandle(arctiumExe, L"--staticseed --version=ClassicEra");
+                        Sleep(2000);
+                        PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
 
-                            HANDLE hWow = OpenProcess(SYNCHRONIZE, FALSE, wowPid);
-                            if (!hWow) return;
-                            WaitForSingleObject(hWow, INFINITE);
-                            CloseHandle(hWow);
+                        if (hArctium) {
+                            DWORD arctiumPid = GetProcessId(hArctium);
+                            std::thread([hArctium, arctiumPid]() {
+                                // Wait up to 60s for the WowClassic.exe that OUR Arctium spawned.
+                                // Keeping hArctium open prevents PID reuse until we've found the child.
+                                DWORD wowPid = WaitForChildProcess(arctiumPid, L"WowClassic.exe", 60000);
+                                CloseHandle(hArctium);
+                                if (!wowPid) return;
 
-                            // The specific WowClassic.exe we tracked has closed — stop HermesProxy.
-                            HANDLE hH = g_hermesProcess;
-                            if (hH) TerminateProcess(hH, 0);
-                            PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
-                        }).detach();
-                    }
-                }).detach();
+                                HANDLE hWow = OpenProcess(SYNCHRONIZE, FALSE, wowPid);
+                                if (!hWow) return;
+                                WaitForSingleObject(hWow, INFINITE);
+                                CloseHandle(hWow);
+
+                                // The specific WowClassic.exe we tracked has closed — stop HermesProxy.
+                                HANDLE hH = g_hermesProcess;
+                                if (hH) TerminateProcess(hH, 0);
+                                PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                            }).detach();
+                        }
+                    }).detach();
+                }
             }
         }
         else if (id == ID_BTN_RECORD) {
@@ -2566,13 +3109,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         if (g_hwndSaveReplay) EnableWindow(g_hwndSaveReplay, wp ? TRUE : FALSE);
         if (wp) {
-            if (!g_hIconRecordingLarge) g_hIconRecordingLarge = CreateRecordingIcon(GetSystemMetrics(SM_CXICON));
-            if (!g_hIconRecordingSmall) g_hIconRecordingSmall = CreateRecordingIcon(GetSystemMetrics(SM_CXSMICON));
-            SendMessageW(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)g_hIconRecordingLarge);
-            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hIconRecordingSmall);
+            if (!g_hIconRecordingOverlay) g_hIconRecordingOverlay = CreateRecordingOverlayIcon(GetSystemMetrics(SM_CXSMICON));
+            if (g_pTaskbar) g_pTaskbar->SetOverlayIcon(hwnd, g_hIconRecordingOverlay, L"Recording");
         } else {
-            SendMessageW(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)g_hIconLarge);
-            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hIconSmall);
+            if (g_pTaskbar) g_pTaskbar->SetOverlayIcon(hwnd, nullptr, nullptr);
         }
         return 0;
 
@@ -2914,6 +3454,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
 
+    case WM_CLOSE:
+    {
+        if (RB_IsRunning()) {
+            int r = MessageBoxW(hwnd,
+                L"The screen recorder is still running.\n\nQuit anyway?",
+                L"Recorder Running", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+            if (r != IDYES) return 0;
+        } else {
+            const wchar_t* gameExe = (g_clientType == CT_112) ? L"Wow_tweaked.exe" : L"WowClassic.exe";
+            if (IsProcessRunning(gameExe)) {
+                int r = MessageBoxW(hwnd,
+                    L"The game is still running.\n\nQuit the launcher anyway?",
+                    L"Game Running", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+                if (r != IDYES) return 0;
+            }
+        }
+        DestroyWindow(hwnd);
+        return 0;
+    }
+
     case WM_DESTROY:
         RB_Shutdown();
         KillTimer(hwnd, ID_TIMER_UPDATE);
@@ -2922,8 +3482,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_pTaskbar) { g_pTaskbar->Release(); g_pTaskbar = nullptr; }
         if (g_hIconLarge)          { DestroyIcon(g_hIconLarge);          g_hIconLarge          = nullptr; }
         if (g_hIconSmall)          { DestroyIcon(g_hIconSmall);          g_hIconSmall          = nullptr; }
-        if (g_hIconRecordingLarge) { DestroyIcon(g_hIconRecordingLarge); g_hIconRecordingLarge = nullptr; }
-        if (g_hIconRecordingSmall) { DestroyIcon(g_hIconRecordingSmall); g_hIconRecordingSmall = nullptr; }
+        if (g_hIconRecordingOverlay) { DestroyIcon(g_hIconRecordingOverlay); g_hIconRecordingOverlay = nullptr; }
         if (g_fontLink)    { DeleteObject(g_fontLink);    g_fontLink    = nullptr; }
         if (g_fontSmall)   { DeleteObject(g_fontSmall);   g_fontSmall   = nullptr; }
         if (g_fontConsole) { DeleteObject(g_fontConsole); g_fontConsole = nullptr; }
@@ -3067,32 +3626,51 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
         g_replaySettingsInit.saveFolder = g_clientPath + L"\\_classic_era_\\Videos";
     EnsureDesktopShortcut(true); // refresh shortcut target to current exe path if it exists
 
-    // If a fully-installed client is saved but WowClassic.exe is gone, reset paths so
-    // the user is prompted to choose again (moved/deleted installation).
-    if (!g_clientPath.empty() &&
-        GetFileAttributesW(ClientMarker().c_str()) != INVALID_FILE_ATTRIBUTES) {
-        std::wstring wowExe = g_clientPath + L"\\_classic_era_\\WowClassic.exe";
-        if (GetFileAttributesW(wowExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    // If client path is saved but the game exe is missing, reset so the user is
+    // prompted to set up again. Covers both interrupted downloads (no marker yet)
+    // and completed installs that were later moved or deleted (marker present).
+    if (!g_clientPath.empty()) {
+        std::wstring wowExeCheck = (g_clientType == CT_112)
+            ? (g_wowTweakedExePath.empty() ? g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe" : g_wowTweakedExePath)
+            : g_clientPath + L"\\_classic_era_\\WowClassic.exe";
+        if (GetFileAttributesW(wowExeCheck.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            bool wasInstalled = GetFileAttributesW(ClientMarker().c_str()) != INVALID_FILE_ATTRIBUTES;
             g_installPath.clear();
             g_clientPath.clear();
             g_hermesExePath.clear();
             g_arctiumExePath.clear();
+            g_wowTweakedExePath.clear();
+            g_clientType = CT_UNKNOWN;
             SaveConfig();
-            MessageBoxW(nullptr,
-                L"The previously configured WoW installation could not be found.\r\n"
-                L"Please select your installation folder again.",
-                L"Installation Not Found", MB_OK | MB_ICONWARNING);
+            if (wasInstalled) {
+                MessageBoxW(nullptr,
+                    L"The previously configured WoW installation could not be found.\r\n"
+                    L"Please select your installation folder again.",
+                    L"Installation Not Found", MB_OK | MB_ICONWARNING);
+            }
         }
     }
     // On a valid saved install, try to recover missing exe paths from the stored client dir
     if (!g_clientPath.empty()) {
-        if (g_hermesExePath.empty() || GetFileAttributesW(g_hermesExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            std::wstring f = FindExeNearby(g_clientPath, L"HermesProxy.exe");
-            if (!f.empty()) g_hermesExePath = f;
-        }
-        if (g_arctiumExePath.empty() || GetFileAttributesW(g_arctiumExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            std::wstring f = FindExeNearby(g_clientPath, L"Arctium WoW Launcher.exe");
-            if (!f.empty()) g_arctiumExePath = f;
+        if (g_clientType == CT_112) {
+            if (g_wowTweakedExePath.empty() || GetFileAttributesW(g_wowTweakedExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                std::wstring def = g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe";
+                if (GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    g_wowTweakedExePath = def;
+                else {
+                    std::wstring f = FindExeInTree(g_clientPath, L"Wow_tweaked.exe", 3);
+                    if (!f.empty()) g_wowTweakedExePath = f;
+                }
+            }
+        } else {
+            if (g_hermesExePath.empty() || GetFileAttributesW(g_hermesExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                std::wstring f = FindExeNearby(g_clientPath, L"HermesProxy.exe");
+                if (!f.empty()) g_hermesExePath = f;
+            }
+            if (g_arctiumExePath.empty() || GetFileAttributesW(g_arctiumExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                std::wstring f = FindExeNearby(g_clientPath, L"Arctium WoW Launcher.exe");
+                if (!f.empty()) g_arctiumExePath = f;
+            }
         }
     }
 
