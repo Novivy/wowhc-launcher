@@ -3045,6 +3045,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 // Search for _classic_era_ in/under the selected folder (same depth logic as Browse)
                 WowInstallInfo xferInfo;
                 if (FindWowInstall(picked, xferInfo)) {
+                    // Block cross-version transfer: 1.12.1 <-> 1.14.2 are incompatible
+                    if (xferInfo.type != g_clientType) {
+                        const wchar_t* srcVer = (xferInfo.type == CT_112) ? L"1.12.1" : L"1.14.2";
+                        const wchar_t* dstVer = (g_clientType == CT_112) ? L"1.12.1" : L"1.14.2";
+                        wchar_t msg[512];
+                        swprintf_s(msg,
+                            L"Cannot transfer: the selected installation is version %s,\n"
+                            L"but your current installation is version %s.\n\n"
+                            L"Addons, macros, UI layouts, and settings are NOT compatible\n"
+                            L"between 1.12.1 and 1.14.2. Please select a %s installation.",
+                            srcVer, dstVer, dstVer);
+                        MessageBoxW(hwnd, msg, L"Incompatible Versions", MB_OK | MB_ICONERROR);
+                        continue; // reopen the folder picker
+                    }
                     std::wstring classicEraDir = xferInfo.clientDir + L"\\_classic_era_";
                     // Check that this is a 1.14.x (Classic Era) build
                     int verMaj = 0, verMin = 0, verPatch = 0;
