@@ -3379,6 +3379,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         bool pressed  = (dis->itemState & ODS_SELECTED) != 0;
         bool disabled = (dis->itemState & ODS_DISABLED)  != 0;
         bool isPlay      = (dis->hwndItem == g_hwndPlay);
+        bool isOpen           = (dis->hwndItem == g_hwndOpen);
         bool isRecord         = (dis->hwndItem == g_hwndRecord);
         bool isSaveReplay     = (dis->hwndItem == g_hwndSaveReplay);
         bool isUpload         = (dis->hwndItem == g_hwndUpload);
@@ -3398,9 +3399,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         float t = hoverRaw * hoverRaw * (3.0f - 2.0f * hoverRaw);
 
         COLORREF bg;
-        if      (pressed)     bg = RGB(55, 55, 62);
-        else if (isRecording) bg = LerpColor(RGB(90, 18, 18), RGB(110, 28, 28), t);
-        else                  bg = LerpColor(RGB(45, 45, 52), isPlay ? RGB(68, 58, 30) : RGB(58, 58, 66), t);
+        if      (pressed && isOpen) bg = RGB(30, 30, 36);
+        else if (pressed)           bg = RGB(55, 55, 62);
+        else if (isRecording)       bg = LerpColor(RGB(90, 18, 18), RGB(110, 28, 28), t);
+        else if (isOpen)            bg = LerpColor(RGB(26, 26, 31), RGB(36, 36, 42), t);
+        else                        bg = LerpColor(RGB(45, 45, 52), isPlay ? RGB(68, 58, 30) : RGB(58, 58, 66), t);
         COLORREF fg = disabled ? RGB(90,90,95) : CLR_TEXT;
 
         HBRUSH hbr = CreateSolidBrush(bg);
@@ -3409,6 +3412,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         COLORREF borderClr = isRecording
             ? LerpColor(RGB(150, 40, 40), RGB(180, 60, 60), t)
+            : isOpen
+            ? (pressed ? RGB(55, 55, 62) : LerpColor(RGB(50, 50, 57), RGB(70, 70, 78), t))
             : LerpColor(RGB(80, 80, 88), isPlay ? RGB(140, 105, 20) : RGB(100, 100, 110), t);
         HPEN hpen    = CreatePen(PS_SOLID, 1, borderClr);
         HPEN hpenOld = (HPEN)SelectObject(hdc, hpen);

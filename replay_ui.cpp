@@ -201,18 +201,24 @@ static LRESULT CALLBACK BtnSubRui(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
 }
 
 // t = smoothstepped hover value (0.0 idle, 1.0 fully hovered).
-static void DrawDarkButton(LPDRAWITEMSTRUCT dis, float t, bool isAccent)
+static void DrawDarkButton(LPDRAWITEMSTRUCT dis, float t, bool isAccent, bool isSecondary = false)
 {
     RECT rc = dis->rcItem;
     HDC  hdc = dis->hDC;
     bool pressed  = (dis->itemState & ODS_SELECTED) != 0;
     bool disabled = (dis->itemState & ODS_DISABLED) != 0;
 
-    COLORREF bg     = pressed ? RGB(55, 55, 62)
-                              : RuiLerpColor(RGB(45, 45, 52), isAccent ? RGB(68, 58, 30) : RGB(58, 58, 66), t);
-    COLORREF fg     = disabled ? RUI_DIM : RUI_TEXT;
-    COLORREF border = pressed ? RGB(80, 80, 88)
-                              : RuiLerpColor(RGB(80, 80, 88), isAccent ? RGB(140, 105, 20) : RGB(100, 100, 110), t);
+    COLORREF bg, border;
+    if (isSecondary) {
+        bg     = pressed ? RGB(30, 30, 36) : RuiLerpColor(RGB(26, 26, 31), RGB(36, 36, 42), t);
+        border = pressed ? RGB(55, 55, 62) : RuiLerpColor(RGB(50, 50, 57), RGB(70, 70, 78), t);
+    } else {
+        bg     = pressed ? RGB(55, 55, 62)
+                         : RuiLerpColor(RGB(45, 45, 52), isAccent ? RGB(68, 58, 30) : RGB(58, 58, 66), t);
+        border = pressed ? RGB(80, 80, 88)
+                         : RuiLerpColor(RGB(80, 80, 88), isAccent ? RGB(140, 105, 20) : RGB(100, 100, 110), t);
+    }
+    COLORREF fg = disabled ? RUI_DIM : RUI_TEXT;
 
     HBRUSH hbr = CreateSolidBrush(bg);
     FillRect(hdc, &rc, hbr);
@@ -571,7 +577,7 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (dis->hwndItem == g_ruiBtnSave)
             DrawDarkButton(dis, ss(g_ruiBtnSvHoverT), false);
         else if (dis->hwndItem == g_ruiBtnClose)
-            DrawDarkButton(dis, ss(g_ruiBtnCloseHoverT), false);
+            DrawDarkButton(dis, ss(g_ruiBtnCloseHoverT), false, true);
         else if (dis->hwndItem == g_ruiBtnFolder)
             DrawDarkButton(dis, ss(g_ruiBtnFolderHoverT), false);
         else break;

@@ -463,7 +463,7 @@ static LRESULT CALLBACK ResultWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         auto SF = [](HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); };
 
         HWND hLbl = CreateWindowExW(0, L"STATIC",
-            L"Your video has been uploaded. Copy the link to share it:",
+            L"Your video has been uploaded. Copy the link below to share it:",
             WS_CHILD|WS_VISIBLE|SS_LEFT,
             D(20), D(20), D(364), D(18), hwnd, nullptr, nullptr, nullptr);
         SF(hLbl, s_resFont);
@@ -475,7 +475,7 @@ static LRESULT CALLBACK ResultWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SF(hEdit, s_resFont);
         SendMessageW(hEdit, EM_SETSEL, 0, -1);
 
-        s_resBtnCopy = CreateWindowExW(0, L"BUTTON", L"Copy Link",
+        s_resBtnCopy = CreateWindowExW(0, L"BUTTON", L"Copy Video Link",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
             D(20), D(78), D(364), D(60), hwnd,
             (HMENU)(UINT_PTR)IDOK, nullptr, nullptr);
@@ -713,7 +713,7 @@ static LRESULT CALLBACK UploadWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SF(g_upLinkDrive, g_upFontLink);
 
         // Status text — 20px below links row (opaque background prevents overlap)
-        g_upStatus = CreateWindowExW(0, L"STATIC", L"Ready to upload on Google Drive",
+        g_upStatus = CreateWindowExW(0, L"STATIC", L"Select a video above to upload on Google Drive",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
             D(14), D(378), D(490), D(18),
             hwnd, (HMENU)(UINT_PTR)UID_STATIC_STATUS, nullptr, nullptr);
@@ -931,7 +931,7 @@ static LRESULT CALLBACK UploadWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     L"Disconnect Google Drive",
                     MB_YESNO | MB_ICONQUESTION) == IDYES) {
                 GDrive_Disconnect(g_upConfigDir);
-                SetWindowTextW(g_upStatus, L"Google Drive disconnected.");
+                SetWindowTextW(g_upStatus, L"Select a video above to upload on Google Drive");
                 UpdateLinkVisibility();
             }
             break;
