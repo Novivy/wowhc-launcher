@@ -9,6 +9,7 @@
 #include <shlwapi.h>
 #include <gdiplus.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 #include <richedit.h>
 
 #include <string>
@@ -46,6 +47,9 @@ static constexpr wchar_t CLIENT_DOWNLOAD_URL[] =
 
 static constexpr wchar_t CLIENT_112_DOWNLOAD_URL[] =
     L"https://client.wow-hc.com/1.12.1/WOW-1.12.1.zip";
+
+static constexpr wchar_t REALM_NORMAL_SERVER[] = L"logon-eu-0.wow-hc.com";
+static constexpr wchar_t REALM_PTR_SERVER[]    = L"ptr-logon-eu-2.wow-hc.com";
 
 static constexpr wchar_t APP_NAME[]        = L"WOW-HC Launcher";
 static constexpr wchar_t HERMES_GH_OWNER[] = L"Novivy";
@@ -89,6 +93,7 @@ enum : UINT {
     ID_BTN_UPLOAD           = 113,
     ID_BTN_RECORD_SETTINGS  = 114,
     ID_EDIT_CONSOLE         = 115,
+    ID_COMBO_REALM          = 116,
     ID_TIMER_UPDATE         = 200,
     ID_TIMER_HOVER          = 201,
 };
@@ -218,6 +223,8 @@ static HWND  g_hwndRecord          = nullptr;
 static HWND  g_hwndSaveReplay      = nullptr;
 static HWND  g_hwndUpload          = nullptr;
 static HWND  g_hwndRecordSettings  = nullptr;
+static HWND  g_hwndRealmCombo      = nullptr;
+static int   g_realmIndex          = 0;
 static HICON g_hIconRecordingOverlay = nullptr;
 
 static HWND   g_hwndConsole     = nullptr;
@@ -236,8 +243,8 @@ static const COLORREF g_ansiColors[16] = {
     RGB(59,  120, 255), RGB(180, 0,   158), RGB(97,  214, 214), RGB(242, 242, 242),
 };
 
-static constexpr int WND_H_BASE     = 483;
-static constexpr int WND_H_EXPANDED = 570;
+static constexpr int WND_H_BASE     = 543;
+static constexpr int WND_H_EXPANDED = 630;
 
 // ── Config helpers ─────────────────────────────────────────────────────────────
 static std::wstring ConfigPath()     { return g_configDir + L"\\launcher.ini"; }
@@ -286,6 +293,8 @@ static void SaveConfig()
     wchar_t ctBuf[8]; swprintf_s(ctBuf, L"%d", (int)g_clientType);
     WritePrivateProfileStringW(L"Launcher", L"ClientType", ctBuf, ini);
     WritePrivateProfileStringW(L"Launcher", L"WowTweakedExePath", g_wowTweakedExePath.c_str(), ini);
+    wchar_t riBuf[8]; swprintf_s(riBuf, L"%d", g_realmIndex);
+    WritePrivateProfileStringW(L"Launcher", L"RealmIndex", riBuf, ini);
 }
 
 static void LoadConfig()
@@ -315,6 +324,12 @@ static void LoadConfig()
     // Backward compat: assume CT_114 for old configs that have HermesExePath
     if (g_clientType == CT_UNKNOWN && !g_hermesExePath.empty())
         g_clientType = CT_114;
+    {
+        wchar_t ri[8] = {};
+        GetPrivateProfileStringW(L"Launcher", L"RealmIndex", L"0", ri, 8, ini);
+        int idx = _wtoi(ri);
+        g_realmIndex = (idx == 1) ? 1 : 0;
+    }
 }
 
 // ── EXE version reader ────────────────────────────────────────────────────────
@@ -2120,8 +2135,269 @@ static LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
 
 static void EnsureDesktopShortcut(bool onlyIfAlreadyExists = false);
 
+// ── Shared color helpers ───────────────────────────────────────────────────────
+static COLORREF LerpColor(COLORREF a, COLORREF b, float t) {
+    return RGB(
+        (int)(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t),
+        (int)(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t),
+        (int)(GetBValue(a) + (GetBValue(b) - GetBValue(a)) * t));
+}
+
+// ── Modal button helpers ───────────────────────────────────────────────────────
+// Simple hover subclass for modal buttons (no animation — immediate state change).
+static LRESULT CALLBACK ModalBtnSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                              UINT_PTR /*id*/, DWORD_PTR data)
+{
+    bool* pHover = reinterpret_cast<bool*>(data);
+    if (msg == WM_SETCURSOR) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+    if (msg == WM_MOUSEMOVE && !*pHover) {
+        *pHover = true;
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tme);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (msg == WM_MOUSELEAVE) {
+        *pHover = false;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+// Draws a modal dialog button matching the main app's dark style.
+// isSecondary = Open-button style (darker); primary = Browse/Record style.
+static void DrawModalButton(DRAWITEMSTRUCT* dis, bool isSecondary, bool hovered)
+{
+    RECT rc      = dis->rcItem;
+    HDC  hdc     = dis->hDC;
+    bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+    float t      = hovered ? 1.0f : 0.0f;
+
+    COLORREF bg;
+    if      (pressed && isSecondary) bg = RGB(30, 30, 36);
+    else if (pressed)                bg = RGB(55, 55, 62);
+    else if (isSecondary)            bg = LerpColor(RGB(26, 26, 31), RGB(36, 36, 42), t);
+    else                             bg = LerpColor(RGB(45, 45, 52), RGB(58, 58, 66), t);
+
+    HBRUSH hbr = CreateSolidBrush(bg);
+    FillRect(hdc, &rc, hbr);
+    DeleteObject(hbr);
+
+    COLORREF borderClr = isSecondary
+        ? (pressed ? RGB(55, 55, 62) : LerpColor(RGB(50, 50, 57), RGB(70, 70, 78), t))
+        : LerpColor(RGB(80, 80, 88), RGB(100, 100, 110), t);
+    HPEN hpen    = CreatePen(PS_SOLID, 1, borderClr);
+    HPEN hpenOld = (HPEN)SelectObject(hdc, hpen);
+    MoveToEx(hdc, rc.left,    rc.top,      nullptr);
+    LineTo  (hdc, rc.right-1, rc.top);
+    LineTo  (hdc, rc.right-1, rc.bottom-1);
+    LineTo  (hdc, rc.left,    rc.bottom-1);
+    LineTo  (hdc, rc.left,    rc.top);
+    SelectObject(hdc, hpenOld);
+    DeleteObject(hpen);
+
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, CLR_TEXT);
+    HFONT old = (HFONT)SelectObject(hdc, g_fontNormal);
+    wchar_t txt[128] = {};
+    GetWindowTextW(dis->hwndItem, txt, 128);
+    DrawTextW(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(hdc, old);
+
+    if (dis->itemState & ODS_FOCUS)
+        DrawFocusRect(hdc, &rc);
+}
+
+// ── Realm config update ────────────────────────────────────────────────────────
+static void UpdateRealmConfig(int realmIndex)
+{
+    const wchar_t* server = (realmIndex == 1) ? REALM_PTR_SERVER : REALM_NORMAL_SERVER;
+    g_realmIndex = realmIndex;
+    wchar_t riBuf[8]; swprintf_s(riBuf, L"%d", realmIndex);
+    WritePrivateProfileStringW(L"Launcher", L"RealmIndex", riBuf, ConfigPath().c_str());
+
+    if (g_clientType == CT_114 && !g_hermesExePath.empty()) {
+        size_t sep = g_hermesExePath.rfind(L'\\');
+        std::wstring dir = (sep != std::wstring::npos) ? g_hermesExePath.substr(0, sep) : L"";
+        if (dir.empty()) return;
+        std::wstring cfgPath = dir + L"\\HermesProxy.config";
+
+        HANDLE hf = CreateFileW(cfgPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf == INVALID_HANDLE_VALUE) return;
+        DWORD sz = GetFileSize(hf, nullptr);
+        std::string content(sz, '\0');
+        DWORD rd = 0;
+        ReadFile(hf, content.data(), sz, &rd, nullptr);
+        CloseHandle(hf);
+        content.resize(rd);
+
+        size_t pos = content.find("key=\"ServerAddress\"");
+        if (pos == std::string::npos) return;
+        size_t vp = content.find("value=\"", pos);
+        if (vp == std::string::npos) return;
+        vp += 7;
+        size_t ve = content.find('"', vp);
+        if (ve == std::string::npos) return;
+
+        std::string serverA;
+        for (const wchar_t* p = server; *p; ++p) serverA += (char)*p;
+        content = content.substr(0, vp) + serverA + content.substr(ve);
+
+        HANDLE hfw = CreateFileW(cfgPath.c_str(), GENERIC_WRITE, 0,
+            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hfw == INVALID_HANDLE_VALUE) return;
+        DWORD wr = 0;
+        WriteFile(hfw, content.data(), (DWORD)content.size(), &wr, nullptr);
+        CloseHandle(hfw);
+
+    } else if (g_clientType == CT_112 && !g_wowTweakedExePath.empty()) {
+        size_t sep = g_wowTweakedExePath.rfind(L'\\');
+        std::wstring dir = (sep != std::wstring::npos) ? g_wowTweakedExePath.substr(0, sep) : L"";
+        if (dir.empty()) return;
+        std::wstring wtfPath = dir + L"\\realmlist.wtf";
+
+        std::string serverA;
+        for (const wchar_t* p = server; *p; ++p) serverA += (char)*p;
+        std::string content = "set realmlist " + serverA + "\r\n";
+
+        HANDLE hf = CreateFileW(wtfPath.c_str(), GENERIC_WRITE, 0,
+            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf == INVALID_HANDLE_VALUE) return;
+        DWORD wr = 0;
+        WriteFile(hf, content.data(), (DWORD)content.size(), &wr, nullptr);
+        CloseHandle(hf);
+    }
+}
+
+// ── PTR info dialog ────────────────────────────────────────────────────────────
+struct PTRDlgState { bool done; bool hoverReq; bool hoverDismiss; };
+
+static LRESULT CALLBACK PTRDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        auto D = [hwnd](int px) { return MulDiv(px, GetDpiForWindow(hwnd), 96); };
+        auto SF = [](HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); };
+
+        PTRDlgState* st = (PTRDlgState*)((LPCREATESTRUCT)lp)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)st);
+
+        HWND hDesc = CreateWindowExW(0, L"STATIC",
+            L"The Player Testing Realm (PTR) requires special access.\r\n"
+            L"Click \"Request Access\" to apply for PTR access on the WOW-HC website.",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            D(14), D(14), D(312), D(56), hwnd,
+            nullptr, nullptr, nullptr);
+        SF(hDesc, g_fontNormal);
+
+        HWND hReq = CreateWindowExW(0, L"BUTTON", L"Request Access",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            D(14), D(84), D(130), D(26), hwnd, (HMENU)2001, nullptr, nullptr);
+        SF(hReq, g_fontNormal);
+        SetWindowSubclass(hReq, ModalBtnSubclassProc, 0, (DWORD_PTR)&st->hoverReq);
+
+        HWND hDis = CreateWindowExW(0, L"BUTTON", L"Dismiss",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            D(156), D(84), D(86), D(26), hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
+        SF(hDis, g_fontNormal);
+        SetWindowSubclass(hDis, ModalBtnSubclassProc, 1, (DWORD_PTR)&st->hoverDismiss);
+        break;
+    }
+    case WM_COMMAND: {
+        PTRDlgState* st = (PTRDlgState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        WORD id = LOWORD(wp);
+        if (id == 2001) {
+            ShellExecuteW(nullptr, L"open", L"https://wow-hc.com/ptr",
+                nullptr, nullptr, SW_SHOWNORMAL);
+        } else if (id == IDCANCEL) {
+            st->done = true;
+            DestroyWindow(hwnd);
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY: {
+        PTRDlgState* st = (PTRDlgState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        if (st) st->done = true;
+        PostMessageW(g_hwnd, WM_NULL, 0, 0);
+        break;
+    }
+    case WM_ERASEBKGND: {
+        RECT rc; GetClientRect(hwnd, &rc);
+        FillRect((HDC)wp, &rc, g_hbrBg);
+        return 1;
+    }
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+        auto* st  = (PTRDlgState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        bool isSecondary = (dis->CtlID == IDCANCEL);
+        bool hov = isSecondary ? st->hoverDismiss : st->hoverReq;
+        DrawModalButton(dis, isSecondary, hov);
+        return TRUE;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = (HDC)wp;
+        SetBkColor(hdc, CLR_BG);
+        SetTextColor(hdc, CLR_TEXT);
+        SetBkMode(hdc, TRANSPARENT);
+        return (LRESULT)g_hbrBg;
+    }
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void ShowPTRDialog(HWND hParent)
+{
+    static bool registered = false;
+    if (!registered) {
+        WNDCLASSEXW wc = {};
+        wc.cbSize        = sizeof(wc);
+        wc.lpfnWndProc   = PTRDlgProc;
+        wc.hInstance     = GetModuleHandleW(nullptr);
+        wc.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = g_hbrBg;
+        wc.lpszClassName = L"WOWHCPTRDlg";
+        RegisterClassExW(&wc);
+        registered = true;
+    }
+
+    UINT dpi = GetDpiForWindow(hParent ? hParent : GetDesktopWindow());
+    // Size from desired client area so title bar + borders scale correctly at any DPI
+    RECT rcAdj = { 0, 0, MulDiv(340, dpi, 96), MulDiv(124, dpi, 96) };
+    AdjustWindowRectExForDpi(&rcAdj, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                             FALSE, WS_EX_DLGMODALFRAME, dpi);
+    int w = rcAdj.right - rcAdj.left;
+    int h = rcAdj.bottom - rcAdj.top;
+    RECT pr; GetWindowRect(hParent, &pr);
+    int x = pr.left + (pr.right - pr.left - w) / 2;
+    int y = pr.top  + (pr.bottom - pr.top  - h) / 2;
+
+    PTRDlgState state = {};
+    EnableWindow(hParent, FALSE);
+
+    HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WOWHCPTRDlg",
+        L"Player Testing Realm (PTR)",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        x, y, w, h, hParent, nullptr, GetModuleHandleW(nullptr), &state);
+
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG m;
+    while (!state.done && GetMessageW(&m, nullptr, 0, 0)) {
+        if (IsWindow(hwnd) && IsDialogMessageW(hwnd, &m)) continue;
+        TranslateMessage(&m); DispatchMessageW(&m);
+    }
+
+    EnableWindow(hParent, TRUE);
+    SetForegroundWindow(hParent);
+}
+
 // ── Version picker dialog ──────────────────────────────────────────────────────
-struct VPState { ClientType result; bool done; };
+struct VPState { ClientType result; bool done; bool hoverOk; bool hoverCancel; };
 
 static LRESULT CALLBACK VersionPickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -2161,18 +2437,20 @@ static LRESULT CALLBACK VersionPickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
             nullptr, nullptr, nullptr);
         SF(hSub2, g_fontSmall);
 
+        VPState* st = (VPState*)((LPCREATESTRUCT)lp)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)st);
+
         HWND hBack = CreateWindowExW(0, L"BUTTON", L"Back",
-            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_PUSHBUTTON,
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
             D(107), D(186), D(86), D(26), hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
         SF(hBack, g_fontNormal);
+        SetWindowSubclass(hBack, ModalBtnSubclassProc, 0, (DWORD_PTR)&st->hoverCancel);
 
         HWND hOk = CreateWindowExW(0, L"BUTTON", L"Continue",
-            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
             D(201), D(186), D(86), D(26), hwnd, (HMENU)IDOK, nullptr, nullptr);
         SF(hOk, g_fontNormal);
-
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
-            (LONG_PTR)((LPCREATESTRUCT)lp)->lpCreateParams);
+        SetWindowSubclass(hOk, ModalBtnSubclassProc, 1, (DWORD_PTR)&st->hoverOk);
         break;
     }
     case WM_COMMAND: {
@@ -2193,8 +2471,16 @@ static LRESULT CALLBACK VersionPickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     case WM_DESTROY: {
         VPState* st = (VPState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
         if (st) st->done = true;
-        PostMessageW(g_hwnd, WM_NULL, 0, 0); // wake the nested loop
+        PostMessageW(g_hwnd, WM_NULL, 0, 0);
         break;
+    }
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+        auto* st  = (VPState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        bool isSecondary = (dis->CtlID == IDCANCEL);
+        bool hov = isSecondary ? st->hoverCancel : st->hoverOk;
+        DrawModalButton(dis, isSecondary, hov);
+        return TRUE;
     }
     case WM_ERASEBKGND: {
         RECT rc; GetClientRect(hwnd, &rc);
@@ -2207,19 +2493,6 @@ static LRESULT CALLBACK VersionPickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         SetTextColor(hdc, CLR_TEXT);
         SetBkMode(hdc, TRANSPARENT);
         return (LRESULT)g_hbrBg;
-    }
-    case WM_CTLCOLORBTN:
-        SetBkColor((HDC)wp, CLR_BG);
-        SetTextColor((HDC)wp, CLR_TEXT);
-        return (LRESULT)g_hbrBg;
-    case WM_SETCURSOR: {
-        wchar_t cls[32] = {};
-        GetClassNameW((HWND)wp, cls, 32);
-        if (wcscmp(cls, L"Button") == 0) {
-            SetCursor(LoadCursorW(nullptr, IDC_HAND));
-            return TRUE;
-        }
-        break;
     }
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -2247,7 +2520,7 @@ static ClientType ShowVersionPickerDialog(HWND hParent)
     int x = pr.left + (pr.right - pr.left - w) / 2;
     int y = pr.top  + (pr.bottom - pr.top - h) / 2;
 
-    VPState state = { CT_UNKNOWN, false };
+    VPState state = {};
     EnableWindow(hParent, FALSE);
 
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WOWHCVersionPicker",
@@ -2314,13 +2587,14 @@ static LRESULT CALLBACK InstallModeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             nullptr, nullptr, nullptr);
         SF(hSub2, g_fontSmall);
 
+        VPState* st = (VPState*)((LPCREATESTRUCT)lp)->lpCreateParams;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)st);
+
         HWND hOk = CreateWindowExW(0, L"BUTTON", L"Continue",
-            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_DEFPUSHBUTTON,
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
             D(154), D(186), D(86), D(26), hwnd, (HMENU)IDOK, nullptr, nullptr);
         SF(hOk, g_fontNormal);
-
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
-            (LONG_PTR)((LPCREATESTRUCT)lp)->lpCreateParams);
+        SetWindowSubclass(hOk, ModalBtnSubclassProc, 0, (DWORD_PTR)&st->hoverOk);
         break;
     }
     case WM_COMMAND: {
@@ -2328,7 +2602,6 @@ static LRESULT CALLBACK InstallModeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         WORD id = LOWORD(wp);
         if (id == IDOK) {
             HWND hR1 = GetDlgItem(hwnd, 2001);
-            // CT_114 = "new install" sentinel, CT_112 = "existing install" sentinel
             st->result = (SendMessageW(hR1, BM_GETCHECK, 0, 0) == BST_CHECKED) ? CT_114 : CT_112;
             st->done = true;
             DestroyWindow(hwnd);
@@ -2341,29 +2614,22 @@ static LRESULT CALLBACK InstallModeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         PostMessageW(g_hwnd, WM_NULL, 0, 0);
         break;
     }
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+        auto* st  = (VPState*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+        DrawModalButton(dis, false, st->hoverOk);
+        return TRUE;
+    }
     case WM_ERASEBKGND: {
         RECT rc; GetClientRect(hwnd, &rc);
         FillRect((HDC)wp, &rc, g_hbrBg);
         return 1;
     }
     case WM_CTLCOLORSTATIC: {
-        SetBkColor((HDC)wp, CLR_BG);
-        SetTextColor((HDC)wp, CLR_TEXT);
         SetBkMode((HDC)wp, TRANSPARENT);
-        return (LRESULT)g_hbrBg;
-    }
-    case WM_CTLCOLORBTN:
         SetBkColor((HDC)wp, CLR_BG);
         SetTextColor((HDC)wp, CLR_TEXT);
         return (LRESULT)g_hbrBg;
-    case WM_SETCURSOR: {
-        wchar_t cls[32] = {};
-        GetClassNameW((HWND)wp, cls, 32);
-        if (wcscmp(cls, L"Button") == 0) {
-            SetCursor(LoadCursorW(nullptr, IDC_HAND));
-            return TRUE;
-        }
-        break;
     }
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
@@ -2392,7 +2658,7 @@ static ClientType ShowInstallModeDialog(HWND hParent)
     int x = pr.left + (pr.right - pr.left - w) / 2;
     int y = pr.top  + (pr.bottom - pr.top - h) / 2;
 
-    VPState state = { CT_UNKNOWN, false };
+    VPState state = {};
     EnableWindow(hParent, FALSE);
 
     HWND hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME, L"WOWHCInstallMode",
@@ -2436,13 +2702,6 @@ static HICON CreateRecordingOverlayIcon(int sz)
     HICON hIcon = nullptr;
     canvas.GetHICON(&hIcon);
     return hIcon;
-}
-
-static COLORREF LerpColor(COLORREF a, COLORREF b, float t) {
-    return RGB(
-        (int)(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t),
-        (int)(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t),
-        (int)(GetBValue(a) + (GetBValue(b) - GetBValue(a)) * t));
 }
 
 // ── Window procedure ───────────────────────────────────────────────────────────
@@ -2521,57 +2780,78 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         HWND hLabel = CreateWindowExW(0, L"STATIC", L"Installation path:",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(250), D(480), D(16), hwnd, nullptr, nullptr, nullptr);
+            D(10), D(280), D(480), D(16), hwnd, nullptr, nullptr, nullptr);
         SF(hLabel, g_fontNormal);
 
         g_hwndPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
             g_installPath.c_str(),
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-            D(10), D(268), D(305), D(22), hwnd,
+            D(10), D(298), D(305), D(22), hwnd,
             (HMENU)(UINT_PTR)ID_EDIT_PATH, nullptr, nullptr);
         SF(g_hwndPath, g_fontNormal);
 
         g_hwndBrowse = CreateWindowExW(0, L"BUTTON", L"Browse...",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            D(324), D(268), D(82), D(22), hwnd,
+            D(324), D(298), D(82), D(22), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_BROWSE, nullptr, nullptr);
         SF(g_hwndBrowse, g_fontNormal);
 
         g_hwndOpen = CreateWindowExW(0, L"BUTTON", L"Open",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(410), D(268), D(80), D(22), hwnd,
+            D(410), D(298), D(80), D(22), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_OPEN, nullptr, nullptr);
         SF(g_hwndOpen, g_fontNormal);
+
+        // Realm row — label + dropdown, fits in the gap between path row and record row
+        {
+            HWND hRealmLbl = CreateWindowExW(0, L"STATIC", L"Realm:",
+                WS_CHILD | WS_VISIBLE,
+                D(197), D(363), D(47), D(16), hwnd, nullptr, nullptr, nullptr);
+            SF(hRealmLbl, g_fontNormal);
+        }
+        g_hwndRealmCombo = CreateWindowExW(0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
+            D(244), D(360), D(246), D(100), hwnd,
+            (HMENU)(UINT_PTR)ID_COMBO_REALM, nullptr, nullptr);
+        SF(g_hwndRealmCombo, g_fontNormal);
+        SendMessageW(g_hwndRealmCombo, CB_SETITEMHEIGHT, (WPARAM)-1, D(20));
+        SendMessageW(g_hwndRealmCombo, CB_SETITEMHEIGHT, 0,          D(20));
+        SendMessageW(g_hwndRealmCombo, CB_ADDSTRING, 0,
+            (LPARAM)L"Permadeath (Normal) / Dawnrest (PVP)");
+        SendMessageW(g_hwndRealmCombo, CB_ADDSTRING, 0,
+            (LPARAM)L"Player Testing Realm (PTR)");
+        SendMessageW(g_hwndRealmCombo, CB_SETCURSEL, (WPARAM)g_realmIndex, 0);
+        SetWindowTheme(g_hwndRealmCombo, L"DarkMode_CFD", nullptr);
 
         // Record row — Start/Stop + Save + Settings + View Videos, right-aligned x=197-490
         g_hwndRecord = CreateWindowExW(0, L"BUTTON", L"Start Recording",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            D(197), D(332), D(100), D(26), hwnd,
+            D(197), D(392), D(100), D(26), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_RECORD, nullptr, nullptr);
         SF(g_hwndRecord, g_fontNormal);
 
         g_hwndSaveReplay = CreateWindowExW(0, L"BUTTON", L"",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(303), D(332), D(30), D(26), hwnd,
+            D(303), D(392), D(30), D(26), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_SAVE_REPLAY, nullptr, nullptr);
         SF(g_hwndSaveReplay, g_fontNormal);
 
         g_hwndRecordSettings = CreateWindowExW(0, L"BUTTON", L"",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            D(339), D(332), D(30), D(26), hwnd,
+            D(339), D(392), D(30), D(26), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_RECORD_SETTINGS, nullptr, nullptr);
         SF(g_hwndRecordSettings, g_fontNormal);
 
         g_hwndUpload = CreateWindowExW(0, L"BUTTON", L"Upload Replays",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            D(375), D(332), D(115), D(26), hwnd,
+            D(375), D(392), D(115), D(26), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_UPLOAD, nullptr, nullptr);
         SF(g_hwndUpload, g_fontNormal);
 
         // Play/Install — right-aligned, 1.5× wider primary action button
         g_hwndPlay = CreateWindowExW(0, L"BUTTON", L"INSTALL",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(197), D(364), D(293), D(68), hwnd,
+            D(197), D(424), D(293), D(68), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_PLAY, nullptr, nullptr);
         SF(g_hwndPlay, g_fontPlay);
 
@@ -2579,29 +2859,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hwndTransfer = CreateWindowExW(0, L"BUTTON",
             L"Transfer UI/Macros/Addons/Settings from existing installation",
             WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
-            D(60), D(426), D(400), D(22), hwnd,
+            D(60), D(486), D(400), D(22), hwnd,
             (HMENU)(UINT_PTR)ID_BTN_TRANSFER, nullptr, nullptr);
         SF(g_hwndTransfer, g_fontNormal);
 
         g_hwndLinkAddons = CreateWindowExW(0, L"STATIC", L"Get more Addons",
             WS_CHILD | WS_VISIBLE | SS_NOTIFY,
-            D(10), D(418), D(200), D(16), hwnd,
+            D(10), D(478), D(200), D(16), hwnd,
             (HMENU)(UINT_PTR)ID_LINK_ADDONS, nullptr, nullptr);
         SF(g_hwndLinkAddons, g_fontLink);
 
         g_hwndVerAddon = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(382), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+            D(10), D(442), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
         SF(g_hwndVerAddon, g_fontSmall);
 
         g_hwndVerHermes = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(392), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+            D(10), D(452), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
         SF(g_hwndVerHermes, g_fontSmall);
 
         g_hwndVerLauncher = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE,
-            D(10), D(402), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
+            D(10), D(462), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
         SF(g_hwndVerLauncher, g_fontSmall);
 
         // Console output panel — hidden until HermesProxy starts
@@ -2611,7 +2891,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             FIXED_PITCH | FF_MODERN, L"Consolas");
         g_hwndConsole = CreateWindowExW(0, L"RICHEDIT50W", L"",
             WS_CHILD | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_NOHIDESEL,
-            D(6), D(455), D(540), D(200), hwnd,
+            D(6), D(515), D(540), D(200), hwnd,
             (HMENU)(UINT_PTR)ID_EDIT_CONSOLE, nullptr, nullptr);
         SendMessageW(g_hwndConsole, EM_SETBKGNDCOLOR, 0, RGB(0, 0, 0));
         if (g_fontConsole) SendMessageW(g_hwndConsole, WM_SETFONT, (WPARAM)g_fontConsole, TRUE);
@@ -2666,7 +2946,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
             HPEN hpen    = CreatePen(PS_SOLID, 1, CLR_SEP);
             HPEN hpenOld = (HPEN)SelectObject(hdc, hpen);
-            int  sepY    = MulDiv(242, g_dpi, 96);
+            int  sepY    = MulDiv(272, g_dpi, 96);
             MoveToEx(hdc, MulDiv(10,  g_dpi, 96), sepY, nullptr);
             LineTo  (hdc, MulDiv(510, g_dpi, 96), sepY);
             SelectObject(hdc, hpenOld);
@@ -2675,7 +2955,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         if (g_consoleExpanded && g_hbrConsoleBg) {
             RECT rc; GetClientRect(hwnd, &rc);
-            rc.top = MulDiv(449, g_dpi, 96);
+            rc.top = MulDiv(509, g_dpi, 96);
             FillRect(hdc, &rc, g_hbrConsoleBg);
         }
 
@@ -2716,6 +2996,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         if (id == ID_LINK_ADDONS) {
             ShellExecuteW(nullptr, L"open", L"https://wow-hc.com/addons/classic", nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        }
+
+        if (id == ID_COMBO_REALM && HIWORD(wp) == CBN_SELCHANGE) {
+            int sel = (int)SendMessageW(g_hwndRealmCombo, CB_GETCURSEL, 0, 0);
+            if (sel < 0) sel = 0;
+            if (sel == 1) ShowPTRDialog(hwnd);
+            UpdateRealmConfig(sel);
             break;
         }
 
@@ -3242,6 +3530,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         RefreshPlayButton();
         if (ok) PostStatus(WS_READY);
         if (ok) EnsureRecordingSaveFolder(hwnd);
+        if (ok) UpdateRealmConfig(g_realmIndex);
         if (g_pTaskbar)
             g_pTaskbar->SetProgressState(g_hwnd, ok ? TBPF_NOPROGRESS : TBPF_ERROR);
         if (ok) RefreshVersionLabels();
@@ -3351,6 +3640,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         EnableWindow(g_hwndOpen,     !g_installPath.empty());
         EnableWindow(g_hwndTransfer, TRUE);
         if (!g_clientPath.empty()) {
+            UpdateRealmConfig(g_realmIndex);
             g_workerBusy = true;
             RefreshPlayButton();
             std::thread(Worker).detach();
@@ -3361,9 +3651,45 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
+    case WM_MEASUREITEM:
+    {
+        auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
+        if (mis->CtlType == ODT_COMBOBOX && mis->CtlID == ID_COMBO_REALM) {
+            mis->itemHeight = MulDiv(20, g_dpi, 96);
+            return TRUE;
+        }
+        break;
+    }
+
     case WM_DRAWITEM:
     {
         auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+
+        if (dis->hwndItem == g_hwndRealmCombo) {
+            RECT rc = dis->rcItem;
+            bool isEditBox = (dis->itemState & ODS_COMBOBOXEDIT) != 0;
+            bool selected  = !isEditBox && (dis->itemState & ODS_SELECTED) != 0;
+            COLORREF bgClr = selected ? RGB(50, 75, 140) : CLR_BG2;
+            HBRUSH hbr = CreateSolidBrush(bgClr);
+            FillRect(dis->hDC, &rc, hbr);
+            DeleteObject(hbr);
+            if (dis->itemID != (UINT)-1) {
+                wchar_t text[256] = {};
+                SendMessageW(g_hwndRealmCombo, CB_GETLBTEXT, dis->itemID, (LPARAM)text);
+                RECT rcText = rc;
+                rcText.left += MulDiv(8, g_dpi, 96);
+                SetBkMode(dis->hDC, TRANSPARENT);
+                SetTextColor(dis->hDC, CLR_TEXT);
+                HFONT old = (HFONT)SelectObject(dis->hDC, g_fontNormal);
+                DrawTextW(dis->hDC, text, -1, &rcText,
+                    DT_VCENTER | DT_SINGLELINE | DT_LEFT | DT_END_ELLIPSIS);
+                SelectObject(dis->hDC, old);
+            }
+            if (!isEditBox && (dis->itemState & ODS_FOCUS))
+                DrawFocusRect(dis->hDC, &rc);
+            return TRUE;
+        }
+
         if (dis->hwndItem != g_hwndPlay &&
             dis->hwndItem != g_hwndBrowse &&
             dis->hwndItem != g_hwndOpen &&
@@ -3473,6 +3799,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_CTLCOLOREDIT:
+    {
+        HDC hdc = (HDC)wp;
+        SetBkColor(hdc, CLR_BG2);
+        SetTextColor(hdc, CLR_TEXT);
+        return (LRESULT)g_hbrBg2;
+    }
+
+    case WM_CTLCOLORLISTBOX:
     {
         HDC hdc = (HDC)wp;
         SetBkColor(hdc, CLR_BG2);
@@ -3819,7 +4153,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     RegisterClassExW(&wc);
 
     int WND_W = MulDiv(514, g_dpi, 96);
-    int WND_H = MulDiv(483, g_dpi, 96);
+    int WND_H = MulDiv(543, g_dpi, 96);
     RECT wa = {};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     int waW = wa.right - wa.left;
