@@ -42,6 +42,7 @@ enum : UINT {
     UID_LINK_DRIVE      = 408,
     UID_LINK_DISCONNECT = 409,
     UID_LABEL_NOT_CONN  = 410,
+    UID_TIMER_HOVER     = 411,
 };
 
 // WM_APP messages local to this window
@@ -90,6 +91,11 @@ static bool g_upCloseHover  = false;
 static bool g_upFolderHover = false;
 static bool g_upDriveHover      = false;
 static bool g_upDisconnectHover = false;
+
+static float g_upUploadHoverT     = 0.0f;
+static float g_upFolderHoverT     = 0.0f;
+static float g_upDriveHoverT      = 0.0f;
+static float g_upDisconnectHoverT = 0.0f;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static int DU(int px)
@@ -214,6 +220,13 @@ static LRESULT CALLBACK ListBoxCursorProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
+static COLORREF UpLerpColor(COLORREF a, COLORREF b, float t) {
+    return RGB(
+        (int)(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t),
+        (int)(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t),
+        (int)(GetBValue(a) + (GetBValue(b) - GetBValue(a)) * t));
+}
+
 // ── Hover subclass ─────────────────────────────────────────────────────────────
 static LRESULT CALLBACK UpBtnSub(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                   UINT_PTR, DWORD_PTR data)
@@ -224,16 +237,19 @@ static LRESULT CALLBACK UpBtnSub(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         *pHover = true;
         TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
         TrackMouseEvent(&tme);
+        SetTimer(GetParent(hwnd), UID_TIMER_HOVER, 16, nullptr);
         InvalidateRect(hwnd, nullptr, FALSE);
     } else if (msg == WM_MOUSELEAVE) {
-        *pHover = false; InvalidateRect(hwnd, nullptr, FALSE);
+        *pHover = false;
+        SetTimer(GetParent(hwnd), UID_TIMER_HOVER, 16, nullptr);
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
 // ── Draw a dark button ────────────────────────────────────────────────────────
 // isAccent=true → gold. isSecondary=true → dimmer dark (for lower-priority actions).
-static void DrawUpButton(LPDRAWITEMSTRUCT dis, bool hover, bool isAccent,
+// t = smoothstepped hover value (0.0 idle, 1.0 fully hovered).
+static void DrawUpButton(LPDRAWITEMSTRUCT dis, float t, bool isAccent,
                          bool isSecondary = false)
 {
     RECT rc = dis->rcItem; HDC hdc = dis->hDC;
@@ -242,17 +258,14 @@ static void DrawUpButton(LPDRAWITEMSTRUCT dis, bool hover, bool isAccent,
 
     COLORREF bg, border;
     if (isAccent) {
-        if      (pressed)  bg = RGB(40,  33,  13), border = RGB(100, 75, 12);
-        else if (hover)    bg = RGB(80,  65,  25), border = RGB(160,120, 20);
-        else               bg = RGB(58,  47,  18), border = RGB(130, 98, 16);
+        bg     = pressed ? RGB(40, 33, 13) : UpLerpColor(RGB(58, 47, 18), RGB(80,  65,  25), t);
+        border = pressed ? RGB(100,75, 12) : UpLerpColor(RGB(130,98, 16), RGB(160, 120, 20), t);
     } else if (isSecondary) {
-        if      (pressed)  bg = RGB(30,  30,  36), border = RGB(55, 55, 62);
-        else if (hover)    bg = RGB(36,  36,  42), border = RGB(70, 70, 78);
-        else               bg = RGB(26,  26,  31), border = RGB(50, 50, 57);
+        bg     = pressed ? RGB(30, 30, 36) : UpLerpColor(RGB(26, 26, 31), RGB(36,  36,  42), t);
+        border = pressed ? RGB(55, 55, 62) : UpLerpColor(RGB(50, 50, 57), RGB(70,  70,  78), t);
     } else {
-        if      (pressed)  bg = RGB(55,  55,  62), border = RGB(80, 80, 88);
-        else if (hover)    bg = RGB(58,  58,  66), border = RGB(100,100,110);
-        else               bg = RGB(45,  45,  52), border = RGB(80, 80, 88);
+        bg     = pressed ? RGB(55, 55, 62) : UpLerpColor(RGB(45, 45, 52), RGB(58,  58,  66), t);
+        border = pressed ? RGB(80, 80, 88) : UpLerpColor(RGB(80, 80, 88), RGB(100, 100, 110), t);
     }
 
     COLORREF fg = disabled ? UP_DIM : UP_TEXT;
@@ -421,8 +434,10 @@ static HBRUSH s_resBrBg      = nullptr;
 static HBRUSH s_resBrBg2     = nullptr;
 static HWND   s_resBtnCopy   = nullptr;
 static HWND   s_resBtnDrive  = nullptr;
-static bool   s_resCopyHover = false;
-static bool   s_resDriveHover= false;
+static bool   s_resCopyHover  = false;
+static bool   s_resDriveHover = false;
+static float  s_resCopyHoverT  = 0.0f;
+static float  s_resDriveHoverT = 0.0f;
 
 static LRESULT CALLBACK ResultWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -480,10 +495,34 @@ static LRESULT CALLBACK ResultWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetFocus(hEdit);
         return 0;
     }
+    case WM_TIMER:
+        if (wp == UID_TIMER_HOVER) {
+            bool anyActive = false;
+            auto step = [&](bool in, float& t, HWND btn) {
+                float target = in ? 1.0f : 0.0f;
+                float speed  = in ? 0.10f : 0.16f;
+                if (fabsf(t - target) > 0.001f) {
+                    t = in ? (t + speed < 1.0f ? t + speed : 1.0f) : (t - speed > 0.0f ? t - speed : 0.0f);
+                    if (btn) InvalidateRect(btn, nullptr, FALSE);
+                    anyActive = true;
+                } else { t = target; }
+            };
+            step(s_resCopyHover,  s_resCopyHoverT,  s_resBtnCopy);
+            step(s_resDriveHover, s_resDriveHoverT, s_resBtnDrive);
+            if (!anyActive) KillTimer(hwnd, UID_TIMER_HOVER);
+            return 0;
+        }
+        break;
     case WM_DRAWITEM: {
         auto* dis = (LPDRAWITEMSTRUCT)lp;
-        if (dis->hwndItem == s_resBtnCopy)  { DrawUpButton(dis, s_resCopyHover,  false, true);  return TRUE; }
-        if (dis->hwndItem == s_resBtnDrive) { DrawUpButton(dis, s_resDriveHover, false, false); return TRUE; }
+        if (dis->hwndItem == s_resBtnCopy) {
+            float t = s_resCopyHoverT;  t = t * t * (3.0f - 2.0f * t);
+            DrawUpButton(dis, t, false, true);  return TRUE;
+        }
+        if (dis->hwndItem == s_resBtnDrive) {
+            float t = s_resDriveHoverT; t = t * t * (3.0f - 2.0f * t);
+            DrawUpButton(dis, t, false, false); return TRUE;
+        }
         break;
     }
     case WM_COMMAND:
@@ -726,6 +765,24 @@ static LRESULT CALLBACK UploadWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_TIMER:
+        if (wp == UID_TIMER_HOVER) {
+            bool anyActive = false;
+            auto step = [&](bool in, float& t, HWND btn) {
+                float target = in ? 1.0f : 0.0f;
+                float speed  = in ? 0.10f : 0.16f;
+                if (fabsf(t - target) > 0.001f) {
+                    t = in ? (t + speed < 1.0f ? t + speed : 1.0f) : (t - speed > 0.0f ? t - speed : 0.0f);
+                    if (btn) InvalidateRect(btn, nullptr, FALSE);
+                    anyActive = true;
+                } else { t = target; }
+            };
+            step(g_upUploadHover,     g_upUploadHoverT,     g_upBtnUpload);
+            step(g_upFolderHover,     g_upFolderHoverT,     g_upLinkFolder);
+            step(g_upDriveHover,      g_upDriveHoverT,      g_upLinkDrive);
+            step(g_upDisconnectHover, g_upDisconnectHoverT, g_upLinkDisconnect);
+            if (!anyActive) KillTimer(hwnd, UID_TIMER_HOVER);
+            return 0;
+        }
         if (wp == UID_TIMER_THUMB) {
             if (g_upThumbNext < (int)g_upItems.size()) {
                 int i = g_upThumbNext++;
@@ -909,7 +966,8 @@ static LRESULT CALLBACK UploadWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return TRUE;
         }
         if (dis->hwndItem == g_upBtnUpload) {
-            DrawUpButton(dis, g_upUploadHover, false);
+            float t = g_upUploadHoverT; t = t * t * (3.0f - 2.0f * t);
+            DrawUpButton(dis, t, false);
             return TRUE;
         }
         break;
@@ -920,13 +978,15 @@ static LRESULT CALLBACK UploadWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HWND ctl = (HWND)lp;
         SetBkColor(hdc, UP_BG);
         if (ctl == g_upLinkFolder || ctl == g_upLinkDrive) {
-            bool hover = (ctl == g_upLinkFolder) ? g_upFolderHover : g_upDriveHover;
-            SetTextColor(hdc, hover ? RGB(140,200,255) : RGB(100,170,240));
+            float raw = (ctl == g_upLinkFolder) ? g_upFolderHoverT : g_upDriveHoverT;
+            float t = raw * raw * (3.0f - 2.0f * raw);
+            SetTextColor(hdc, UpLerpColor(RGB(100,170,240), RGB(140,200,255), t));
             SetBkMode(hdc, TRANSPARENT);
             return (LRESULT)GetStockObject(NULL_BRUSH);
         }
         if (ctl == g_upLinkDisconnect) {
-            SetTextColor(hdc, g_upDisconnectHover ? RGB(210,90,80) : RGB(160,65,60));
+            float t = g_upDisconnectHoverT; t = t * t * (3.0f - 2.0f * t);
+            SetTextColor(hdc, UpLerpColor(RGB(160,65,60), RGB(210,90,80), t));
             SetBkMode(hdc, TRANSPARENT);
             return (LRESULT)GetStockObject(NULL_BRUSH);
         }

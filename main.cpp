@@ -90,6 +90,7 @@ enum : UINT {
     ID_BTN_RECORD_SETTINGS  = 114,
     ID_EDIT_CONSOLE         = 115,
     ID_TIMER_UPDATE         = 200,
+    ID_TIMER_HOVER          = 201,
 };
 
 #define WM_WORKER_STATUS    (WM_APP + 1)  // wParam = WorkerStatus
@@ -196,6 +197,18 @@ static bool g_recordHover         = false;
 static bool g_saveReplayHover     = false;
 static bool g_uploadHover         = false;
 static bool g_recordSettingsHover = false;
+
+// Animated hover values (0.0 = idle, 1.0 = fully hovered)
+static float g_playHoverT           = 0.0f;
+static float g_browseHoverT         = 0.0f;
+static float g_openHoverT           = 0.0f;
+static float g_transferHoverT       = 0.0f;
+static float g_linkHoverT           = 0.0f;
+static float g_addonsHoverT         = 0.0f;
+static float g_recordHoverT         = 0.0f;
+static float g_saveReplayHoverT     = 0.0f;
+static float g_uploadHoverT         = 0.0f;
+static float g_recordSettingsHoverT = 0.0f;
 static bool g_freshInstall     = false;
 static ClientType g_clientType = CT_UNKNOWN;
 static std::wstring g_wowTweakedExePath;   // full path to Wow_tweaked.exe (1.12.1 only)
@@ -2096,10 +2109,11 @@ static LRESULT CALLBACK BtnSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         *pHover = true;
         TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
         TrackMouseEvent(&tme);
+        SetTimer(GetParent(hwnd), ID_TIMER_HOVER, 16, nullptr);
         InvalidateRect(hwnd, nullptr, FALSE);
     } else if (msg == WM_MOUSELEAVE) {
         *pHover = false;
-        InvalidateRect(hwnd, nullptr, FALSE);
+        SetTimer(GetParent(hwnd), ID_TIMER_HOVER, 16, nullptr);
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
@@ -2422,6 +2436,13 @@ static HICON CreateRecordingOverlayIcon(int sz)
     HICON hIcon = nullptr;
     canvas.GetHICON(&hIcon);
     return hIcon;
+}
+
+static COLORREF LerpColor(COLORREF a, COLORREF b, float t) {
+    return RGB(
+        (int)(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t),
+        (int)(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t),
+        (int)(GetBValue(a) + (GetBValue(b) - GetBValue(a)) * t));
 }
 
 // ── Window procedure ───────────────────────────────────────────────────────────
@@ -3264,6 +3285,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_TIMER:
+        if (wp == ID_TIMER_HOVER) {
+            bool anyActive = false;
+            auto step = [&](bool in, float& t, HWND btn) {
+                float target = in ? 1.0f : 0.0f;
+                float speed  = in ? 0.10f : 0.16f;
+                if (fabsf(t - target) > 0.001f) {
+                    t = in ? (t + speed < 1.0f ? t + speed : 1.0f) : (t - speed > 0.0f ? t - speed : 0.0f);
+                    if (btn) InvalidateRect(btn, nullptr, FALSE);
+                    anyActive = true;
+                } else {
+                    t = target;
+                }
+            };
+            step(g_playHover,           g_playHoverT,           g_hwndPlay);
+            step(g_browseHover,         g_browseHoverT,         g_hwndBrowse);
+            step(g_openHover,           g_openHoverT,           g_hwndOpen);
+            step(g_transferHover,       g_transferHoverT,       g_hwndTransfer);
+            step(g_recordHover,         g_recordHoverT,         g_hwndRecord);
+            step(g_saveReplayHover,     g_saveReplayHoverT,     g_hwndSaveReplay);
+            step(g_uploadHover,         g_uploadHoverT,         g_hwndUpload);
+            step(g_recordSettingsHover, g_recordSettingsHoverT, g_hwndRecordSettings);
+            step(g_linkHover,           g_linkHoverT,           g_hwndLink);
+            step(g_addonsHover,         g_addonsHoverT,         g_hwndLinkAddons);
+            if (!anyActive) KillTimer(hwnd, ID_TIMER_HOVER);
+            return 0;
+        }
         if (wp == ID_TIMER_UPDATE && !g_workerBusy.load())
             std::thread(PeriodicUpdateCheck).detach();
         return 0;
@@ -3337,29 +3384,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         bool isUpload         = (dis->hwndItem == g_hwndUpload);
         bool isRecordSettings = (dis->hwndItem == g_hwndRecordSettings);
         bool isRecording = isRecord && RB_IsRunning();
-        bool hover    = !disabled && (isPlay             ? g_playHover :
-                        isRecord          ? g_recordHover :
-                        isSaveReplay      ? g_saveReplayHover :
-                        isUpload          ? g_uploadHover :
-                        isRecordSettings  ? g_recordSettingsHover :
-                        (dis->hwndItem == g_hwndBrowse)   ? g_browseHover :
-                        (dis->hwndItem == g_hwndOpen)     ? g_openHover :
-                        (dis->hwndItem == g_hwndTransfer) ? g_transferHover :
-                        false);
+        float hoverRaw = disabled ? 0.0f :
+                         (isPlay            ? g_playHoverT :
+                          isRecord          ? g_recordHoverT :
+                          isSaveReplay      ? g_saveReplayHoverT :
+                          isUpload          ? g_uploadHoverT :
+                          isRecordSettings  ? g_recordSettingsHoverT :
+                          (dis->hwndItem == g_hwndBrowse)   ? g_browseHoverT :
+                          (dis->hwndItem == g_hwndOpen)     ? g_openHoverT :
+                          (dis->hwndItem == g_hwndTransfer) ? g_transferHoverT :
+                          0.0f);
+        // smoothstep ease
+        float t = hoverRaw * hoverRaw * (3.0f - 2.0f * hoverRaw);
 
         COLORREF bg;
-        if      (pressed)      bg = RGB(55, 55, 62);
-        else if (isRecording)  bg = hover ? RGB(110, 28, 28) : RGB(90, 18, 18);
-        else if (hover)        bg = isPlay ? RGB(68, 58, 30) : RGB(58, 58, 66);
-        else                   bg = RGB(45, 45, 52);
+        if      (pressed)     bg = RGB(55, 55, 62);
+        else if (isRecording) bg = LerpColor(RGB(90, 18, 18), RGB(110, 28, 28), t);
+        else                  bg = LerpColor(RGB(45, 45, 52), isPlay ? RGB(68, 58, 30) : RGB(58, 58, 66), t);
         COLORREF fg = disabled ? RGB(90,90,95) : CLR_TEXT;
 
         HBRUSH hbr = CreateSolidBrush(bg);
         FillRect(hdc, &rc, hbr);
         DeleteObject(hbr);
 
-        COLORREF borderClr = isRecording ? (hover ? RGB(180, 60, 60) : RGB(150, 40, 40)) :
-                             hover ? (isPlay ? RGB(140,105,20) : RGB(100,100,110)) : RGB(80,80,88);
+        COLORREF borderClr = isRecording
+            ? LerpColor(RGB(150, 40, 40), RGB(180, 60, 60), t)
+            : LerpColor(RGB(80, 80, 88), isPlay ? RGB(140, 105, 20) : RGB(100, 100, 110), t);
         HPEN hpen    = CreatePen(PS_SOLID, 1, borderClr);
         HPEN hpenOld = (HPEN)SelectObject(hdc, hpen);
         MoveToEx(hdc, rc.left,    rc.top,      nullptr);
@@ -3431,14 +3481,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HWND hCtl    = (HWND)lp;
         SetBkColor(hdc, CLR_BG);
         if (hCtl == g_hwndLink) {
-            COLORREF linkClr = g_linkHover ? RGB(140, 200, 255) : RGB(100, 170, 240);
-            SetTextColor(hdc, linkClr);
+            float lt = g_linkHoverT * g_linkHoverT * (3.0f - 2.0f * g_linkHoverT);
+            SetTextColor(hdc, LerpColor(RGB(100, 170, 240), RGB(140, 200, 255), lt));
             SetBkMode(hdc, TRANSPARENT);
             return (LRESULT)g_hbrBg;
         }
         if (hCtl == g_hwndLinkAddons) {
-            COLORREF linkClr = g_addonsHover ? RGB(140, 200, 255) : RGB(100, 170, 240);
-            SetTextColor(hdc, linkClr);
+            float lt = g_addonsHoverT * g_addonsHoverT * (3.0f - 2.0f * g_addonsHoverT);
+            SetTextColor(hdc, LerpColor(RGB(100, 170, 240), RGB(140, 200, 255), lt));
             SetBkMode(hdc, TRANSPARENT);
             return (LRESULT)GetStockObject(NULL_BRUSH);
         }

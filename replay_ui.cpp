@@ -39,6 +39,7 @@ enum : UINT {
     RID_BTN_SAVENOW    = 310,
     RID_STATIC_STATUS  = 311,
     RID_TIMER_POLL     = 312,
+    RID_TIMER_HOVER    = 313,
     RID_BTN_CLOSE      = 316,
 };
 
@@ -72,6 +73,11 @@ static bool g_ruiBtnSSHover    = false;
 static bool g_ruiBtnSvHover    = false;
 static bool g_ruiBtnCloseHover = false;
 static bool g_ruiBtnFolderHover= false;
+
+static float g_ruiBtnSSHoverT     = 0.0f;
+static float g_ruiBtnSvHoverT     = 0.0f;
+static float g_ruiBtnCloseHoverT  = 0.0f;
+static float g_ruiBtnFolderHoverT = 0.0f;
 
 // Hotkey capture state
 struct HotkeyState { UINT vk; UINT mods; bool capturing; };
@@ -169,6 +175,13 @@ static LRESULT CALLBACK HkEditSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
+static COLORREF RuiLerpColor(COLORREF a, COLORREF b, float t) {
+    return RGB(
+        (int)(GetRValue(a) + (GetRValue(b) - GetRValue(a)) * t),
+        (int)(GetGValue(a) + (GetGValue(b) - GetGValue(a)) * t),
+        (int)(GetBValue(a) + (GetBValue(b) - GetBValue(a)) * t));
+}
+
 static LRESULT CALLBACK BtnSubRui(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                    UINT_PTR uId, DWORD_PTR data)
 {
@@ -178,28 +191,28 @@ static LRESULT CALLBACK BtnSubRui(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         *pHover = true;
         TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
         TrackMouseEvent(&tme);
+        SetTimer(GetParent(hwnd), RID_TIMER_HOVER, 16, nullptr);
         InvalidateRect(hwnd, nullptr, FALSE);
     } else if (msg == WM_MOUSELEAVE) {
-        *pHover = false; InvalidateRect(hwnd, nullptr, FALSE);
+        *pHover = false;
+        SetTimer(GetParent(hwnd), RID_TIMER_HOVER, 16, nullptr);
     }
     return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
-static void DrawDarkButton(LPDRAWITEMSTRUCT dis, bool hover, bool isAccent)
+// t = smoothstepped hover value (0.0 idle, 1.0 fully hovered).
+static void DrawDarkButton(LPDRAWITEMSTRUCT dis, float t, bool isAccent)
 {
     RECT rc = dis->rcItem;
     HDC  hdc = dis->hDC;
     bool pressed  = (dis->itemState & ODS_SELECTED) != 0;
     bool disabled = (dis->itemState & ODS_DISABLED) != 0;
 
-    COLORREF bg;
-    if      (pressed)  bg = RGB(55, 55, 62);
-    else if (hover)    bg = isAccent ? RGB(68, 58, 30) : RGB(58, 58, 66);
-    else               bg = RGB(45, 45, 52);
-
+    COLORREF bg     = pressed ? RGB(55, 55, 62)
+                              : RuiLerpColor(RGB(45, 45, 52), isAccent ? RGB(68, 58, 30) : RGB(58, 58, 66), t);
     COLORREF fg     = disabled ? RUI_DIM : RUI_TEXT;
-    COLORREF border = hover ? (isAccent ? RGB(140, 105, 20) : RGB(100, 100, 110))
-                             : RGB(80, 80, 88);
+    COLORREF border = pressed ? RGB(80, 80, 88)
+                              : RuiLerpColor(RGB(80, 80, 88), isAccent ? RGB(140, 105, 20) : RGB(100, 100, 110), t);
 
     HBRUSH hbr = CreateSolidBrush(bg);
     FillRect(hdc, &rc, hbr);
@@ -454,6 +467,24 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_TIMER:
+        if (wp == RID_TIMER_HOVER) {
+            bool anyActive = false;
+            auto step = [&](bool in, float& t, HWND btn) {
+                float target = in ? 1.0f : 0.0f;
+                float speed  = in ? 0.10f : 0.16f;
+                if (fabsf(t - target) > 0.001f) {
+                    t = in ? (t + speed < 1.0f ? t + speed : 1.0f) : (t - speed > 0.0f ? t - speed : 0.0f);
+                    if (btn) InvalidateRect(btn, nullptr, FALSE);
+                    anyActive = true;
+                } else { t = target; }
+            };
+            step(g_ruiBtnSSHover,     g_ruiBtnSSHoverT,     g_ruiBtnStartStop);
+            step(g_ruiBtnSvHover,     g_ruiBtnSvHoverT,     g_ruiBtnSave);
+            step(g_ruiBtnCloseHover,  g_ruiBtnCloseHoverT,  g_ruiBtnClose);
+            step(g_ruiBtnFolderHover, g_ruiBtnFolderHoverT, g_ruiBtnFolder);
+            if (!anyActive) KillTimer(hwnd, RID_TIMER_HOVER);
+            return 0;
+        }
         if (wp == RID_TIMER_POLL) RefreshStatus();
         return 0;
 
@@ -534,14 +565,15 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_DRAWITEM: {
         auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+        auto ss = [](float r) { return r * r * (3.0f - 2.0f * r); };
         if (dis->hwndItem == g_ruiBtnStartStop)
-            DrawDarkButton(dis, g_ruiBtnSSHover, true);
+            DrawDarkButton(dis, ss(g_ruiBtnSSHoverT), true);
         else if (dis->hwndItem == g_ruiBtnSave)
-            DrawDarkButton(dis, g_ruiBtnSvHover, false);
+            DrawDarkButton(dis, ss(g_ruiBtnSvHoverT), false);
         else if (dis->hwndItem == g_ruiBtnClose)
-            DrawDarkButton(dis, g_ruiBtnCloseHover, false);
+            DrawDarkButton(dis, ss(g_ruiBtnCloseHoverT), false);
         else if (dis->hwndItem == g_ruiBtnFolder)
-            DrawDarkButton(dis, g_ruiBtnFolderHover, false);
+            DrawDarkButton(dis, ss(g_ruiBtnFolderHoverT), false);
         else break;
         return TRUE;
     }
