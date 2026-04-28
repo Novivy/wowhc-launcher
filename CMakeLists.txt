@@ -33,6 +33,8 @@ add_executable(${PROJECT_NAME} WIN32
     main.cpp
     replay_buffer.cpp
     replay_ui.cpp
+    google_drive.cpp
+    upload_window.cpp
     app.rc
 )
 
@@ -57,6 +59,17 @@ else()
   set(_VER_STR "v0.0.0-dev")
 endif()
 
+if(DEFINED GDRIVE_CLIENT_ID)
+  set(_GDRIVE_ID  "${GDRIVE_CLIENT_ID}")
+else()
+  set(_GDRIVE_ID  "")
+endif()
+if(DEFINED GDRIVE_CLIENT_SECRET)
+  set(_GDRIVE_SEC "${GDRIVE_CLIENT_SECRET}")
+else()
+  set(_GDRIVE_SEC "")
+endif()
+
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     UNICODE
     _UNICODE
@@ -64,6 +77,8 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     NOMINMAX
     _WIN32_WINNT=0x0A00
     LAUNCHER_VERSION_STR="${_VER_STR}"
+    GDRIVE_CLIENT_ID="${_GDRIVE_ID}"
+    GDRIVE_CLIENT_SECRET="${_GDRIVE_SEC}"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/include")
@@ -97,6 +112,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     gdiplus
     d3d11
     dxgi
+    propsys
 )
 
 # Copy FFmpeg DLLs next to the built EXE

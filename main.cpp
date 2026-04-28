@@ -37,6 +37,7 @@
 
 #include "replay_buffer.h"
 #include "replay_ui.h"
+#include "upload_window.h"
 
 // ── Build-time config ──────────────────────────────────────────────────────────
 static constexpr wchar_t CLIENT_DOWNLOAD_URL[] =
@@ -85,7 +86,7 @@ enum : UINT {
     ID_BTN_RECORD        = 110,
     ID_STATIC_RB_STATUS  = 111,
     ID_BTN_SAVE_REPLAY      = 112,
-    ID_BTN_VIEW_VIDEOS      = 113,
+    ID_BTN_UPLOAD           = 113,
     ID_BTN_RECORD_SETTINGS  = 114,
     ID_EDIT_CONSOLE         = 115,
     ID_TIMER_UPDATE         = 200,
@@ -131,7 +132,7 @@ static const wchar_t* STATUS_TEXT[] = {
     L"Downloading WOW_HC addon...",
     L"Installing WOW_HC addon...",
     L"Transferring UI, macros, addons and settings...",
-    L"Ready to play!",
+    L"Ready to Play",
     L"Error - check your connection or installation path.",
     L"Launching...",
     L"Select a new or existing installation folder",
@@ -193,7 +194,7 @@ static bool g_linkHover     = false;
 static bool g_addonsHover   = false;
 static bool g_recordHover         = false;
 static bool g_saveReplayHover     = false;
-static bool g_viewVideosHover     = false;
+static bool g_uploadHover         = false;
 static bool g_recordSettingsHover = false;
 static bool g_freshInstall     = false;
 static ClientType g_clientType = CT_UNKNOWN;
@@ -202,7 +203,7 @@ static ClientType g_pendingInstallType    = CT_UNKNOWN; // chosen version before
 static bool       g_pendingExistingInstall = false;     // true when Browse opened for existing-install flow
 static HWND  g_hwndRecord          = nullptr;
 static HWND  g_hwndSaveReplay      = nullptr;
-static HWND  g_hwndViewVideos      = nullptr;
+static HWND  g_hwndUpload          = nullptr;
 static HWND  g_hwndRecordSettings  = nullptr;
 static HICON g_hIconRecordingOverlay = nullptr;
 
@@ -1292,7 +1293,6 @@ static std::wstring GetLauncherVersion()
 
 static bool IsDevBuild()
 {
-    return false;
     return strstr(LAUNCHER_VERSION_STR, "-dev") != nullptr;
 }
 
@@ -2541,11 +2541,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             (HMENU)(UINT_PTR)ID_BTN_RECORD_SETTINGS, nullptr, nullptr);
         SF(g_hwndRecordSettings, g_fontNormal);
 
-        g_hwndViewVideos = CreateWindowExW(0, L"BUTTON", L"View Videos",
+        g_hwndUpload = CreateWindowExW(0, L"BUTTON", L"Upload Replays",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             D(375), D(332), D(115), D(26), hwnd,
-            (HMENU)(UINT_PTR)ID_BTN_VIEW_VIDEOS, nullptr, nullptr);
-        SF(g_hwndViewVideos, g_fontNormal);
+            (HMENU)(UINT_PTR)ID_BTN_UPLOAD, nullptr, nullptr);
+        SF(g_hwndUpload, g_fontNormal);
 
         // Play/Install — right-aligned, 1.5× wider primary action button
         g_hwndPlay = CreateWindowExW(0, L"BUTTON", L"INSTALL",
@@ -2617,7 +2617,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SetWindowSubclass(g_hwndLinkAddons,  BtnSubclassProc, 11, (DWORD_PTR)&g_addonsHover);
         SetWindowSubclass(g_hwndRecord,         BtnSubclassProc, 12, (DWORD_PTR)&g_recordHover);
         SetWindowSubclass(g_hwndSaveReplay,     BtnSubclassProc, 13, (DWORD_PTR)&g_saveReplayHover);
-        SetWindowSubclass(g_hwndViewVideos,     BtnSubclassProc, 14, (DWORD_PTR)&g_viewVideosHover);
+        SetWindowSubclass(g_hwndUpload,         BtnSubclassProc, 14, (DWORD_PTR)&g_uploadHover);
         SetWindowSubclass(g_hwndRecordSettings, BtnSubclassProc, 15, (DWORD_PTR)&g_recordSettingsHover);
 
         SetTimer(hwnd, ID_TIMER_UPDATE, 24u * 60u * 60u * 1000u, nullptr);
@@ -3057,14 +3057,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (id == ID_BTN_SAVE_REPLAY) {
             RB_SaveNow();
         }
-        else if (id == ID_BTN_VIEW_VIDEOS) {
-            std::wstring folder = RB_GetSettings().saveFolder;
-            if (!folder.empty())
-                ShellExecuteW(nullptr, L"explore", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            else
-                MessageBoxW(hwnd,
-                    L"No save folder configured.\nPlease set one in Record Settings.",
-                    L"No Folder Set", MB_OK | MB_ICONINFORMATION);
+        else if (id == ID_BTN_UPLOAD) {
+            ShowUploadWindow(hwnd, g_configDir);
         }
         else if (id == ID_BTN_TRANSFER) {
             if (g_workerBusy.load()) break;
@@ -3329,7 +3323,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             dis->hwndItem != g_hwndTransfer &&
             dis->hwndItem != g_hwndRecord &&
             dis->hwndItem != g_hwndSaveReplay &&
-            dis->hwndItem != g_hwndViewVideos &&
+            dis->hwndItem != g_hwndUpload &&
             dis->hwndItem != g_hwndRecordSettings)
             break;
 
@@ -3340,13 +3334,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         bool isPlay      = (dis->hwndItem == g_hwndPlay);
         bool isRecord         = (dis->hwndItem == g_hwndRecord);
         bool isSaveReplay     = (dis->hwndItem == g_hwndSaveReplay);
-        bool isViewVideos     = (dis->hwndItem == g_hwndViewVideos);
+        bool isUpload         = (dis->hwndItem == g_hwndUpload);
         bool isRecordSettings = (dis->hwndItem == g_hwndRecordSettings);
         bool isRecording = isRecord && RB_IsRunning();
         bool hover    = !disabled && (isPlay             ? g_playHover :
                         isRecord          ? g_recordHover :
                         isSaveReplay      ? g_saveReplayHover :
-                        isViewVideos      ? g_viewVideosHover :
+                        isUpload          ? g_uploadHover :
                         isRecordSettings  ? g_recordSettingsHover :
                         (dis->hwndItem == g_hwndBrowse)   ? g_browseHover :
                         (dis->hwndItem == g_hwndOpen)     ? g_openHover :

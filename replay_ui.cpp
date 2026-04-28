@@ -726,7 +726,7 @@ void ShowReplayWindow(HWND hParent)
 
     HWND hwnd = CreateWindowExW(0,
         L"WOWHCReplaySettings", L"Screen Recorder Settings",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
         x, y, w, h,
         hParent, nullptr, GetModuleHandleW(nullptr), nullptr);
 

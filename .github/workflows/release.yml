@@ -48,6 +48,8 @@ jobs:
           cmake -G "Ninja" `
             -DCMAKE_BUILD_TYPE=Release `
             "-DLAUNCHER_VERSION=${{ github.ref_name }}" `
+            "-DGDRIVE_CLIENT_ID=${{ secrets.GDRIVE_CLIENT_ID }}" `
+            "-DGDRIVE_CLIENT_SECRET=${{ secrets.GDRIVE_CLIENT_SECRET }}" `
             -B build-release .
         shell: pwsh
 
