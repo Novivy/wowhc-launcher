@@ -1,0 +1,60 @@
+{
+  "name": "WoW Hardcore Launcher — Variant B (Forge)",
+  "version": "1.0.0",
+  "size": { "width": 700, "height": 400 },
+  "fonts": {
+    "display": "\"Cinzel\", Georgia, serif",
+    "body": "\"Inter\", system-ui, sans-serif",
+    "mono": "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+  },
+  "colors": {
+    "bg0":        "#0a0806",
+    "bg1":        "#14100a",
+    "bg2":        "#1d1810",
+    "plate":      "#221a12",
+    "chrome":     "#070504",
+
+    "line":       "rgba(180, 130, 60, 0.20)",
+    "line2":      "rgba(180, 130, 60, 0.10)",
+
+    "text":       "#ecdab0",
+    "textDim":    "#a08868",
+    "textFaint":  "#6a5638",
+
+    "amber":      "#e0a04a",
+    "amberGlow":  "rgba(224, 160, 74, 0.5)",
+    "ember":      "#c84a1a",
+    "blood":      "#9a3422",
+
+    "startGameBtnFg": "#1a0a04",
+    "progressTrack":  "#0a0604"
+  },
+  "spacing": {
+    "windowChromeHeight": 26,
+    "leftRailWidth": 152,
+    "bottomBarPadding": "10px 14px 16px",
+    "bottomBarRightColWidth": 240,
+    "actionBtnHeight": 28,
+    "realmSelectHeight": 28,
+    "startBtnHeight": 50,
+    "settingsBtnWidth": 38,
+    "progressBarHeight": 6,
+    "pathIconBtnSize": 18
+  },
+  "typography": {
+    "windowTitle":   { "size": 9,    "letterSpacing": "0.18em", "weight": 600, "transform": "uppercase" },
+    "heroEyebrow":   { "size": 8.5,  "letterSpacing": "0.3em",  "weight": 700, "transform": "uppercase" },
+    "heroTitle":     { "size": 17,   "letterSpacing": "0.01em", "weight": 600, "family": "display" },
+    "heroSubtitle":  { "size": 10.5, "weight": 400 },
+    "panelHeader":   { "size": 8.5,  "letterSpacing": "0.24em", "weight": 700, "transform": "uppercase" },
+    "patchNoteTag":  { "size": 8,    "letterSpacing": "0.18em", "weight": 700 },
+    "patchNoteTitle":{ "size": 11,   "weight": 500, "family": "display" },
+    "actionBtn":     { "size": 7.5,  "letterSpacing": "0.06em", "weight": 600, "transform": "uppercase" },
+    "startGameBtn":  { "size": 16,   "letterSpacing": "0.2em",  "weight": 700, "family": "display" },
+    "monoSmall":     { "size": 9,    "family": "mono" }
+  },
+  "icons": {
+    "_note": "Stroke icons share strokeWidth=1.8 round caps/joins; rec is a filled dot of r=7 in a 24×24 box for optical parity with stroke icons.",
+    "files": ["rec.svg", "save.svg", "upload.svg", "pen.svg", "folder.svg", "cog.svg"]
+  }
+}

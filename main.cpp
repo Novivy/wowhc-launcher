@@ -36,6 +36,10 @@
 #pragma comment(lib, "version.lib")
 #pragma comment(lib, "ws2_32.lib")
 
+#include <wrl/client.h>
+#include <wrl/event.h>
+#include "WebView2.h"
+
 #include "replay_buffer.h"
 #include "replay_ui.h"
 #include "upload_window.h"
@@ -58,7 +62,8 @@ static constexpr wchar_t ADDON_GH_OWNER[]      = L"Novivy";
 static constexpr wchar_t ADDON_GH_REPO[]       = L"wow-hc-addon";
 static constexpr wchar_t LAUNCHER_GH_OWNER[]   = L"Novivy";
 static constexpr wchar_t LAUNCHER_GH_REPO[]    = L"wowhc-launcher";
-static constexpr char    LAUNCHER_EXE_ASSET[]  = "WOW-HC-Launcher.exe";
+static constexpr char    LAUNCHER_EXE_ASSET[]      = "WOW-HC-Launcher.exe";
+static constexpr char    LAUNCHER_FULL_ZIP_ASSET[] = "WOW-HC-Launcher-Full.zip";
 
 #ifndef LAUNCHER_VERSION_STR
 #define LAUNCHER_VERSION_STR "v0.0.0-dev"
@@ -96,6 +101,7 @@ enum : UINT {
     ID_COMBO_REALM          = 116,
     ID_TIMER_UPDATE         = 200,
     ID_TIMER_HOVER          = 201,
+    ID_TIMER_LIVE           = 202,
 };
 
 #define WM_WORKER_STATUS    (WM_APP + 1)  // wParam = WorkerStatus
@@ -109,6 +115,7 @@ enum : UINT {
 #define WM_STARTUP_CHECK_DONE (WM_APP + 9) // startup launcher-update check finished
 #define WM_HERMES_LINE        (WM_APP + 10) // lParam = new std::wstring* (one output line)
 #define WM_HERMES_CLOSED      (WM_APP + 11) // HermesProxy terminated — collapse console
+#define WM_LIVE_DATA_JSON     (WM_APP + 12) // lParam = new std::wstring* (JSON to post to WebView)
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
@@ -145,40 +152,50 @@ static const wchar_t* STATUS_TEXT[] = {
 };
 
 // ── Globals ────────────────────────────────────────────────────────────────────
-static HINSTANCE         g_hInst             = nullptr;
-static HWND              g_hwnd              = nullptr;
-static HWND              g_hwndStatus        = nullptr;
-static HWND              g_hwndProgress      = nullptr;
-static HWND              g_hwndPath          = nullptr;
-static HWND              g_hwndPlay          = nullptr;
-static HWND              g_hwndBrowse        = nullptr;
-static HWND              g_hwndOpen          = nullptr;
-static HWND              g_hwndTransfer      = nullptr;
+static HINSTANCE g_hInst = nullptr;
+static HWND      g_hwnd  = nullptr;
 
-static HFONT             g_fontNormal        = nullptr;
-static HFONT             g_fontPlay          = nullptr;
-static HFONT             g_fontLink          = nullptr;
-static HFONT             g_fontSmall         = nullptr;
-static HWND              g_hwndLink          = nullptr;
-static HWND              g_hwndLinkAddons    = nullptr;
-static HWND              g_hwndVerLauncher   = nullptr;
-static HWND              g_hwndVerHermes     = nullptr;
-static HWND              g_hwndVerAddon      = nullptr;
+// WebView2
+static Microsoft::WRL::ComPtr<ICoreWebView2>           g_webview;
+static Microsoft::WRL::ComPtr<ICoreWebView2Controller> g_wvCtrl;
+static bool g_wvReady = false;
 
-static Gdiplus::Bitmap*  g_logoBitmap        = nullptr;
-static ITaskbarList3*    g_pTaskbar          = nullptr;
-static ULONG_PTR         g_gdiplusToken      = 0;
-static UINT              g_taskbarCreatedMsg = 0;
-static HICON             g_hIconLarge        = nullptr;
-static HICON             g_hIconSmall        = nullptr;
-static HBRUSH            g_hbrBg             = nullptr;
-static HBRUSH            g_hbrBg2            = nullptr;
-static HBRUSH            g_hbrConsoleBg      = nullptr;
+// App state mirrored to WebView
+static std::wstring g_currentStatus;
+static int          g_currentProgress   = 0;
+static bool         g_showConsole       = false;
+static int          g_consoleLineCount  = 0;
 
+// ANSI 16-color palette (used by HermesProxy console rendering)
+static const COLORREF g_ansiColors[16] = {
+    RGB(0,0,0),       RGB(128,0,0),     RGB(0,128,0),     RGB(128,128,0),
+    RGB(0,0,128),     RGB(128,0,128),   RGB(0,128,128),   RGB(192,192,192),
+    RGB(128,128,128), RGB(255,0,0),     RGB(0,255,0),     RGB(255,255,0),
+    RGB(0,0,255),     RGB(255,0,255),   RGB(0,255,255),   RGB(255,255,255),
+};
+
+// Taskbar
+static ITaskbarList3* g_pTaskbar          = nullptr;
+static ULONG_PTR      g_gdiplusToken      = 0;
+static UINT           g_taskbarCreatedMsg = 0;
+static HICON          g_hIconLarge        = nullptr;
+static HICON          g_hIconSmall        = nullptr;
+static HBRUSH         g_hbrBg             = nullptr; // still used by modal dialogs
+static HBRUSH         g_hbrBg2            = nullptr;
+static HICON          g_hIconRecordingOverlay = nullptr;
+
+// Taskbar progress cache
+static int  g_taskbarLastPct     = 0;
+static bool g_taskbarHasProgress = false;
+
+static UINT g_dpi = 96;
+
+// Install / client paths
 static std::wstring g_installPath;
 static std::wstring g_clientPath;
-static std::wstring g_hermesExePath;    // full path to HermesProxy.exe
-static std::wstring g_arctiumExePath;   // full path to "Arctium WoW Launcher.exe"
+static std::wstring g_hermesExePath;
+static std::wstring g_arctiumExePath;
+static std::wstring g_wowTweakedExePath;
 static std::wstring g_configDir;
 static std::wstring g_logPath;
 
@@ -186,65 +203,49 @@ static std::atomic<bool> g_workerBusy{false};
 static std::atomic<bool> g_playReady{false};
 static std::atomic<bool> g_clientInstalled{false};
 
-// Taskbar progress cache — restored when TaskbarButtonCreated fires after window show
-static int  g_taskbarLastPct     = 0;
-static bool g_taskbarHasProgress = false;
+static bool       g_freshInstall          = false;
+static ClientType g_clientType            = CT_UNKNOWN;
+static ClientType g_pendingInstallType    = CT_UNKNOWN;
+static bool       g_pendingExistingInstall = false;
+static int        g_realmIndex            = 0;
 
-static UINT g_dpi = 96;
+// HermesProxy pipe
+static HANDLE g_hermesProcess  = nullptr;
+static HANDLE g_hermesPipeRead = nullptr;
+static HMODULE g_hRichEdit     = nullptr; // still loaded for existing RichEdit code paths
 
-static bool g_playHover     = false;
-static bool g_browseHover   = false;
-static bool g_openHover     = false;
-static bool g_transferHover = false;
-static bool g_linkHover     = false;
-static bool g_addonsHover   = false;
-static bool g_recordHover         = false;
-static bool g_saveReplayHover     = false;
-static bool g_uploadHover         = false;
-static bool g_recordSettingsHover = false;
+static constexpr int WND_CLIENT_W = 875;
+static constexpr int WND_CLIENT_H = 500;
 
-// Animated hover values (0.0 = idle, 1.0 = fully hovered)
-static float g_playHoverT           = 0.0f;
-static float g_browseHoverT         = 0.0f;
-static float g_openHoverT           = 0.0f;
-static float g_transferHoverT       = 0.0f;
-static float g_linkHoverT           = 0.0f;
-static float g_addonsHoverT         = 0.0f;
-static float g_recordHoverT         = 0.0f;
-static float g_saveReplayHoverT     = 0.0f;
-static float g_uploadHoverT         = 0.0f;
-static float g_recordSettingsHoverT = 0.0f;
-static bool g_freshInstall     = false;
-static ClientType g_clientType = CT_UNKNOWN;
-static std::wstring g_wowTweakedExePath;   // full path to Wow_tweaked.exe (1.12.1 only)
-static ClientType g_pendingInstallType    = CT_UNKNOWN; // chosen version before folder pick
-static bool       g_pendingExistingInstall = false;     // true when Browse opened for existing-install flow
-static HWND  g_hwndRecord          = nullptr;
-static HWND  g_hwndSaveReplay      = nullptr;
-static HWND  g_hwndUpload          = nullptr;
-static HWND  g_hwndRecordSettings  = nullptr;
-static HWND  g_hwndRealmCombo      = nullptr;
-static int   g_realmIndex          = 0;
-static HICON g_hIconRecordingOverlay = nullptr;
-
-static HWND   g_hwndConsole     = nullptr;
-static HFONT  g_fontConsole     = nullptr;
-static HANDLE g_hermesProcess   = nullptr;
-static HANDLE g_hermesPipeRead  = nullptr;
-static bool   g_consoleExpanded = false;
-static int    g_consoleLineCount = 0;
-static HMODULE g_hRichEdit      = nullptr;
-
-// Standard 16-color terminal palette (Windows Console defaults)
-static const COLORREF g_ansiColors[16] = {
-    RGB(12,  12,  12),  RGB(197, 15,  31),  RGB(19,  161, 14),  RGB(193, 156, 0),
-    RGB(0,   55,  218), RGB(136, 23,  152), RGB(58,  150, 221), RGB(204, 204, 204),
-    RGB(118, 118, 118), RGB(231, 72,  86),  RGB(22,  198, 12),  RGB(249, 241, 165),
-    RGB(59,  120, 255), RGB(180, 0,   158), RGB(97,  214, 214), RGB(242, 242, 242),
-};
-
-static constexpr int WND_H_BASE     = 543;
-static constexpr int WND_H_EXPANDED = 630;
+// ── Shared fonts for modal dialogs (lazily created, never deleted — process lifetime) ──
+static HFONT DlgFont()
+{
+    static HFONT s = nullptr;
+    if (!s) {
+        LOGFONTW lf = {};
+        lf.lfHeight  = -MulDiv(9, g_dpi, 72);
+        lf.lfWeight  = FW_NORMAL;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        lf.lfQuality = CLEARTYPE_QUALITY;
+        wcscpy_s(lf.lfFaceName, L"Segoe UI");
+        s = CreateFontIndirectW(&lf);
+    }
+    return s;
+}
+static HFONT DlgSmallFont()
+{
+    static HFONT s = nullptr;
+    if (!s) {
+        LOGFONTW lf = {};
+        lf.lfHeight  = -MulDiv(8, g_dpi, 72);
+        lf.lfWeight  = FW_NORMAL;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        lf.lfQuality = CLEARTYPE_QUALITY;
+        wcscpy_s(lf.lfFaceName, L"Segoe UI");
+        s = CreateFontIndirectW(&lf);
+    }
+    return s;
+}
 
 // ── Config helpers ─────────────────────────────────────────────────────────────
 static std::wstring ConfigPath()     { return g_configDir + L"\\launcher.ini"; }
@@ -321,6 +322,9 @@ static void LoadConfig()
     // Backward compat: derive ClientPath from old InstallPath-only configs
     if (g_clientPath.empty() && !g_installPath.empty())
         g_clientPath = g_installPath + L"\\client";
+    // Backward compat: derive InstallPath from configs that only saved ClientPath
+    if (g_installPath.empty() && !g_clientPath.empty())
+        g_installPath = g_clientPath;
     // Backward compat: assume CT_114 for old configs that have HermesExePath
     if (g_clientType == CT_UNKNOWN && !g_hermesExePath.empty())
         g_clientType = CT_114;
@@ -567,6 +571,53 @@ static std::string HttpGet(const std::wstring& url)
     }
     WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess);
     return body;
+}
+
+static std::string HttpGetSimple(const std::wstring& url)
+{
+    HINTERNET hSess = OpenSession();
+    if (!hSess) return {};
+    HINTERNET hConn = nullptr;
+    HINTERNET hReq  = MakeRequest(hSess, url, hConn);
+    if (!hReq) { WinHttpCloseHandle(hSess); return {}; }
+    std::string body;
+    bool sent  = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) != FALSE;
+    bool recvd = sent && WinHttpReceiveResponse(hReq, nullptr) != FALSE;
+    if (sent && recvd) {
+        DWORD statusCode = 0, scLen = sizeof(statusCode);
+        WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            nullptr, &statusCode, &scLen, nullptr);
+        if (statusCode == 200) {
+            DWORD avail = 0, read = 0;
+            while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
+                std::vector<char> buf(avail + 1);
+                WinHttpReadData(hReq, buf.data(), avail, &read);
+                body.append(buf.data(), read);
+            }
+        }
+    }
+    WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess);
+    return body;
+}
+
+static void PostLiveDataMsg(const wchar_t* type, const std::string& rawJsonUtf8)
+{
+    if (rawJsonUtf8.empty() || !g_hwnd) return;
+    int len = MultiByteToWideChar(CP_UTF8, 0, rawJsonUtf8.c_str(), (int)rawJsonUtf8.size(), nullptr, 0);
+    std::wstring wide(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, rawJsonUtf8.c_str(), (int)rawJsonUtf8.size(), wide.data(), len);
+    auto* msg = new std::wstring(std::wstring(L"{\"type\":\"") + type + L"\",\"data\":" + wide + L"}");
+    PostMessageW(g_hwnd, WM_LIVE_DATA_JSON, 0, (LPARAM)msg);
+}
+
+static void FetchLiveData()
+{
+    const std::wstring ts = std::to_wstring((long long)time(nullptr));
+    const std::wstring base = L"https://wow-hc.com/json/";
+    const std::wstring qs   = L"?api_version=126&front_realm=1&_=" + ts;
+    PostLiveDataMsg(L"serverStats", HttpGetSimple(base + L"server-stats.json" + qs));
+    PostLiveDataMsg(L"areasData",   HttpGetSimple(base + L"areas.json"        + qs));
+    PostLiveDataMsg(L"newsData",    HttpGetSimple(base + L"last-news.json"     + qs));
 }
 
 static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
@@ -1259,9 +1310,264 @@ static HICON CreateIconFromPng(int resId, int size)
     return hIcon;
 }
 
+// ── WebView2 bridge ────────────────────────────────────────────────────────────
+
+static std::wstring JsonEscW(const std::wstring& s)
+{
+    std::wstring r; r.reserve(s.size());
+    for (wchar_t c : s) {
+        switch (c) {
+            case L'"':  r += L"\\\""; break;
+            case L'\\': r += L"\\\\"; break;
+            case L'\n': r += L"\\n";  break;
+            case L'\r':               break;
+            default:    r += c;
+        }
+    }
+    return r;
+}
+
+static void PostStateToWebView()
+{
+    if (!g_webview || !g_wvReady) return;
+
+    bool isInstalled = g_playReady.load();
+    bool isRecording = RB_IsRunning();
+
+    const char* lv = LAUNCHER_VERSION_STR;
+    std::wstring verLauncher(lv, lv + strlen(lv));
+    std::wstring verHermes = GetLocalHermesVersion();
+    std::wstring verAddon  = ReadAddonTocVersion();
+    std::wstring verClient = (g_clientType == CT_114) ? L"1.14.2"
+                           : (g_clientType == CT_112) ? L"1.12.1" : L"";
+
+    wchar_t json[4096];
+    swprintf_s(json,
+        L"{\"type\":\"state\","
+        L"\"status\":\"%s\","
+        L"\"progress\":%d,"
+        L"\"installPath\":\"%s\","
+        L"\"isInstalled\":%s,"
+        L"\"isRecording\":%s,"
+        L"\"canSaveReplay\":%s,"
+        L"\"realmIndex\":%d,"
+        L"\"clientType\":%d,"
+        L"\"showConsole\":%s,"
+        L"\"versions\":{"
+          L"\"launcher\":\"%s\","
+          L"\"hermes\":\"%s\","
+          L"\"addon\":\"%s\","
+          L"\"client\":\"%s\""
+        L"}}",
+        JsonEscW(g_currentStatus).c_str(),
+        g_currentProgress,
+        JsonEscW(g_installPath.empty() ? g_clientPath : g_installPath).c_str(),
+        isInstalled  ? L"true" : L"false",
+        isRecording  ? L"true" : L"false",
+        isRecording  ? L"true" : L"false",
+        g_realmIndex,
+        (int)g_clientType,
+        g_showConsole ? L"true" : L"false",
+        JsonEscW(verLauncher).c_str(),
+        JsonEscW(verHermes).c_str(),
+        JsonEscW(verAddon).c_str(),
+        JsonEscW(verClient).c_str());
+
+    g_webview->PostWebMessageAsJson(json);
+}
+
+static void PostHermesLineToWebView(const std::wstring& line)
+{
+    if (!g_webview || !g_wvReady) return;
+    std::wstring json = L"{\"type\":\"hermesLine\",\"text\":\"" + JsonEscW(line) + L"\"}";
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+
+static void HandleWebMessage(HWND hwnd, const std::string& jsonStr);  // forward decl
+
+static bool CheckWebView2Runtime()
+{
+    wchar_t* ver = nullptr;
+    HRESULT hr = GetAvailableCoreWebView2BrowserVersionString(nullptr, &ver);
+    bool ok = SUCCEEDED(hr) && ver;
+    if (ver) CoTaskMemFree(ver);
+    return ok;
+}
+
+static bool ShowWebView2InstallPrompt(HWND hwnd)
+{
+    int r = MessageBoxW(hwnd,
+        L"WoW HC Launcher requires the Microsoft Edge WebView2 runtime,\n"
+        L"which is not installed on this system.\n\n"
+        L"Click OK to download and install it automatically (~2 MB),\n"
+        L"then restart the launcher.\n\n"
+        L"Click Cancel to exit.",
+        L"WebView2 Runtime Required",
+        MB_OKCANCEL | MB_ICONINFORMATION);
+    if (r != IDOK) return false;
+
+    std::wstring tmp = TempFile(L"MicrosoftEdgeWebview2Setup.exe");
+    bool downloaded = false;
+    {
+        HINTERNET hSess = OpenSession();
+        if (hSess) {
+            HINTERNET hConn = nullptr;
+            HINTERNET hReq  = MakeRequest(hSess,
+                L"https://go.microsoft.com/fwlink/p/?LinkId=2124703", hConn);
+            if (hReq) {
+                if (WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                        WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+                    && WinHttpReceiveResponse(hReq, nullptr)) {
+                    HANDLE hf = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (hf != INVALID_HANDLE_VALUE) {
+                        std::vector<BYTE> buf(65536);
+                        DWORD rd = 0;
+                        while (WinHttpReadData(hReq, buf.data(), (DWORD)buf.size(), &rd) && rd)
+                        { DWORD wr; WriteFile(hf, buf.data(), rd, &wr, nullptr); }
+                        CloseHandle(hf);
+                        downloaded = true;
+                    }
+                }
+                WinHttpCloseHandle(hReq);
+            }
+            if (hConn) WinHttpCloseHandle(hConn);
+            WinHttpCloseHandle(hSess);
+        }
+    }
+
+    if (!downloaded) {
+        MessageBoxW(hwnd,
+            L"Download failed. Please install WebView2 manually:\n"
+            L"https://developer.microsoft.com/microsoft-edge/webview2/",
+            L"Download Failed", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize     = sizeof(sei);
+    sei.fMask      = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb     = L"open";
+    sei.lpFile     = tmp.c_str();
+    sei.lpParameters = L"/silent /install";
+    sei.nShow      = SW_SHOW;
+    if (ShellExecuteExW(&sei) && sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 120000);
+        CloseHandle(sei.hProcess);
+    }
+    DeleteFileW(tmp.c_str());
+
+    MessageBoxW(hwnd,
+        L"WebView2 has been installed.\nPlease restart the launcher.",
+        L"Restart Required", MB_OK | MB_ICONINFORMATION);
+    return false;
+}
+
+static std::wstring GetExeDir(); // forward declaration (defined in FFmpeg section below)
+
+static void InitWebView2(HWND hwnd)
+{
+    std::wstring dataDir  = g_configDir + L"\\webview2_data";
+    std::wstring exeDir   = GetExeDir();
+
+    // Prefer the source-tree ui/ (sibling of cmake-build-*/) so JSX edits are
+    // visible after a plain restart — no rebuild or copy needed.
+    std::wstring uiFolder;
+    {
+        wchar_t full[MAX_PATH] = {};
+        std::wstring candidate = exeDir + L"\\..\\ui";
+        if (GetFullPathNameW(candidate.c_str(), MAX_PATH, full, nullptr) &&
+            GetFileAttributesW(full) != INVALID_FILE_ATTRIBUTES)
+            uiFolder = full;
+        else {
+            candidate = exeDir + L"\\ui";
+            if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+                uiFolder = candidate;
+        }
+    }
+    bool devMode = !uiFolder.empty();
+
+    auto envCb = Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+        [hwnd, uiFolder, devMode](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+            if (FAILED(hr) || !env) return hr;
+            env->CreateCoreWebView2Controller(hwnd,
+                Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                    [hwnd, uiFolder, devMode](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
+                        if (FAILED(hr) || !ctrl) return hr;
+
+                        g_wvCtrl = ctrl;
+                        ctrl->get_CoreWebView2(g_webview.GetAddressOf());
+
+                        RECT rc; GetClientRect(hwnd, &rc);
+                        ctrl->put_Bounds(rc);
+                        ctrl->put_IsVisible(TRUE);
+
+                        // Settings
+                        Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
+                        if (SUCCEEDED(g_webview->get_Settings(&settings)) && settings) {
+                            settings->put_AreDevToolsEnabled(strstr(LAUNCHER_VERSION_STR, "-dev") ? TRUE : FALSE);
+                            settings->put_AreDefaultContextMenusEnabled(FALSE);
+                            settings->put_IsStatusBarEnabled(FALSE);
+                        }
+
+                        // Map virtual host → ui/ folder (dev) or temp extract (release)
+                        std::wstring navUrl;
+                        if (devMode) {
+                            Microsoft::WRL::ComPtr<ICoreWebView2_3> wv3;
+                            g_webview.As(&wv3);
+                            if (wv3) {
+                                wv3->SetVirtualHostNameToFolderMapping(
+                                    L"wow-hc-client-launcher.local", uiFolder.c_str(),
+                                    COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
+                            }
+                            navUrl = L"https://wow-hc-client-launcher.local/index.html";
+                        } else {
+                            // TODO: extract RCDATA resources to temp folder and map there.
+                            // For now require the ui/ folder to be distributed alongside the EXE.
+                            navUrl = L"https://wow-hc-client-launcher.local/index.html";
+                        }
+                        // Append ?v=VERSION so each release gets a fresh cache entry for
+                        // index.html and (via JS in the page) for app.jsx / data.jsx too.
+                        {
+                            const char* ver = LAUNCHER_VERSION_STR;
+                            std::wstring verW(ver, ver + strlen(ver));
+                            navUrl += L"?v=" + verW;
+                        }
+
+                        // Web message handler
+                        EventRegistrationToken tok;
+                        g_webview->add_WebMessageReceived(
+                            Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+                                [hwnd](ICoreWebView2* /*sender*/,
+                                       ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+                                    LPWSTR raw = nullptr;
+                                    args->TryGetWebMessageAsString(&raw);
+                                    if (raw) {
+                                        int sz = WideCharToMultiByte(CP_UTF8, 0, raw, -1,
+                                                    nullptr, 0, nullptr, nullptr);
+                                        std::string narrow(sz > 1 ? sz - 1 : 0, '\0');
+                                        WideCharToMultiByte(CP_UTF8, 0, raw, -1,
+                                                    narrow.data(), sz, nullptr, nullptr);
+                                        CoTaskMemFree(raw);
+                                        HandleWebMessage(hwnd, narrow);
+                                    }
+                                    return S_OK;
+                                }).Get(), &tok);
+
+                        g_wvReady = true;
+                        g_webview->Navigate(navUrl.c_str());
+                        return S_OK;
+                    }).Get());
+            return S_OK;
+        });
+
+    CreateCoreWebView2EnvironmentWithOptions(nullptr, dataDir.c_str(), nullptr, envCb.Get());
+}
+
 // ── UI helpers ─────────────────────────────────────────────────────────────────
 static void PostStatus(WorkerStatus s)
 {
+    g_currentStatus = STATUS_TEXT[s];
     PostMessageW(g_hwnd, WM_WORKER_STATUS, (WPARAM)s, 0);
 }
 static void PostPct(int pct)
@@ -1273,57 +1579,13 @@ static void PostText(std::wstring text)
     PostMessageW(g_hwnd, WM_WORKER_TEXT, 0, (LPARAM)(new std::wstring(std::move(text))));
 }
 
-static void RefreshTransferButton()
-{
-    if (!g_hwndTransfer) return;
-    bool enabled = g_clientInstalled.load() && !g_workerBusy.load() && !g_clientPath.empty()
-                   && (g_clientType == CT_114);
-    EnableWindow(g_hwndTransfer, enabled ? TRUE : FALSE);
-}
+static void PostStateToWebView(); // forward declaration
 
-static void RefreshPlayButton()
-{
-    bool installed = g_clientInstalled.load();
-    bool ready     = g_playReady.load();
-    bool hasPath   = !g_clientPath.empty();
-    bool busy      = g_workerBusy.load();
-    SetWindowTextW(g_hwndPlay, installed ? L"START GAME" : L"INSTALL");
-    bool enable = hasPath && (installed ? ready : !busy);
-    EnableWindow(g_hwndPlay, enable ? TRUE : FALSE);
-    if (g_hwndBrowse) EnableWindow(g_hwndBrowse, busy ? FALSE : TRUE);
-    if (g_hwndOpen)   EnableWindow(g_hwndOpen, (hasPath && !busy) ? TRUE : FALSE);
-    RefreshTransferButton();
-}
+static void RefreshTransferButton() { /* no Win32 button — state pushed via PostStateToWebView */ }
 
-static void SetVerLabel(HWND ctrl, const std::wstring& text)
-{
-    // Transparent static controls don't erase old text on update.
-    // Invalidate the parent's region under the control so WM_ERASEBKGND
-    // repaints the dark background before the control redraws.
-    RECT rc; GetWindowRect(ctrl, &rc);
-    MapWindowPoints(HWND_DESKTOP, g_hwnd, reinterpret_cast<POINT*>(&rc), 2);
-    InvalidateRect(g_hwnd, &rc, TRUE);
-    UpdateWindow(g_hwnd);
-    SetWindowTextW(ctrl, text.c_str());
-}
+static void RefreshPlayButton()     { PostStateToWebView(); }
 
-static void RefreshVersionLabels()
-{
-    if (!g_hwndVerLauncher) return;
-    const char* lv = LAUNCHER_VERSION_STR;
-    std::wstring lvW(lv, lv + strlen(lv));
-    SetVerLabel(g_hwndVerLauncher, L"Launcher " + lvW);
-    if (g_clientType == CT_112) {
-        SetVerLabel(g_hwndVerHermes, L"");
-        std::wstring av112 = ReadAddonTocVersion();
-        SetVerLabel(g_hwndVerAddon, L"Addon " + (av112.empty() ? L"" : av112));
-    } else {
-        std::wstring hv = GetLocalHermesVersion();
-        SetVerLabel(g_hwndVerHermes, L"HermesProxy " + (hv.empty() ? L"" : hv));
-        std::wstring av = ReadAddonTocVersion();
-        SetVerLabel(g_hwndVerAddon, L"Addon " + (av.empty() ? L"" : av));
-    }
-}
+static void RefreshVersionLabels()  { PostStateToWebView(); }
 
 // ── Recording helpers ─────────────────────────────────────────────────────────
 // Returns true if the save folder is set (auto-populates default if not).
@@ -1613,19 +1875,76 @@ static void RunLauncherUpdateCheck()
         (LPARAM)(new std::wstring(payload)));
     if (r != IDYES) return;
 
-    std::string assetUrl = FindExeAssetUrl(json);
-    if (assetUrl.empty()) {
-        // Fallback: construct direct GitHub release download URL
-        assetUrl = std::string("https://github.com/Novivy/wowhc-launcher/releases/latest/download/")
-                 + LAUNCHER_EXE_ASSET;
+    // Download the full zip (EXE + ui/ + DLLs) so the UI is updated too
+    std::string zipUrl = FindFullZipAssetUrl(json);
+    if (zipUrl.empty()) {
+        zipUrl = std::string("https://github.com/") + "Novivy/wowhc-launcher"
+               + "/releases/latest/download/" + LAUNCHER_FULL_ZIP_ASSET;
     }
 
-    std::wstring assetW(assetUrl.begin(), assetUrl.end());
-    std::wstring tmpExe = TempFile(L"wowhc_launcher_new.exe");
+    std::wstring zipUrlW(zipUrl.begin(), zipUrl.end());
+    std::wstring tmpZip = TempFile(L"wowhc_launcher_update.zip");
     PostText(L"Downloading launcher update...");
-    if (!HttpDownload(assetW, tmpExe)) {
-        DeleteFileW(tmpExe.c_str());
+    if (!HttpDownload(zipUrlW, tmpZip)) {
+        DeleteFileW(tmpZip.c_str());
         MessageBoxW(g_hwnd, L"Failed to download the launcher update.\nCheck your internet connection and try again.", L"Update Failed", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    // Extract new EXE to temp + overwrite ui/ folder in place — one PS script
+    std::wstring tmpExe  = TempFile(L"wowhc_launcher_new.exe");
+    std::wstring exeDir  = GetExeDir();
+    auto escPS = [](const std::wstring& s) {
+        std::wstring r;
+        for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
+        return r;
+    };
+    std::wstring script =
+        L"Add-Type -AN System.IO.Compression.FileSystem\r\n"
+        L"try {\r\n"
+        L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(tmpZip) + L"')\r\n"
+        L"  foreach($e in $z.Entries){\r\n"
+        // New launcher EXE (root-level entry)
+        L"    if($e.Name -eq 'WOW-HC-Launcher.exe' -and $e.FullName -notlike '*/*'){\r\n"
+        L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile("
+              L"$e,'" + escPS(tmpExe) + L"',$true)\r\n"
+        L"    } elseif($e.FullName -like 'ui/*' -and $e.Name -ne ''){\r\n"
+        // ui/ folder entries — replace in exe directory
+        L"      $rel=$e.FullName -replace '/','\\'\r\n"
+        L"      $dst='" + escPS(exeDir) + L"\\'+$rel\r\n"
+        L"      $dir=[System.IO.Path]::GetDirectoryName($dst)\r\n"
+        L"      if(-not(Test-Path $dir)){New-Item -ItemType Directory -Force -Path $dir|Out-Null}\r\n"
+        L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e,$dst,$true)\r\n"
+        L"    }\r\n"
+        L"  }\r\n"
+        L"  $z.Dispose()\r\n"
+        L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
+
+    std::wstring scriptPath = TempFile(L"launcher_update_extract.ps1");
+    bool psOk = false;
+    if (WritePsScript(scriptPath, script)) {
+        std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \""
+            + scriptPath + L"\"";
+        std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
+        STARTUPINFOW si = {}; si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi = {};
+        if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+                           CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 120000);
+            DWORD code = 1;
+            GetExitCodeProcess(pi.hProcess, &code);
+            psOk = (code == 0);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+        DeleteFileW(scriptPath.c_str());
+    }
+    DeleteFileW(tmpZip.c_str());
+
+    if (!psOk || GetFileAttributesW(tmpExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        DeleteFileW(tmpExe.c_str());
+        MessageBoxW(g_hwnd, L"Failed to extract the launcher update.\nThe previous version is still active.", L"Update Failed", MB_OK | MB_ICONERROR);
         return;
     }
 
@@ -2273,7 +2592,7 @@ static void DrawModalButton(DRAWITEMSTRUCT* dis, bool isSecondary, bool hovered)
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, CLR_TEXT);
-    HFONT old = (HFONT)SelectObject(hdc, g_fontNormal);
+    HFONT old = (HFONT)SelectObject(hdc, DlgFont());
     wchar_t txt[128] = {};
     GetWindowTextW(dis->hwndItem, txt, 128);
     DrawTextW(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -2364,18 +2683,18 @@ static LRESULT CALLBACK PTRDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             D(14), D(14), D(312), D(56), hwnd,
             nullptr, nullptr, nullptr);
-        SF(hDesc, g_fontNormal);
+        SF(hDesc, DlgFont());
 
         HWND hReq = CreateWindowExW(0, L"BUTTON", L"Request Access",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             D(14), D(84), D(130), D(26), hwnd, (HMENU)2001, nullptr, nullptr);
-        SF(hReq, g_fontNormal);
+        SF(hReq, DlgFont());
         SetWindowSubclass(hReq, ModalBtnSubclassProc, 0, (DWORD_PTR)&st->hoverReq);
 
         HWND hDis = CreateWindowExW(0, L"BUTTON", L"Dismiss",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             D(156), D(84), D(86), D(26), hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
-        SF(hDis, g_fontNormal);
+        SF(hDis, DlgFont());
         SetWindowSubclass(hDis, ModalBtnSubclassProc, 1, (DWORD_PTR)&st->hoverDismiss);
         break;
     }
@@ -2459,6 +2778,7 @@ static void ShowPTRDialog(HWND hParent)
         x, y, w, h, hParent, nullptr, GetModuleHandleW(nullptr), &state);
 
     BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -2487,32 +2807,32 @@ static LRESULT CALLBACK VersionPickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
             L"Choose which WoW client version to install:",
             WS_CHILD|WS_VISIBLE, D(14), D(14), D(366), D(18), hwnd,
             nullptr, nullptr, nullptr);
-        SF(hDesc, g_fontNormal);
+        SF(hDesc, DlgFont());
 
         HWND hR1 = CreateWindowExW(0, L"BUTTON",
             L"Modern 1.14.2",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTORADIOBUTTON|WS_GROUP,
             D(14), D(54), D(366), D(20), hwnd, (HMENU)1001, nullptr, nullptr);
-        SF(hR1, g_fontNormal);
+        SF(hR1, DlgFont());
         SendMessageW(hR1, BM_SETCHECK, BST_CHECKED, 0);
 
         HWND hSub1 = CreateWindowExW(0, L"STATIC",
             L"(recommended)",
             WS_CHILD|WS_VISIBLE, D(32), D(76), D(352), D(16), hwnd,
             nullptr, nullptr, nullptr);
-        SF(hSub1, g_fontSmall);
+        SF(hSub1, DlgSmallFont());
 
         HWND hR2 = CreateWindowExW(0, L"BUTTON",
             L"Vanilla 1.12.1",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTORADIOBUTTON,
             D(14), D(104), D(366), D(20), hwnd, (HMENU)1002, nullptr, nullptr);
-        SF(hR2, g_fontNormal);
+        SF(hR2, DlgFont());
 
         HWND hSub2 = CreateWindowExW(0, L"STATIC",
             L"",
             WS_CHILD|WS_VISIBLE, D(32), D(126), D(352), D(16), hwnd,
             nullptr, nullptr, nullptr);
-        SF(hSub2, g_fontSmall);
+        SF(hSub2, DlgSmallFont());
 
         VPState* st = (VPState*)((LPCREATESTRUCT)lp)->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)st);
@@ -2520,13 +2840,13 @@ static LRESULT CALLBACK VersionPickerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
         HWND hBack = CreateWindowExW(0, L"BUTTON", L"Back",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
             D(107), D(186), D(86), D(26), hwnd, (HMENU)IDCANCEL, nullptr, nullptr);
-        SF(hBack, g_fontNormal);
+        SF(hBack, DlgFont());
         SetWindowSubclass(hBack, ModalBtnSubclassProc, 0, (DWORD_PTR)&st->hoverCancel);
 
         HWND hOk = CreateWindowExW(0, L"BUTTON", L"Continue",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
             D(201), D(186), D(86), D(26), hwnd, (HMENU)IDOK, nullptr, nullptr);
-        SF(hOk, g_fontNormal);
+        SF(hOk, DlgFont());
         SetWindowSubclass(hOk, ModalBtnSubclassProc, 1, (DWORD_PTR)&st->hoverOk);
         break;
     }
@@ -2606,6 +2926,7 @@ static ClientType ShowVersionPickerDialog(HWND hParent)
         x, y, w, h, hParent, nullptr, GetModuleHandleW(nullptr), &state);
 
     BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -2637,32 +2958,32 @@ static LRESULT CALLBACK InstallModeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             L"How would you like to get started?",
             WS_CHILD|WS_VISIBLE, D(14), D(14), D(366), D(18), hwnd,
             nullptr, nullptr, nullptr);
-        SF(hDesc, g_fontNormal);
+        SF(hDesc, DlgFont());
 
         HWND hR1 = CreateWindowExW(0, L"BUTTON",
             L"New installation  -  Download and Install a fresh client",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTORADIOBUTTON|WS_GROUP,
             D(14), D(54), D(366), D(20), hwnd, (HMENU)2001, nullptr, nullptr);
-        SF(hR1, g_fontNormal);
+        SF(hR1, DlgFont());
         SendMessageW(hR1, BM_SETCHECK, BST_CHECKED, 0); // default
 
         HWND hSub1 = CreateWindowExW(0, L"STATIC",
             L"Choose your preferred version on the next screen.",
             WS_CHILD|WS_VISIBLE, D(32), D(76), D(352), D(16), hwnd,
             nullptr, nullptr, nullptr);
-        SF(hSub1, g_fontSmall);
+        SF(hSub1, DlgSmallFont());
 
         HWND hR2 = CreateWindowExW(0, L"BUTTON",
             L"Existing installation  -  Point to an existing folder",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_AUTORADIOBUTTON,
             D(14), D(120), D(366), D(20), hwnd, (HMENU)2002, nullptr, nullptr);
-        SF(hR2, g_fontNormal);
+        SF(hR2, DlgFont());
 
         HWND hSub2 = CreateWindowExW(0, L"STATIC",
             L"Version is auto-detected from the selected folder.",
             WS_CHILD|WS_VISIBLE, D(32), D(142), D(352), D(16), hwnd,
             nullptr, nullptr, nullptr);
-        SF(hSub2, g_fontSmall);
+        SF(hSub2, DlgSmallFont());
 
         VPState* st = (VPState*)((LPCREATESTRUCT)lp)->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)st);
@@ -2670,7 +2991,7 @@ static LRESULT CALLBACK InstallModeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         HWND hOk = CreateWindowExW(0, L"BUTTON", L"Continue",
             WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
             D(154), D(186), D(86), D(26), hwnd, (HMENU)IDOK, nullptr, nullptr);
-        SF(hOk, g_fontNormal);
+        SF(hOk, DlgFont());
         SetWindowSubclass(hOk, ModalBtnSubclassProc, 0, (DWORD_PTR)&st->hoverOk);
         break;
     }
@@ -2744,6 +3065,7 @@ static ClientType ShowInstallModeDialog(HWND hParent)
         x, y, w, h, hParent, nullptr, GetModuleHandleW(nullptr), &state);
 
     BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
@@ -2781,6 +3103,78 @@ static HICON CreateRecordingOverlayIcon(int sz)
     return hIcon;
 }
 
+// ── WebView2 message dispatcher ────────────────────────────────────────────────
+static void HandleWebMessage(HWND hwnd, const std::string& j)
+{
+    std::string action = JsonString(j, "action");
+
+    if (action == "ready") {
+        PostStateToWebView();
+        std::thread(FetchLiveData).detach();
+        if (IsDevBuild()) g_webview->OpenDevToolsWindow();
+    }
+    else if (action == "startGame") {
+        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_PLAY, BN_CLICKED), 0);
+    }
+    else if (action == "browse") {
+        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_BROWSE, BN_CLICKED), 0);
+    }
+    else if (action == "openFolder") {
+        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_OPEN, BN_CLICKED), 0);
+    }
+    else if (action == "startRecording" || action == "stopRecording") {
+        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_RECORD, BN_CLICKED), 0);
+    }
+    else if (action == "saveReplay") {
+        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_SAVE_REPLAY, BN_CLICKED), 0);
+    }
+    else if (action == "openRecordSettings") {
+        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_RECORD_SETTINGS, BN_CLICKED), 0);
+    }
+    else if (action == "uploadReplays") {
+        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_UPLOAD, BN_CLICKED), 0);
+    }
+    else if (action == "openSettings") {
+        MessageBoxW(hwnd, L"General settings coming soon.", L"Settings", MB_OK | MB_ICONINFORMATION);
+    }
+    else if (action == "setRealm") {
+        std::string idxStr = JsonString(j, "index");
+        int idx = idxStr.empty() ? 0 : std::stoi(idxStr);
+        if (idx == 1) ShowPTRDialog(hwnd);
+        UpdateRealmConfig(idx);
+    }
+    else if (action == "startDrag") {
+        // Let Windows move the borderless window as if the user dragged the caption
+        ReleaseCapture();
+        POINT pt; GetCursorPos(&pt);
+        PostMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, MAKELPARAM(pt.x, pt.y));
+    }
+    else if (action == "minimize") {
+        ShowWindow(hwnd, SW_MINIMIZE);
+    }
+    else if (action == "close") {
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    }
+    else if (action == "openGetHelp") {
+        ShellExecuteW(nullptr, L"open", L"https://wow-hc.com/support/appeal", nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    else if (action == "openGetAddons") {
+        ShellExecuteW(nullptr, L"open", L"https://wow-hc.com/addons/classic", nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    else if (action == "openWebsite") {
+        ShellExecuteW(nullptr, L"open", L"https://wow-hc.com", nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    else if (action == "openUrl") {
+        std::string url = JsonString(j, "url");
+        if (!url.empty()) {
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, nullptr, 0);
+            std::wstring wurl(wlen > 1 ? wlen - 1 : 0, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, wurl.data(), wlen);
+            ShellExecuteW(nullptr, L"open", wurl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+    }
+}
+
 // ── Window procedure ───────────────────────────────────────────────────────────
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -2806,206 +3200,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_CREATE:
     {
-        auto D = [](int px) -> int { return MulDiv(px, g_dpi, 96); };
-
-        auto MakeFont = [](int ptSize, int weight) -> HFONT {
-            LOGFONTW lf = {};
-            lf.lfHeight  = -MulDiv(ptSize, g_dpi, 72);
-            lf.lfWeight  = weight;
-            lf.lfCharSet = DEFAULT_CHARSET;
-            lf.lfQuality = CLEARTYPE_QUALITY;
-            wcscpy_s(lf.lfFaceName, L"Segoe UI");
-            return CreateFontIndirectW(&lf);
-        };
-        g_fontNormal = MakeFont(9,  FW_NORMAL);
-        g_fontPlay   = MakeFont(13, FW_BOLD);
-        g_fontSmall  = MakeFont(8,  FW_NORMAL);
-
-        {
-            LOGFONTW lf = {};
-            lf.lfHeight    = -MulDiv(9, g_dpi, 72);
-            lf.lfWeight    = FW_NORMAL;
-            lf.lfUnderline = TRUE;
-            lf.lfCharSet   = DEFAULT_CHARSET;
-            lf.lfQuality   = CLEARTYPE_QUALITY;
-            wcscpy_s(lf.lfFaceName, L"Segoe UI");
-            g_fontLink = CreateFontIndirectW(&lf);
-        }
-
-        auto SF = [](HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); };
-
-        g_hwndLink = CreateWindowExW(0, L"STATIC", L"wow-hc.com",
-            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOTIFY,
-            D(150), D(150), D(200), D(16), hwnd,
-            (HMENU)(UINT_PTR)ID_LINK_WEBSITE, nullptr, nullptr);
-        SF(g_hwndLink, g_fontLink);
-        SetWindowSubclass(g_hwndLink, BtnSubclassProc, 10, (DWORD_PTR)&g_linkHover);
-
-        g_hwndStatus = CreateWindowExW(0, L"STATIC", STATUS_TEXT[WS_NO_PATH],
-            WS_CHILD | WS_VISIBLE | SS_CENTER,
-            D(10), D(196), D(480), D(16), hwnd,
-            (HMENU)(UINT_PTR)ID_STATIC_STATUS, nullptr, nullptr);
-        SF(g_hwndStatus, g_fontNormal);
-
-        g_hwndProgress = CreateWindowExW(0, PROGRESS_CLASSW, nullptr,
-            WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-            D(10), D(215), D(480), D(14), hwnd,
-            (HMENU)(UINT_PTR)ID_PROGRESS, nullptr, nullptr);
-        SendMessageW(g_hwndProgress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-        SendMessageW(g_hwndProgress, PBM_SETBKCOLOR,  0, (LPARAM)CLR_BG2);
-        SendMessageW(g_hwndProgress, PBM_SETBARCOLOR,  0, (LPARAM)CLR_BAR);
-
-        HWND hLabel = CreateWindowExW(0, L"STATIC", L"Installation path:",
-            WS_CHILD | WS_VISIBLE,
-            D(10), D(280), D(480), D(16), hwnd, nullptr, nullptr, nullptr);
-        SF(hLabel, g_fontNormal);
-
-        g_hwndPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
-            g_installPath.c_str(),
-            WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-            D(10), D(298), D(305), D(22), hwnd,
-            (HMENU)(UINT_PTR)ID_EDIT_PATH, nullptr, nullptr);
-        SF(g_hwndPath, g_fontNormal);
-
-        g_hwndBrowse = CreateWindowExW(0, L"BUTTON", L"Browse...",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            D(324), D(298), D(82), D(22), hwnd,
-            (HMENU)(UINT_PTR)ID_BTN_BROWSE, nullptr, nullptr);
-        SF(g_hwndBrowse, g_fontNormal);
-
-        g_hwndOpen = CreateWindowExW(0, L"BUTTON", L"Open",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(410), D(298), D(80), D(22), hwnd,
-            (HMENU)(UINT_PTR)ID_BTN_OPEN, nullptr, nullptr);
-        SF(g_hwndOpen, g_fontNormal);
-
-        // Realm row — label + dropdown, fits in the gap between path row and record row
-        {
-            HWND hRealmLbl = CreateWindowExW(0, L"STATIC", L"Realm:",
-                WS_CHILD | WS_VISIBLE,
-                D(197), D(363), D(47), D(16), hwnd, nullptr, nullptr, nullptr);
-            SF(hRealmLbl, g_fontNormal);
-        }
-        g_hwndRealmCombo = CreateWindowExW(0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
-            D(244), D(360), D(246), D(100), hwnd,
-            (HMENU)(UINT_PTR)ID_COMBO_REALM, nullptr, nullptr);
-        SF(g_hwndRealmCombo, g_fontNormal);
-        SendMessageW(g_hwndRealmCombo, CB_SETITEMHEIGHT, (WPARAM)-1, D(20));
-        SendMessageW(g_hwndRealmCombo, CB_SETITEMHEIGHT, 0,          D(20));
-        SendMessageW(g_hwndRealmCombo, CB_ADDSTRING, 0,
-            (LPARAM)L"Permadeath (Normal) / Dawnrest (PVP)");
-        SendMessageW(g_hwndRealmCombo, CB_ADDSTRING, 0,
-            (LPARAM)L"Player Testing Realm (PTR)");
-        SendMessageW(g_hwndRealmCombo, CB_SETCURSEL, (WPARAM)g_realmIndex, 0);
-        SetWindowTheme(g_hwndRealmCombo, L"DarkMode_CFD", nullptr);
-
-        // Record row — Start/Stop + Save + Settings + View Videos, right-aligned x=197-490
-        g_hwndRecord = CreateWindowExW(0, L"BUTTON", L"Start Recording",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            D(197), D(392), D(100), D(26), hwnd,
-            (HMENU)(UINT_PTR)ID_BTN_RECORD, nullptr, nullptr);
-        SF(g_hwndRecord, g_fontNormal);
-
-        g_hwndSaveReplay = CreateWindowExW(0, L"BUTTON", L"",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(303), D(392), D(30), D(26), hwnd,
-            (HMENU)(UINT_PTR)ID_BTN_SAVE_REPLAY, nullptr, nullptr);
-        SF(g_hwndSaveReplay, g_fontNormal);
-
-        g_hwndRecordSettings = CreateWindowExW(0, L"BUTTON", L"",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            D(339), D(392), D(30), D(26), hwnd,
-            (HMENU)(UINT_PTR)ID_BTN_RECORD_SETTINGS, nullptr, nullptr);
-        SF(g_hwndRecordSettings, g_fontNormal);
-
-        g_hwndUpload = CreateWindowExW(0, L"BUTTON", L"Upload Replays",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            D(375), D(392), D(115), D(26), hwnd,
-            (HMENU)(UINT_PTR)ID_BTN_UPLOAD, nullptr, nullptr);
-        SF(g_hwndUpload, g_fontNormal);
-
-        // Play/Install — right-aligned, 1.5× wider primary action button
-        g_hwndPlay = CreateWindowExW(0, L"BUTTON", L"INSTALL",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_DISABLED,
-            D(197), D(424), D(293), D(68), hwnd,
-            (HMENU)(UINT_PTR)ID_BTN_PLAY, nullptr, nullptr);
-        SF(g_hwndPlay, g_fontPlay);
-
-        // Transfer — smaller secondary button below Play
-        g_hwndTransfer = CreateWindowExW(0, L"BUTTON",
-            L"Transfer UI/Macros/Addons/Settings from existing installation",
-            WS_CHILD | BS_OWNERDRAW | WS_DISABLED,
-            D(60), D(486), D(400), D(22), hwnd,
-            (HMENU)(UINT_PTR)ID_BTN_TRANSFER, nullptr, nullptr);
-        SF(g_hwndTransfer, g_fontNormal);
-
-        g_hwndLinkAddons = CreateWindowExW(0, L"STATIC", L"Get more Addons",
-            WS_CHILD | WS_VISIBLE | SS_NOTIFY,
-            D(10), D(478), D(200), D(16), hwnd,
-            (HMENU)(UINT_PTR)ID_LINK_ADDONS, nullptr, nullptr);
-        SF(g_hwndLinkAddons, g_fontLink);
-
-        g_hwndVerAddon = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE,
-            D(10), D(442), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
-        SF(g_hwndVerAddon, g_fontSmall);
-
-        g_hwndVerHermes = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE,
-            D(10), D(452), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
-        SF(g_hwndVerHermes, g_fontSmall);
-
-        g_hwndVerLauncher = CreateWindowExW(0, L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE,
-            D(10), D(462), D(220), D(13), hwnd, nullptr, nullptr, nullptr);
-        SF(g_hwndVerLauncher, g_fontSmall);
-
-        // Console output panel — hidden until HermesProxy starts
-        g_fontConsole = CreateFontW(-MulDiv(11, g_dpi, 96), 0, 0, 0,
-            FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-            FIXED_PITCH | FF_MODERN, L"Consolas");
-        g_hwndConsole = CreateWindowExW(0, L"RICHEDIT50W", L"",
-            WS_CHILD | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | ES_NOHIDESEL,
-            D(6), D(515), D(540), D(200), hwnd,
-            (HMENU)(UINT_PTR)ID_EDIT_CONSOLE, nullptr, nullptr);
-        SendMessageW(g_hwndConsole, EM_SETBKGNDCOLOR, 0, RGB(0, 0, 0));
-        if (g_fontConsole) SendMessageW(g_hwndConsole, WM_SETFONT, (WPARAM)g_fontConsole, TRUE);
-        {
-            CHARFORMAT2W cf = {};
-            cf.cbSize = sizeof(cf);
-            cf.dwMask = CFM_COLOR | CFM_EFFECTS;
-            cf.crTextColor = CLR_TEXT;
-            cf.dwEffects = 0;
-            SendMessageW(g_hwndConsole, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
-        }
-
-
-
-
-        RefreshVersionLabels();
-
-        SetWindowPos(g_hwndPlay, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
-
-        SetWindowSubclass(g_hwndPlay,     BtnSubclassProc, 0, (DWORD_PTR)&g_playHover);
-        SetWindowSubclass(g_hwndBrowse,   BtnSubclassProc, 1, (DWORD_PTR)&g_browseHover);
-        SetWindowSubclass(g_hwndOpen,     BtnSubclassProc, 3, (DWORD_PTR)&g_openHover);
-        SetWindowSubclass(g_hwndTransfer, BtnSubclassProc, 2, (DWORD_PTR)&g_transferHover);
-        SetWindowSubclass(g_hwndLinkAddons,  BtnSubclassProc, 11, (DWORD_PTR)&g_addonsHover);
-        SetWindowSubclass(g_hwndRecord,         BtnSubclassProc, 12, (DWORD_PTR)&g_recordHover);
-        SetWindowSubclass(g_hwndSaveReplay,     BtnSubclassProc, 13, (DWORD_PTR)&g_saveReplayHover);
-        SetWindowSubclass(g_hwndUpload,         BtnSubclassProc, 14, (DWORD_PTR)&g_uploadHover);
-        SetWindowSubclass(g_hwndRecordSettings, BtnSubclassProc, 15, (DWORD_PTR)&g_recordSettingsHover);
-
         SetTimer(hwnd, ID_TIMER_UPDATE, 24u * 60u * 60u * 1000u, nullptr);
+        SetTimer(hwnd, ID_TIMER_LIVE,   10u * 60u * 1000u, nullptr);
 
-        // Always check for a launcher update first; nothing else runs until it finishes.
-        EnableWindow(g_hwndBrowse,   FALSE);
-        EnableWindow(g_hwndPlay,     FALSE);
-        EnableWindow(g_hwndOpen,     FALSE);
-        EnableWindow(g_hwndTransfer, FALSE);
-        SetWindowTextW(g_hwndStatus, L"Checking for launcher update...");
+        g_currentStatus = STATUS_TEXT[WS_NO_PATH];
+
+        // Start WebView2 (async — UI ready callback posts WM_STARTUP_CHECK_DONE)
+        InitWebView2(hwnd);
+
+        // Start launcher update + FFmpeg check in parallel with WebView2 init
         std::thread([]() {
             RunLauncherUpdateCheck();
             CheckAndBootstrapFFmpegDlls();
@@ -3015,49 +3218,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
 
+    case WM_SIZE:
+    {
+        if (g_wvCtrl) {
+            RECT rc; GetClientRect(hwnd, &rc);
+            g_wvCtrl->put_Bounds(rc);
+        }
+        break;
+    }
+
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-
-        {
-            HPEN hpen    = CreatePen(PS_SOLID, 1, CLR_SEP);
-            HPEN hpenOld = (HPEN)SelectObject(hdc, hpen);
-            int  sepY    = MulDiv(272, g_dpi, 96);
-            MoveToEx(hdc, MulDiv(10,  g_dpi, 96), sepY, nullptr);
-            LineTo  (hdc, MulDiv(510, g_dpi, 96), sepY);
-            SelectObject(hdc, hpenOld);
-            DeleteObject(hpen);
-        }
-
-        if (g_consoleExpanded && g_hbrConsoleBg) {
-            RECT rc; GetClientRect(hwnd, &rc);
-            rc.top = MulDiv(509, g_dpi, 96);
-            FillRect(hdc, &rc, g_hbrConsoleBg);
-        }
-
-        if (g_logoBitmap) {
-            UINT imgW = g_logoBitmap->GetWidth();
-            UINT imgH = g_logoBitmap->GetHeight();
-            if (imgH == 0) imgH = 1;
-            int areaX = MulDiv(100,  g_dpi, 96);
-            int areaY = MulDiv(30,   g_dpi, 96);
-            int areaW = MulDiv(300, g_dpi, 96);
-            int areaH = MulDiv(112, g_dpi, 96);
-            int drawW, drawH;
-            if ((UINT64)imgW * areaH > (UINT64)imgH * areaW) {
-                drawW = areaW;
-                drawH = MulDiv(areaW, (int)imgH, (int)imgW);
-            } else {
-                drawH = areaH;
-                drawW = MulDiv(areaH, (int)imgW, (int)imgH);
-            }
-            int drawX = areaX + (areaW - drawW) / 2;
-            int drawY = areaY + (areaH - drawH) / 2;
-            Gdiplus::Graphics g(hdc);
-            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-            g.DrawImage(g_logoBitmap, drawX, drawY, drawW, drawH);
-        }
+        RECT rc; GetClientRect(hwnd, &rc);
+        HBRUSH hbr = CreateSolidBrush(RGB(10, 8, 6));
+        FillRect(hdc, &rc, hbr);
+        DeleteObject(hbr);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -3076,13 +3253,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         }
 
-        if (id == ID_COMBO_REALM && HIWORD(wp) == CBN_SELCHANGE) {
-            int sel = (int)SendMessageW(g_hwndRealmCombo, CB_GETCURSEL, 0, 0);
-            if (sel < 0) sel = 0;
-            if (sel == 1) ShowPTRDialog(hwnd);
-            UpdateRealmConfig(sel);
-            break;
-        }
+        // Realm selection is handled via JS bridge (HandleWebMessage "setRealm").
 
         if (id == ID_BTN_OPEN) {
             std::wstring era = g_clientPath + L"\\_classic_era_";
@@ -3211,19 +3382,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                                 + L"\r\nIf they are installed in a parent folder, please select that folder instead.\r\n"
                                                   L"Otherwise choose an empty folder and the launcher will install everything.";
                                             MessageBoxW(hwnd, mbMsg.c_str(), L"Missing Files", MB_OK | MB_ICONWARNING);
-                                        } else if (g_clientPath != info.clientDir) {
+                                        } else {
+                                            bool pathChanged    = (g_clientPath != info.clientDir);
                                             g_clientPath        = info.clientDir;
                                             g_installPath       = info.clientDir;
                                             g_hermesExePath     = foundHermes;
                                             g_arctiumExePath    = foundArctium;
                                             g_clientType        = CT_114;
                                             g_wowTweakedExePath.clear();
-                                            SetWindowTextW(g_hwndPath, g_installPath.c_str());
-                                            ResetLastCheckTime();
-                                            SaveConfig();
-                                            if (!g_workerBusy.load()) {
-                                                g_workerBusy = true;
-                                                std::thread(Worker).detach();
+                                            PostStateToWebView();
+                                            if (pathChanged) {
+                                                ResetLastCheckTime();
+                                                SaveConfig();
+                                                if (!g_workerBusy.load()) {
+                                                    g_workerBusy = true;
+                                                    std::thread(Worker).detach();
+                                                }
                                             }
                                             RefreshPlayButton();
                                         }
@@ -3243,19 +3417,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                             L"Version Mismatch", MB_YESNO | MB_ICONWARNING) == IDYES);
                                     }
 
-                                    if (versionOk && g_clientPath != info.clientDir) {
+                                    if (versionOk) {
+                                        bool pathChanged    = (g_clientPath != info.clientDir);
                                         g_clientPath        = info.clientDir;
                                         g_installPath       = info.clientDir;
                                         g_clientType        = CT_112;
                                         g_hermesExePath.clear();
                                         g_arctiumExePath.clear();
                                         g_wowTweakedExePath = info.wowExePath;
-                                        SetWindowTextW(g_hwndPath, g_installPath.c_str());
-                                        ResetLastCheckTime();
-                                        SaveConfig();
-                                        if (!g_workerBusy.load()) {
-                                            g_workerBusy = true;
-                                            std::thread(Worker).detach();
+                                        PostStateToWebView();
+                                        if (pathChanged) {
+                                            ResetLastCheckTime();
+                                            SaveConfig();
+                                            if (!g_workerBusy.load()) {
+                                                g_workerBusy = true;
+                                                std::thread(Worker).detach();
+                                            }
                                         }
                                         RefreshPlayButton();
                                     }
@@ -3306,7 +3483,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                             g_hermesExePath.clear();
                                             g_arctiumExePath.clear();
                                         }
-                                        SetWindowTextW(g_hwndPath, g_installPath.c_str());
+                                        PostStateToWebView();
                                         ResetLastCheckTime();
                                         SaveConfig();
                                         if (!g_workerBusy.load()) {
@@ -3340,7 +3517,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     EnsureRecordingSaveFolder(hwnd);
                     RB_Start();
                 }
-                EnableWindow(g_hwndPlay, FALSE);
                 PostStatus(WS_LAUNCHING);
 
                 if (g_clientType == CT_112) {
@@ -3554,17 +3730,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
 
     case WM_RB_STATUS:
-        if (g_hwndRecord) {
-            SetWindowTextW(g_hwndRecord, wp ? L"Stop Recording" : L"Start Recording");
-            InvalidateRect(g_hwndRecord, nullptr, FALSE);
-        }
-        if (g_hwndSaveReplay) EnableWindow(g_hwndSaveReplay, wp ? TRUE : FALSE);
         if (wp) {
             if (!g_hIconRecordingOverlay) g_hIconRecordingOverlay = CreateRecordingOverlayIcon(GetSystemMetrics(SM_CXSMICON));
             if (g_pTaskbar) g_pTaskbar->SetOverlayIcon(hwnd, g_hIconRecordingOverlay, L"Recording");
         } else {
             if (g_pTaskbar) g_pTaskbar->SetOverlayIcon(hwnd, nullptr, nullptr);
         }
+        PostStateToWebView();
         return 0;
 
     case WM_APP + 30:
@@ -3574,23 +3746,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WORKER_STATUS:
     {
         int s = (int)wp;
-        if (s >= 0 && s <= WS_NO_PATH)
-            SetWindowTextW(g_hwndStatus, STATUS_TEXT[s]);
+        if (s >= 0 && s <= WS_NO_PATH) {
+            g_currentStatus = STATUS_TEXT[s];
+            PostStateToWebView();
+        }
         break;
     }
 
     case WM_WORKER_TEXT:
     {
         auto* str = reinterpret_cast<std::wstring*>(lp);
-        SetWindowTextW(g_hwndStatus, str->c_str());
+        g_currentStatus = *str;
         delete str;
+        PostStateToWebView();
         break;
     }
 
     case WM_WORKER_PROGRESS:
     {
-        SendMessageW(g_hwndProgress, PBM_SETPOS, wp, 0);
-        g_taskbarLastPct = (int)wp;
+        g_currentProgress = (int)wp;
+        g_taskbarLastPct  = (int)wp;
         if (g_workerBusy.load()) {
             g_taskbarHasProgress = true;
             if (g_pTaskbar) {
@@ -3598,6 +3773,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 g_pTaskbar->SetProgressValue(g_hwnd, wp, 100);
             }
         }
+        PostStateToWebView();
         break;
     }
 
@@ -3650,39 +3826,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SET_INSTALL_MODE:
     {
         g_clientInstalled = (wp != 0);
-        RefreshPlayButton();
+        PostStateToWebView();
         break;
     }
 
     case WM_TIMER:
         if (wp == ID_TIMER_HOVER) {
-            bool anyActive = false;
-            auto step = [&](bool in, float& t, HWND btn) {
-                float target = in ? 1.0f : 0.0f;
-                float speed  = in ? 0.10f : 0.16f;
-                if (fabsf(t - target) > 0.001f) {
-                    t = in ? (t + speed < 1.0f ? t + speed : 1.0f) : (t - speed > 0.0f ? t - speed : 0.0f);
-                    if (btn) InvalidateRect(btn, nullptr, FALSE);
-                    anyActive = true;
-                } else {
-                    t = target;
-                }
-            };
-            step(g_playHover,           g_playHoverT,           g_hwndPlay);
-            step(g_browseHover,         g_browseHoverT,         g_hwndBrowse);
-            step(g_openHover,           g_openHoverT,           g_hwndOpen);
-            step(g_transferHover,       g_transferHoverT,       g_hwndTransfer);
-            step(g_recordHover,         g_recordHoverT,         g_hwndRecord);
-            step(g_saveReplayHover,     g_saveReplayHoverT,     g_hwndSaveReplay);
-            step(g_uploadHover,         g_uploadHoverT,         g_hwndUpload);
-            step(g_recordSettingsHover, g_recordSettingsHoverT, g_hwndRecordSettings);
-            step(g_linkHover,           g_linkHoverT,           g_hwndLink);
-            step(g_addonsHover,         g_addonsHoverT,         g_hwndLinkAddons);
-            if (!anyActive) KillTimer(hwnd, ID_TIMER_HOVER);
+            KillTimer(hwnd, ID_TIMER_HOVER); // hover animations now in CSS/JS
             return 0;
         }
         if (wp == ID_TIMER_UPDATE && !g_workerBusy.load())
             std::thread(PeriodicUpdateCheck).detach();
+        if (wp == ID_TIMER_LIVE)
+            std::thread(FetchLiveData).detach();
         return 0;
 
     case WM_ASK_UPDATE:
@@ -3715,240 +3871,37 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_STARTUP_CHECK_DONE:
     {
-        // Startup launcher-update check is done (update was applied+relaunched, or skipped).
-        // Now re-enable UI and proceed with the normal startup flow.
-        EnableWindow(g_hwndBrowse,   TRUE);
-        EnableWindow(g_hwndOpen,     !g_installPath.empty());
-        EnableWindow(g_hwndTransfer, TRUE);
+        // Startup launcher-update check is done — proceed with normal startup flow.
         if (!g_clientPath.empty()) {
             UpdateRealmConfig(g_realmIndex);
             g_workerBusy = true;
-            RefreshPlayButton();
+            PostStateToWebView();
             std::thread(Worker).detach();
         } else {
-            PostStatus(WS_NO_PATH);
+            g_currentStatus = STATUS_TEXT[WS_NO_PATH];
+            PostStateToWebView();
             PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_BROWSE, BN_CLICKED), 0);
         }
         return 0;
     }
 
-    case WM_MEASUREITEM:
-    {
-        auto* mis = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
-        if (mis->CtlType == ODT_COMBOBOX && mis->CtlID == ID_COMBO_REALM) {
-            mis->itemHeight = MulDiv(20, g_dpi, 96);
-            return TRUE;
-        }
-        break;
-    }
-
     case WM_DRAWITEM:
-    {
-        auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
-
-        if (dis->hwndItem == g_hwndRealmCombo) {
-            RECT rc = dis->rcItem;
-            bool isEditBox = (dis->itemState & ODS_COMBOBOXEDIT) != 0;
-            bool selected  = !isEditBox && (dis->itemState & ODS_SELECTED) != 0;
-            COLORREF bgClr = selected ? RGB(50, 75, 140) : CLR_BG2;
-            HBRUSH hbr = CreateSolidBrush(bgClr);
-            FillRect(dis->hDC, &rc, hbr);
-            DeleteObject(hbr);
-            if (dis->itemID != (UINT)-1) {
-                wchar_t text[256] = {};
-                SendMessageW(g_hwndRealmCombo, CB_GETLBTEXT, dis->itemID, (LPARAM)text);
-                RECT rcText = rc;
-                rcText.left += MulDiv(8, g_dpi, 96);
-                SetBkMode(dis->hDC, TRANSPARENT);
-                SetTextColor(dis->hDC, CLR_TEXT);
-                HFONT old = (HFONT)SelectObject(dis->hDC, g_fontNormal);
-                DrawTextW(dis->hDC, text, -1, &rcText,
-                    DT_VCENTER | DT_SINGLELINE | DT_LEFT | DT_END_ELLIPSIS);
-                SelectObject(dis->hDC, old);
-            }
-            if (!isEditBox && (dis->itemState & ODS_FOCUS))
-                DrawFocusRect(dis->hDC, &rc);
-            return TRUE;
-        }
-
-        if (dis->hwndItem != g_hwndPlay &&
-            dis->hwndItem != g_hwndBrowse &&
-            dis->hwndItem != g_hwndOpen &&
-            dis->hwndItem != g_hwndTransfer &&
-            dis->hwndItem != g_hwndRecord &&
-            dis->hwndItem != g_hwndSaveReplay &&
-            dis->hwndItem != g_hwndUpload &&
-            dis->hwndItem != g_hwndRecordSettings)
-            break;
-
-        RECT rc       = dis->rcItem;
-        HDC  hdc      = dis->hDC;
-        bool pressed  = (dis->itemState & ODS_SELECTED) != 0;
-        bool disabled = (dis->itemState & ODS_DISABLED)  != 0;
-        bool isPlay      = (dis->hwndItem == g_hwndPlay);
-        bool isOpen           = (dis->hwndItem == g_hwndOpen);
-        bool isRecord         = (dis->hwndItem == g_hwndRecord);
-        bool isSaveReplay     = (dis->hwndItem == g_hwndSaveReplay);
-        bool isUpload         = (dis->hwndItem == g_hwndUpload);
-        bool isRecordSettings = (dis->hwndItem == g_hwndRecordSettings);
-        bool isRecording = isRecord && RB_IsRunning();
-        float hoverRaw = disabled ? 0.0f :
-                         (isPlay            ? g_playHoverT :
-                          isRecord          ? g_recordHoverT :
-                          isSaveReplay      ? g_saveReplayHoverT :
-                          isUpload          ? g_uploadHoverT :
-                          isRecordSettings  ? g_recordSettingsHoverT :
-                          (dis->hwndItem == g_hwndBrowse)   ? g_browseHoverT :
-                          (dis->hwndItem == g_hwndOpen)     ? g_openHoverT :
-                          (dis->hwndItem == g_hwndTransfer) ? g_transferHoverT :
-                          0.0f);
-        // smoothstep ease
-        float t = hoverRaw * hoverRaw * (3.0f - 2.0f * hoverRaw);
-
-        COLORREF bg;
-        if      (pressed && isOpen) bg = RGB(30, 30, 36);
-        else if (pressed)           bg = RGB(55, 55, 62);
-        else if (isRecording)       bg = LerpColor(RGB(90, 18, 18), RGB(110, 28, 28), t);
-        else if (isOpen)            bg = LerpColor(RGB(26, 26, 31), RGB(36, 36, 42), t);
-        else                        bg = LerpColor(RGB(45, 45, 52), isPlay ? RGB(68, 58, 30) : RGB(58, 58, 66), t);
-        COLORREF fg = disabled ? RGB(90,90,95) : CLR_TEXT;
-
-        HBRUSH hbr = CreateSolidBrush(bg);
-        FillRect(hdc, &rc, hbr);
-        DeleteObject(hbr);
-
-        COLORREF borderClr = isRecording
-            ? LerpColor(RGB(150, 40, 40), RGB(180, 60, 60), t)
-            : isOpen
-            ? (pressed ? RGB(55, 55, 62) : LerpColor(RGB(50, 50, 57), RGB(70, 70, 78), t))
-            : LerpColor(RGB(80, 80, 88), isPlay ? RGB(140, 105, 20) : RGB(100, 100, 110), t);
-        HPEN hpen    = CreatePen(PS_SOLID, 1, borderClr);
-        HPEN hpenOld = (HPEN)SelectObject(hdc, hpen);
-        MoveToEx(hdc, rc.left,    rc.top,      nullptr);
-        LineTo  (hdc, rc.right-1, rc.top);
-        LineTo  (hdc, rc.right-1, rc.bottom-1);
-        LineTo  (hdc, rc.left,    rc.bottom-1);
-        LineTo  (hdc, rc.left,    rc.top);
-        SelectObject(hdc, hpenOld);
-        DeleteObject(hpen);
-
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, fg);
-        SelectObject(hdc, isPlay ? g_fontPlay : g_fontNormal);
-
-        if (isRecordSettings) {
-            static const wchar_t gearCh[2] = { 0xE713, 0 };
-            HFONT gearFont = CreateFontW(-MulDiv(13, g_dpi, 96), 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                                          DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0,
-                                          L"Segoe MDL2 Assets");
-            HFONT oldFont = (HFONT)SelectObject(hdc, gearFont);
-            DrawTextW(hdc, gearCh, 1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(hdc, oldFont);
-            DeleteObject(gearFont);
-        } else if (isSaveReplay) {
-            // Draw save (down-arrow + baseline) icon
-            int cx = (rc.left + rc.right) / 2;
-            int cy = (rc.top + rc.bottom) / 2;
-            HBRUSH ibr = CreateSolidBrush(fg);
-            HPEN   ipn = CreatePen(PS_SOLID, 1, fg);
-            HPEN   opn = (HPEN)SelectObject(hdc, ipn);
-            HBRUSH obr = (HBRUSH)SelectObject(hdc, ibr);
-            // shaft
-            RECT shaft = { cx - 2, cy - 7, cx + 3, cy - 1 };
-            FillRect(hdc, &shaft, ibr);
-            // arrowhead
-            POINT tri[3] = { {cx - 6, cy - 2}, {cx + 7, cy - 2}, {cx, cy + 5} };
-            Polygon(hdc, tri, 3);
-            SelectObject(hdc, opn); DeleteObject(ipn);
-            SelectObject(hdc, obr); DeleteObject(ibr);
-            // baseline
-            HPEN lpn  = CreatePen(PS_SOLID, 2, fg);
-            HPEN olpn = (HPEN)SelectObject(hdc, lpn);
-            MoveToEx(hdc, cx - 7, cy + 7, nullptr);
-            LineTo  (hdc, cx + 8, cy + 7);
-            SelectObject(hdc, olpn); DeleteObject(lpn);
-        } else {
-            wchar_t txt[128] = {};
-            GetWindowTextW(dis->hwndItem, txt, 128);
-            DrawTextW(hdc, txt, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        }
-
-        if (dis->itemState & ODS_FOCUS)
-            DrawFocusRect(hdc, &rc);
-
-        return TRUE;
-    }
-
-    case WM_CTLCOLOREDIT:
-    {
-        HDC hdc = (HDC)wp;
-        SetBkColor(hdc, CLR_BG2);
-        SetTextColor(hdc, CLR_TEXT);
-        return (LRESULT)g_hbrBg2;
-    }
-
-    case WM_CTLCOLORLISTBOX:
-    {
-        HDC hdc = (HDC)wp;
-        SetBkColor(hdc, CLR_BG2);
-        SetTextColor(hdc, CLR_TEXT);
-        return (LRESULT)g_hbrBg2;
-    }
-
-    case WM_CTLCOLORSTATIC:
-    {
-        HDC  hdc     = (HDC)wp;
-        HWND hCtl    = (HWND)lp;
-        SetBkColor(hdc, CLR_BG);
-        if (hCtl == g_hwndLink) {
-            float lt = g_linkHoverT * g_linkHoverT * (3.0f - 2.0f * g_linkHoverT);
-            SetTextColor(hdc, LerpColor(RGB(100, 170, 240), RGB(140, 200, 255), lt));
-            SetBkMode(hdc, TRANSPARENT);
-            return (LRESULT)g_hbrBg;
-        }
-        if (hCtl == g_hwndLinkAddons) {
-            float lt = g_addonsHoverT * g_addonsHoverT * (3.0f - 2.0f * g_addonsHoverT);
-            SetTextColor(hdc, LerpColor(RGB(100, 170, 240), RGB(140, 200, 255), lt));
-            SetBkMode(hdc, TRANSPARENT);
-            return (LRESULT)GetStockObject(NULL_BRUSH);
-        }
-        if (hCtl == g_hwndVerLauncher || hCtl == g_hwndVerHermes || hCtl == g_hwndVerAddon) {
-            SetTextColor(hdc, RGB(100, 100, 110));
-            SetBkMode(hdc, TRANSPARENT);
-            return (LRESULT)GetStockObject(NULL_BRUSH);
-        }
-        SetTextColor(hdc, CLR_TEXT);
-        return (LRESULT)g_hbrBg;
-    }
+        // No owner-draw controls — all UI is in WebView2.
+        break;
 
     case WM_HERMES_LINE:
     {
         auto* ws = reinterpret_cast<std::wstring*>(lp);
         if (!ws) break;
 
-        if (!g_consoleExpanded) {
-            g_consoleExpanded = true;
-            ShowWindow(g_hwndConsole, SW_SHOW);
-            SetWindowPos(hwnd, nullptr, 0, 0,
-                MulDiv(514,              g_dpi, 96),
-                MulDiv(WND_H_EXPANDED,   g_dpi, 96),
-                SWP_NOMOVE | SWP_NOZORDER);
-            InvalidateRect(hwnd, nullptr, TRUE);
+        if (!g_showConsole) {
+            g_showConsole = true;
+            PostStateToWebView();
         }
 
         ++g_consoleLineCount;
-        if (g_consoleLineCount > 5) {
-            // Delete first line by selecting up to the start of line 1
-            LRESULT line1 = SendMessageW(g_hwndConsole, EM_LINEINDEX, 1, 0);
-            if (line1 > 0) {
-                SendMessageW(g_hwndConsole, EM_SETSEL, 0, line1);
-                SendMessageW(g_hwndConsole, EM_REPLACESEL, FALSE, (LPARAM)L"");
-            }
-            --g_consoleLineCount;
-        }
-
         AppendLog(L"[Hermes] %s", StripAnsiW(*ws).c_str());
-        AppendAnsiLine(g_hwndConsole, *ws);
+        PostHermesLineToWebView(*ws);
 
         delete ws;
         break;
@@ -3956,33 +3909,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_HERMES_CLOSED:
         AppendLog(L"[Hermes] --- process closed ---");
+        g_showConsole    = false;
+        g_consoleLineCount = 0;
+        PostStateToWebView();
+        break;
+
+    case WM_LIVE_DATA_JSON:
     {
-        if (g_consoleExpanded) {
-            g_consoleExpanded = false;
-            g_consoleLineCount = 0;
-            ShowWindow(g_hwndConsole, SW_HIDE);
-            SetWindowTextW(g_hwndConsole, L"");
-            SetWindowPos(hwnd, nullptr, 0, 0,
-                MulDiv(514,          g_dpi, 96),
-                MulDiv(WND_H_BASE,   g_dpi, 96),
-                SWP_NOMOVE | SWP_NOZORDER);
-            InvalidateRect(hwnd, nullptr, TRUE);
+        auto* msg = reinterpret_cast<std::wstring*>(lp);
+        if (msg) {
+            if (g_webview && g_wvReady) g_webview->PostWebMessageAsJson(msg->c_str());
+            delete msg;
         }
         break;
     }
 
-    case WM_ERASEBKGND:
-    {
-        RECT rc; GetClientRect(hwnd, &rc);
-        FillRect((HDC)wp, &rc, g_hbrBg);
-        return 1;
-    }
-
     case WM_GETMINMAXINFO:
     {
+        // WS_POPUP: window size == client size (no NC area)
+        LONG w = MulDiv(WND_CLIENT_W, g_dpi, 96);
+        LONG h = MulDiv(WND_CLIENT_H, g_dpi, 96);
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);
-        LONG w = MulDiv(514, g_dpi, 96);
-        LONG h = MulDiv(g_consoleExpanded ? WND_H_EXPANDED : WND_H_BASE, g_dpi, 96);
         mmi->ptMinTrackSize = {w, h};
         mmi->ptMaxTrackSize = {w, h};
         break;
@@ -4009,17 +3956,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
 
     case WM_DESTROY:
+        g_wvCtrl.Reset();
+        g_webview.Reset();
         RB_Shutdown();
         KillTimer(hwnd, ID_TIMER_UPDATE);
+        KillTimer(hwnd, ID_TIMER_LIVE);
         if (g_hermesProcess)  { TerminateProcess(g_hermesProcess, 0); CloseHandle(g_hermesProcess); g_hermesProcess = nullptr; }
         if (g_hermesPipeRead) { CloseHandle(g_hermesPipeRead); g_hermesPipeRead = nullptr; }
         if (g_pTaskbar) { g_pTaskbar->Release(); g_pTaskbar = nullptr; }
-        if (g_hIconLarge)          { DestroyIcon(g_hIconLarge);          g_hIconLarge          = nullptr; }
-        if (g_hIconSmall)          { DestroyIcon(g_hIconSmall);          g_hIconSmall          = nullptr; }
+        if (g_hIconLarge)            { DestroyIcon(g_hIconLarge);            g_hIconLarge            = nullptr; }
+        if (g_hIconSmall)            { DestroyIcon(g_hIconSmall);            g_hIconSmall            = nullptr; }
         if (g_hIconRecordingOverlay) { DestroyIcon(g_hIconRecordingOverlay); g_hIconRecordingOverlay = nullptr; }
-        if (g_fontLink)    { DeleteObject(g_fontLink);    g_fontLink    = nullptr; }
-        if (g_fontSmall)   { DeleteObject(g_fontSmall);   g_fontSmall   = nullptr; }
-        if (g_fontConsole) { DeleteObject(g_fontConsole); g_fontConsole = nullptr; }
         PostQuitMessage(0);
         break;
 
@@ -4136,8 +4083,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     Gdiplus::GdiplusStartupInput gdiplusInput;
     Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusInput, nullptr);
 
-    g_logoBitmap = LoadPngFromResource(IDR_LOGO_CLEAN);
-
     g_hIconLarge = CreateIconFromPng(IDR_LOGO_ROUND, GetSystemMetrics(SM_CXICON));
     g_hIconSmall = CreateIconFromPng(IDR_LOGO_ROUND, GetSystemMetrics(SM_CXSMICON));
     if (!g_hIconLarge) g_hIconLarge = LoadIcon(nullptr, IDI_APPLICATION);
@@ -4218,32 +4163,37 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
         }
     }
 
-    g_hbrBg        = CreateSolidBrush(CLR_BG);
-    g_hbrBg2       = CreateSolidBrush(CLR_BG2);
-    g_hbrConsoleBg = CreateSolidBrush(RGB(0, 0, 0));
+    // Check WebView2 runtime before creating the window
+    if (!CheckWebView2Runtime()) {
+        ShowWebView2InstallPrompt(nullptr);
+        return 1;
+    }
+
+    g_hbrBg  = CreateSolidBrush(CLR_BG);
+    g_hbrBg2 = CreateSolidBrush(CLR_BG2);
 
     WNDCLASSEXW wc = {};
     wc.cbSize        = sizeof(wc);
     wc.lpfnWndProc   = WndProc;
     wc.hInstance     = hInst;
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = g_hbrBg;
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = L"WOWHCLauncherWnd";
     wc.hIcon         = g_hIconLarge;
     wc.hIconSm       = g_hIconSmall;
     RegisterClassExW(&wc);
 
-    int WND_W = MulDiv(514, g_dpi, 96);
-    int WND_H = MulDiv(543, g_dpi, 96);
+    // Borderless popup: window size == client size (no title bar, no border)
+    int WND_W = MulDiv(WND_CLIENT_W, g_dpi, 96);
+    int WND_H = MulDiv(WND_CLIENT_H, g_dpi, 96);
     RECT wa = {};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    int waW = wa.right - wa.left;
-    int waH = wa.bottom - wa.top;
-    int xpos = wa.left + ((waW > WND_W) ? (waW - WND_W) / 2 : 0);
-    int ypos = wa.top  + ((waH > WND_H) ? (waH - WND_H) / 2 : 0);
+    int xpos = wa.left + ((wa.right  - wa.left > WND_W) ? (wa.right  - wa.left - WND_W) / 2 : 0);
+    int ypos = wa.top  + ((wa.bottom - wa.top  > WND_H) ? (wa.bottom - wa.top  - WND_H) / 2 : 0);
 
-    g_hwnd = CreateWindowExW(0, L"WOWHCLauncherWnd", APP_NAME,
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+    // WS_EX_APPWINDOW: show in taskbar even though WS_POPUP has no owner
+    g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, L"WOWHCLauncherWnd", APP_NAME,
+        WS_POPUP,
         xpos, ypos, WND_W, WND_H,
         nullptr, nullptr, hInst, nullptr);
 
@@ -4252,7 +4202,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     RB_RegisterHotkeys();
 
     BOOL darkMode = TRUE;
+    DwmSetWindowAttribute(g_hwnd, 19, &darkMode, sizeof(darkMode));
     DwmSetWindowAttribute(g_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkMode, sizeof(darkMode));
+    // Thin DWM shadow around the borderless window
+    MARGINS shadow = {1, 1, 1, 1};
+    DwmExtendFrameIntoClientArea(g_hwnd, &shadow);
 
     ShowWindow(g_hwnd, SW_SHOW);
     UpdateWindow(g_hwnd);
@@ -4263,14 +4217,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
         DispatchMessageW(&m);
     }
 
-    delete g_logoBitmap;
-    g_logoBitmap = nullptr;
     if (g_gdiplusToken) Gdiplus::GdiplusShutdown(g_gdiplusToken);
-
-    if (g_hbrBg)        { DeleteObject(g_hbrBg);        g_hbrBg        = nullptr; }
-    if (g_hbrBg2)       { DeleteObject(g_hbrBg2);       g_hbrBg2       = nullptr; }
-    if (g_hbrConsoleBg) { DeleteObject(g_hbrConsoleBg); g_hbrConsoleBg = nullptr; }
-    if (g_hRichEdit)    { FreeLibrary(g_hRichEdit);     g_hRichEdit    = nullptr; }
+    if (g_hbrBg)  { DeleteObject(g_hbrBg);  g_hbrBg  = nullptr; }
+    if (g_hbrBg2) { DeleteObject(g_hbrBg2); g_hbrBg2 = nullptr; }
+    if (g_hRichEdit) { FreeLibrary(g_hRichEdit); g_hRichEdit = nullptr; }
 
     ReleaseMutex(hMutex);
     CloseHandle(hMutex);

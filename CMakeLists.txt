@@ -10,7 +10,7 @@ if(NOT DEFINED ENV{CI})
   set(_MSVC    "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/${_MSVCVER}")
 
   set(ENV{INCLUDE}
-      "${_MSVC}/include;${_WINSDK}/Include/${_SDKVER}/um;${_WINSDK}/Include/${_SDKVER}/shared;${_WINSDK}/Include/${_SDKVER}/ucrt"
+      "${_MSVC}/include;${_WINSDK}/Include/${_SDKVER}/um;${_WINSDK}/Include/${_SDKVER}/shared;${_WINSDK}/Include/${_SDKVER}/ucrt;${_WINSDK}/Include/${_SDKVER}/winrt"
   )
   set(ENV{LIB}
       "${_MSVC}/lib/x64;${_WINSDK}/Lib/${_SDKVER}/um/x64;${_WINSDK}/Lib/${_SDKVER}/ucrt/x64"
@@ -27,7 +27,8 @@ project(2026_wowhc_launcher LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(FFMPEG_DIR "${CMAKE_SOURCE_DIR}/third_party/ffmpeg")
+set(FFMPEG_DIR   "${CMAKE_SOURCE_DIR}/third_party/ffmpeg")
+set(WEBVIEW2_DIR "${CMAKE_SOURCE_DIR}/third_party/webview2")
 
 add_executable(${PROJECT_NAME} WIN32
     main.cpp
@@ -81,7 +82,14 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     GDRIVE_CLIENT_SECRET="${_GDRIVE_SEC}"
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE "${FFMPEG_DIR}/include")
+target_include_directories(${PROJECT_NAME} PRIVATE
+    "${FFMPEG_DIR}/include"
+    "${WEBVIEW2_DIR}/include"
+)
+
+target_link_directories(${PROJECT_NAME} PRIVATE
+    "${WEBVIEW2_DIR}/lib/x64"
+)
 # FFmpeg libs are loaded dynamically via LoadLibrary; no import libs needed
 
 if(_HAS_LOCAL_PATHS)
@@ -90,6 +98,7 @@ if(_HAS_LOCAL_PATHS)
       "${_WINSDK}/Include/${_SDKVER}/um"
       "${_WINSDK}/Include/${_SDKVER}/shared"
       "${_WINSDK}/Include/${_SDKVER}/ucrt"
+      "${_WINSDK}/Include/${_SDKVER}/winrt"
   )
 
   target_link_directories(${PROJECT_NAME} PRIVATE
@@ -113,6 +122,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11
     dxgi
     propsys
+    WebView2LoaderStatic
 )
 
 # Copy FFmpeg DLLs next to the built EXE
@@ -122,4 +132,12 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         ${FFMPEG_DLLS}
         $<TARGET_FILE_DIR:${PROJECT_NAME}>
     COMMENT "Copying FFmpeg DLLs to output directory"
+)
+
+# Copy ui/ folder next to the built EXE (enables live HTML editing in dev)
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/ui"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/ui"
+    COMMENT "Copying ui/ to output directory"
 )

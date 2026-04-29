@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>WoW Hardcore Launcher</title>
+  <style>
+    @font-face {
+      font-family: 'Cinzel';
+      font-style: normal;
+      font-weight: 600;
+      font-display: block;
+      src: url('fonts/Cinzel-SemiBold.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Inter';
+      font-style: normal;
+      font-weight: 100 900;
+      font-display: block;
+      src: url('fonts/Inter.woff2') format('woff2');
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; width: 875px; height: 500px; background: #0a0806; overflow: hidden; }
+    body { font-family: "Inter", system-ui, sans-serif; }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #1a1410; }
+    ::-webkit-scrollbar-thumb { background: rgba(180,130,60,0.35); border-radius: 0; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(224,160,74,0.65); }
+    ::-webkit-scrollbar-corner { background: #1a1410; }
+
+    select:hover { border-color: rgba(180,130,60,0.45) !important; }
+    a { cursor: pointer; }
+
+    /* In native mode the window is borderless — the HTML chrome IS the title bar */
+  </style>
+</head>
+<body>
+  <div id="root" style="width:875px;height:500px;"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+  <script>
+    // Forward ?v= from the page URL to JSX src fetches so Babel gets fresh
+    // files after each update without needing to wipe the WebView2 cache.
+    var _v = (location.search.match(/[?&]v=([^&]*)/) || [])[1] || '0';
+    document.write('<scr\x69pt type="text/babel" data-presets="react" src="data.jsx?v=' + _v + '"><\/script>');
+    document.write('<scr\x69pt type="text/babel" data-presets="react" src="app.jsx?v=' + _v + '"><\/script>');
+  </script>
+
+  <script type="text/babel" data-presets="react">
+    const isNative = !!(window.chrome && window.chrome.webview);
+    if (isNative) document.body.classList.add('native');
+    ReactDOM.createRoot(document.getElementById('root')).render(<App isNative={isNative}/>);
+  </script>
+</body>
+</html>

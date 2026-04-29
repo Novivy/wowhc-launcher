@@ -602,6 +602,7 @@ static void ShowResultDialog(HWND parent, const std::wstring& link)
         WS_POPUP|WS_CAPTION|WS_SYSMENU,
         x, y, w, h, parent, nullptr, GetModuleHandleW(nullptr), (LPVOID)&link);
     BOOL dark = TRUE;
+    DwmSetWindowAttribute(dlg, 19, &dark, sizeof(dark));
     DwmSetWindowAttribute(dlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
     if (parent) {
         HICON hSm  = (HICON)SendMessageW(parent, WM_GETICON, ICON_SMALL, 0);
@@ -1128,6 +1129,7 @@ void ShowUploadWindow(HWND hParent, const std::wstring& configDir)
         hParent, nullptr, GetModuleHandleW(nullptr), nullptr);
 
     BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
 
     if (hParent) {

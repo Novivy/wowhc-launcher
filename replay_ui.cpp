@@ -769,6 +769,7 @@ void ShowReplayWindow(HWND hParent)
         hParent, nullptr, GetModuleHandleW(nullptr), nullptr);
 
     BOOL dark = TRUE;
+    DwmSetWindowAttribute(hwnd, 19, &dark, sizeof(dark));
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
 
     // Inherit icon from main launcher window

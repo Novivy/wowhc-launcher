@@ -62,10 +62,11 @@ jobs:
           # Bare EXE for self-update (FindExeAssetUrl scans for .exe)
           Copy-Item "build-release\2026_wowhc_launcher.exe" "WOW-HC-Launcher.exe"
 
-          # Full ZIP with EXE + FFmpeg DLLs for first-time users
+          # Full ZIP with EXE + FFmpeg DLLs + ui/ for first-time users
           New-Item -ItemType Directory -Path release-pkg | Out-Null
           Copy-Item "build-release\2026_wowhc_launcher.exe" "release-pkg\WOW-HC-Launcher.exe"
           Copy-Item "build-release\*.dll" "release-pkg\"
+          Copy-Item "ui" "release-pkg\ui" -Recurse
           Compress-Archive -Path "release-pkg\*" -DestinationPath "WOW-HC-Launcher-Full.zip"
         shell: pwsh
 
