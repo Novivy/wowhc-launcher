@@ -215,7 +215,7 @@ static HANDLE g_hermesPipeRead = nullptr;
 static HMODULE g_hRichEdit     = nullptr; // still loaded for existing RichEdit code paths
 
 static constexpr int WND_CLIENT_W = 875;
-static constexpr int WND_CLIENT_H = 500;
+static constexpr int WND_CLIENT_H = 530;
 
 // ── Shared fonts for modal dialogs (lazily created, never deleted — process lifetime) ──
 static HFONT DlgFont()
@@ -1373,6 +1373,13 @@ static void PostStateToWebView()
         JsonEscW(verAddon).c_str(),
         JsonEscW(verClient).c_str());
 
+    static int s_postCount = 0;
+    AppendLog(L"PostStateToWebView #%d: installPath='%s' clientType=%d playReady=%s json=%s",
+        ++s_postCount,
+        (g_installPath.empty() ? g_clientPath : g_installPath).c_str(),
+        (int)g_clientType,
+        g_playReady.load() ? L"true" : L"false",
+        json);
     g_webview->PostWebMessageAsJson(json);
 }
 
@@ -3871,13 +3878,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_STARTUP_CHECK_DONE:
     {
+        AppendLog(L"WM_STARTUP_CHECK_DONE: clientPath='%s' clientType=%d g_wvReady=%d",
+            g_clientPath.c_str(), (int)g_clientType, (int)g_wvReady);
         // Startup launcher-update check is done — proceed with normal startup flow.
         if (!g_clientPath.empty()) {
+            AppendLog(L"WM_STARTUP_CHECK_DONE: has path, starting Worker");
             UpdateRealmConfig(g_realmIndex);
             g_workerBusy = true;
             PostStateToWebView();
             std::thread(Worker).detach();
         } else {
+            AppendLog(L"WM_STARTUP_CHECK_DONE: no path, showing browse dialog");
             g_currentStatus = STATUS_TEXT[WS_NO_PATH];
             PostStateToWebView();
             PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_BROWSE, BN_CLICKED), 0);
@@ -4108,8 +4119,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     }
     AppendLog(L"=== Launcher started (version %hs) ===", LAUNCHER_VERSION_STR);
     RB_SetLogPath(g_logPath);
+    if (IsDevBuild())
+        ShellExecuteW(nullptr, L"open", g_logPath.c_str(), nullptr, nullptr, SW_SHOW);
 
     LoadConfig();
+    AppendLog(L"Config loaded: installPath='%s' clientPath='%s' clientType=%d hermesExePath='%s' arctiumExePath='%s' wowTweakedExePath='%s' realmIndex=%d",
+        g_installPath.c_str(), g_clientPath.c_str(), (int)g_clientType,
+        g_hermesExePath.c_str(), g_arctiumExePath.c_str(), g_wowTweakedExePath.c_str(), g_realmIndex);
     ReplaySettings g_replaySettingsInit = LoadReplaySettings(ConfigPath());
     if (g_replaySettingsInit.saveFolder.empty() && !g_clientPath.empty())
         g_replaySettingsInit.saveFolder = g_clientPath + L"\\_classic_era_\\Videos";
@@ -4122,8 +4138,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
         std::wstring wowExeCheck = (g_clientType == CT_112)
             ? (g_wowTweakedExePath.empty() ? g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe" : g_wowTweakedExePath)
             : g_clientPath + L"\\_classic_era_\\WowClassic.exe";
+        AppendLog(L"Startup exe check: '%s'", wowExeCheck.c_str());
         if (GetFileAttributesW(wowExeCheck.c_str()) == INVALID_FILE_ATTRIBUTES) {
             bool wasInstalled = GetFileAttributesW(ClientMarker().c_str()) != INVALID_FILE_ATTRIBUTES;
+            AppendLog(L"Startup exe check FAILED (wasInstalled=%d) — clearing all paths", (int)wasInstalled);
             g_installPath.clear();
             g_clientPath.clear();
             g_hermesExePath.clear();
@@ -4137,6 +4155,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
                     L"Please select your installation folder again.",
                     L"Installation Not Found", MB_OK | MB_ICONWARNING);
             }
+        } else {
+            AppendLog(L"Startup exe check OK");
         }
     }
     // On a valid saved install, try to recover missing exe paths from the stored client dir
@@ -4144,21 +4164,25 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
         if (g_clientType == CT_112) {
             if (g_wowTweakedExePath.empty() || GetFileAttributesW(g_wowTweakedExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
                 std::wstring def = g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe";
-                if (GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES)
+                if (GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    AppendLog(L"Recovered wowTweakedExePath from default: '%s'", def.c_str());
                     g_wowTweakedExePath = def;
-                else {
+                } else {
                     std::wstring f = FindExeInTree(g_clientPath, L"Wow_tweaked.exe", 3);
-                    if (!f.empty()) g_wowTweakedExePath = f;
+                    if (!f.empty()) { AppendLog(L"Recovered wowTweakedExePath via scan: '%s'", f.c_str()); g_wowTweakedExePath = f; }
+                    else AppendLog(L"Could not recover wowTweakedExePath");
                 }
             }
         } else {
             if (g_hermesExePath.empty() || GetFileAttributesW(g_hermesExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
                 std::wstring f = FindExeNearby(g_clientPath, L"HermesProxy.exe");
-                if (!f.empty()) g_hermesExePath = f;
+                if (!f.empty()) { AppendLog(L"Recovered hermesExePath: '%s'", f.c_str()); g_hermesExePath = f; }
+                else AppendLog(L"Could not recover hermesExePath");
             }
             if (g_arctiumExePath.empty() || GetFileAttributesW(g_arctiumExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
                 std::wstring f = FindExeNearby(g_clientPath, L"Arctium WoW Launcher.exe");
-                if (!f.empty()) g_arctiumExePath = f;
+                if (!f.empty()) { AppendLog(L"Recovered arctiumExePath: '%s'", f.c_str()); g_arctiumExePath = f; }
+                else AppendLog(L"Could not recover arctiumExePath");
             }
         }
     }

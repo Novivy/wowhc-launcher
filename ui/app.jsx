@@ -2,10 +2,10 @@
 // Communicates with native host via window.chrome.webview message bridge.
 
 const T = {
-  bg0: "#0a0806", bg1: "#14100a", bg2: "#1d1810", plate: "#221a12", chrome: "#070504",
+  bg0: "#0a0806", bg1: "#14100a", bg2: "#1d1810", bg3: "#0a0e1a", plate: "#221a12", chrome: "#070504",
   line: "rgba(180,130,60,0.20)", line2: "rgba(180,130,60,0.10)",
   text: "#ecdab0", textDim: "#a08868", textFaint: "#6a5638",
-  amber: "#e0a04a", amberGlow: "rgba(224,160,74,0.5)", ember: "#c84a1a", blood: "#9a3422",
+  amber: "#e0a04a", lightBlue: "#498dbf", amberGlow: "rgba(224,160,74,0.5)", ember: "#c84a1a", blood: "#9a3422", fluid: "#228e9a",
 };
 
 // ── Bridge helpers ─────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ const BottomBar = ({ state, onAction }) => {
   return (
     <div style={{
       background: T.chrome, borderTop: '1px solid ' + T.line,
-      padding: '12px 12px', display: 'grid', gridTemplateColumns: '1fr 300px', gap: 17, alignItems: 'end',
+      padding: '20px', display: 'grid', gridTemplateColumns: '1fr 300px', gap: 21, alignItems: 'end',
       flexShrink: 0,
     }}>
       {/* Left column */}
@@ -114,7 +114,7 @@ const BottomBar = ({ state, onAction }) => {
         </div>
 
         {/* Path row */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop:7, minWidth: 0, justifyContent: 'flex-end' }}>
           <span style={{
             color: T.textFaint, fontFamily: 'ui-monospace, monospace', fontSize: 12,
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 6,
@@ -250,8 +250,10 @@ const App = ({ isNative }) => {
   React.useEffect(function() {
     if (!isNative) return;
     function handler(evt) {
+      console.log('[bridge] evt.data type=' + typeof evt.data, evt.data);
       try {
-        var msg = JSON.parse(evt.data);
+        var msg = typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
+        console.log('[bridge] msg.type=' + msg.type + ' installPath=' + msg.installPath + ' isInstalled=' + msg.isInstalled);
         if (msg.type === 'state')       setAppState(function(s) { return Object.assign({}, s, msg); });
         if (msg.type === 'hermesLine')  setHermesLines(function(prev) { return prev.slice(-500).concat([msg.text]); });
         if (msg.type === 'serverStats') {
@@ -260,7 +262,7 @@ const App = ({ isNative }) => {
         }
         if (msg.type === 'areasData' && msg.data)  setZones(msg.data);
         if (msg.type === 'newsData'  && Array.isArray(msg.data) && msg.data.length) setNews(msg.data);
-      } catch (e) {}
+      } catch (e) { console.error('[bridge] parse error', e, evt.data); }
     }
     window.chrome.webview.addEventListener('message', handler);
     send('ready');
@@ -322,7 +324,7 @@ const App = ({ isNative }) => {
 
   return (
     <div style={{
-      width: 875, height: 500, display: 'flex', flexDirection: 'column',
+      width: 875, height: 530, display: 'flex', flexDirection: 'column',
       background: T.bg0, color: T.text, fontFamily: '"Inter", system-ui, sans-serif',
       border: '1px solid ' + T.line, position: 'relative', overflow: 'hidden',
     }}>
@@ -364,7 +366,7 @@ const App = ({ isNative }) => {
             }});
           }); })}
 
-          <div style={{ display: 'flex', justifyContent: 'center', padding: '6px 0' }}>
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '3px 0' }}>
             <img src="assets/logo.png" alt="WoW Hardcore"
               style={{ width: 150, height: 'auto', filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.8))', imageRendering: 'auto' }}/>
           </div>
@@ -437,7 +439,7 @@ const App = ({ isNative }) => {
 
             {/* Recent Deaths */}
             <div style={{ borderRight: '1px solid ' + T.line, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-              <div style={{ padding: '6px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid ' + T.line2, background: 'rgba(154,52,34,0.08)', flexShrink: 0 }}>
+              <div style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid ' + T.line2, background: 'rgba(154,52,34,0.08)', flexShrink: 0 }}>
                 <span style={{ fontSize: 11, letterSpacing: '0.14em', color: T.blood, fontWeight: 700 }}>RECENT DEATHS</span>
                 {online != null && (
                   <span style={{ display: 'flex', alignItems: 'center', color: '#bdd1bb', fontSize: 11, fontFamily: 'ui-monospace, monospace', gap: 4 }}>
@@ -477,8 +479,8 @@ const App = ({ isNative }) => {
 
             {/* Last News + optional HermesProxy console overlay */}
             <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', position: 'relative' }}>
-              <div style={{ padding: '6px 12px', borderBottom: '1px solid ' + T.line2, background: T.bg2, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 7, flexShrink: 0 }}>
-                <span style={{ fontSize: 11, letterSpacing: '0.14em', color: T.amber, fontWeight: 700 }}>LATEST NEWS</span>
+              <div style={{ padding: '10px 14px', borderBottom: '1px solid ' + T.line2, background: T.bg3, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 7, flexShrink: 0 }}>
+                <span style={{ fontSize: 11, letterSpacing: '0.14em', color: T.lightBlue, fontWeight: 700 }}>LATEST NEWS</span>
                 <img src="assets/icon.png" alt="" style={{ width: 14, height: 14, flexShrink: 0, objectFit: 'contain' }}/>
               </div>
               <div style={{ flex: 1, overflowY: 'auto', padding: '0px 0' }}>
