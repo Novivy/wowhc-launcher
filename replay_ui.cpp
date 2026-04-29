@@ -763,7 +763,7 @@ void ShowReplayWindow(HWND hParent)
     int y = pr.top  + (pr.bottom - pr.top - h) / 2;
 
     HWND hwnd = CreateWindowExW(0,
-        L"WOWHCReplaySettings", L"Screen Recorder Settings",
+        L"WOWHCReplaySettings", L"Video Recorder Settings",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         x, y, w, h,
         hParent, nullptr, GetModuleHandleW(nullptr), nullptr);

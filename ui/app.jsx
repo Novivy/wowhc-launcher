@@ -41,46 +41,52 @@ const Icon = ({ k, c, size }) => {
 };
 
 // ── Small reusable button components ──────────────────────────────────────────
-const ActionBtn = ({ icon, iconColor, label, onClick, active }) => {
+const ActionBtn = ({ icon, iconColor, label, title, onClick, active, disabled }) => {
   const [hov, setHov] = React.useState(false);
   const isRec = icon === 'rec';
-  const highlighted = hov || active;
+  const highlighted = !disabled && (hov || active);
+  const recActive = isRec && active && !disabled;
   return (
     <button
+      title={title}
       onClick={onClick}
+      disabled={disabled}
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
       style={{
         height: 35, boxSizing: 'border-box',
         background: highlighted ? T.plate : T.bg2,
-        border: '1px solid ' + (highlighted ? 'rgba(180,130,60,0.45)' : T.line),
-        color: highlighted ? T.text : T.textDim,
+        border: '1px solid ' + (recActive ? T.blood : (highlighted ? 'rgba(180,130,60,0.45)' : T.line)),
+        color: recActive ? T.blood : (highlighted ? T.text : T.textDim),
         padding: '0 10px', fontSize: 9, letterSpacing: '0.06em', textTransform: 'uppercase',
-        fontFamily: 'inherit', cursor: 'pointer', fontWeight: 600,
-        display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap', flexShrink: 0,
+        fontFamily: 'inherit', cursor: disabled ? 'not-allowed' : 'pointer', fontWeight: 600,
+        display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap', flexShrink: 0,
         transition: 'background 120ms, border-color 120ms, color 120ms',
+        opacity: disabled ? 0.35 : 1,
       }}>
       {isRec
         ? React.createElement('svg', { width: 14, height: 14, viewBox: '0 0 24 24' },
-            React.createElement('circle', { cx: 12, cy: 12, r: 7, fill: active ? T.amber : iconColor }))
+            React.createElement('circle', { cx: 12, cy: 12, r: 7, fill: active ? T.blood : T.amber }))
         : React.createElement(Icon, { k: icon, c: iconColor, size: 14 })}
       {label}
     </button>
   );
 };
 
-const PathIconBtn = ({ title, onClick, icon }) => {
+const PathIconBtn = ({ title, onClick, icon, disabled }) => {
   const [hov, setHov] = React.useState(false);
   return (
     <button title={title} onClick={onClick}
+      disabled={disabled}
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
       style={{
         flexShrink: 0, width: 25, height: 25, padding: 0,
-        background: 'transparent', border: '1px solid ' + (hov ? T.amber : T.line),
-        color: hov ? T.amber : T.textDim, cursor: 'pointer',
+        background: 'transparent', border: '1px solid ' + (!disabled && hov ? T.amber : T.line),
+        color: !disabled && hov ? T.amber : T.textDim, cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'grid', placeItems: 'center',
         transition: 'color 140ms, border-color 140ms',
+        opacity: disabled ? 0.35 : 1,
       }}>
       {React.createElement(Icon, { k: icon, size: 12 })}
     </button>
@@ -103,12 +109,13 @@ const BottomBar = ({ state, onAction }) => {
       <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, height: 104, justifyContent: 'space-between' }}>
         {/* Action row */}
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {React.createElement(ActionBtn, { icon: 'save',   iconColor: T.amber, label: 'Save Replay',    onClick: () => onAction('saveReplay'),         active: false })}
-          {React.createElement(ActionBtn, { icon: 'upload', iconColor: T.amber, label: 'Upload Replays', onClick: () => onAction('uploadReplays'),      active: false })}
+          {React.createElement(ActionBtn, { icon: 'save',   iconColor: T.amber, label: 'Save Replay',    title: 'Save the current replay buffer to a video file', onClick: () => onAction('saveReplay'),         active: false })}
+          {React.createElement(ActionBtn, { icon: 'upload', iconColor: T.amber, label: 'Upload Replays', title: 'Upload recorded replays to Google Drive',         onClick: () => onAction('uploadReplays'),      active: false })}
           <span style={{ flex: 1 }}/>
-          {React.createElement(ActionBtn, { icon: 'cog',    iconColor: T.amber, label: '',               onClick: () => onAction('openRecordSettings'), active: false })}
+          {React.createElement(ActionBtn, { icon: 'cog',    iconColor: T.amber, label: '',               title: 'Video recording settings',                              onClick: () => onAction('openRecordSettings'), active: false })}
           {React.createElement(ActionBtn, { icon: 'rec',    iconColor: T.blood,
             label: isRecording ? 'Stop Recording' : 'Start Recording',
+            title: isRecording ? 'Stop the replay buffer recording' : 'Start recording your recent gameplay for replays',
             onClick: () => onAction(isRecording ? 'stopRecording' : 'startRecording'),
             active: isRecording })}
         </div>
@@ -167,10 +174,11 @@ const BottomBar = ({ state, onAction }) => {
   );
 };
 
-const StartBtn = ({ isInstalled, onClick }) => {
+const StartBtn = ({ isInstalled, onClick, disabled }) => {
   const [hov, setHov] = React.useState(false);
   return (
     <button onClick={onClick}
+      disabled={disabled}
       onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
       style={{
         height: 63,
@@ -178,24 +186,27 @@ const StartBtn = ({ isInstalled, onClick }) => {
         border: '1px solid ' + T.amber,
         color: '#1a0a04', fontFamily: '"Cinzel", Georgia, serif',
         fontSize: 20, fontWeight: 700, letterSpacing: '0.2em', textTransform: 'uppercase',
-        cursor: 'pointer', textShadow: '0 1px 0 rgba(255,220,160,0.4)',
-        filter: hov ? 'brightness(1.12)' : 'none', transition: 'filter 120ms',
+        cursor: disabled ? 'not-allowed' : 'pointer', textShadow: '0 1px 0 rgba(255,220,160,0.4)',
+        filter: !disabled && hov ? 'brightness(1.12)' : 'none', transition: 'filter 120ms',
+        opacity: disabled ? 0.35 : 1,
       }}>
       {isInstalled ? 'START GAME' : 'INSTALL'}
     </button>
   );
 };
 
-const CogBtn = ({ onClick }) => {
+const CogBtn = ({ onClick, disabled }) => {
   const [hov, setHov] = React.useState(false);
   return (
     <button onClick={onClick} title="Settings"
+      disabled={disabled}
       onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
       style={{
-        height: 63, background: hov ? T.bg2 : T.plate,
-        border: '1px solid ' + (hov ? 'rgba(180,130,60,0.45)' : T.line),
-        color: T.amber, cursor: 'pointer', display: 'grid', placeItems: 'center',
+        height: 63, background: !disabled && hov ? T.bg2 : T.plate,
+        border: '1px solid ' + (!disabled && hov ? 'rgba(180,130,60,0.45)' : T.line),
+        color: T.amber, cursor: disabled ? 'not-allowed' : 'pointer', display: 'grid', placeItems: 'center',
         transition: 'background 120ms, border-color 120ms',
+        opacity: disabled ? 0.35 : 1,
       }}>
       {React.createElement(Icon, { k: 'cog', size: 20 })}
     </button>
@@ -340,11 +351,11 @@ const App = ({ isNative }) => {
           onMouseDown={() => onAction('startDrag')}
           style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 9, fontSize: 11, letterSpacing: '0.18em', color: T.textDim, textTransform: 'uppercase', fontWeight: 600, cursor: 'default', userSelect: 'none', height: '100%' }}>
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: T.amber, boxShadow: '0 0 8px ' + T.amberGlow }}/>
-          WoW Hardcore Launcher
+          WOW-HC Launcher
         </div>
         <div style={{ display: 'flex' }}>
-          <span onClick={() => onAction('minimize')} style={{ width: 40, height: 33, display: 'grid', placeItems: 'center', color: T.textFaint, fontSize: 15, cursor: 'pointer' }}>&#8212;</span>
-          <span onClick={() => onAction('close')}    style={{ width: 40, height: 33, display: 'grid', placeItems: 'center', color: T.textFaint, fontSize: 15, cursor: 'pointer' }}>&#x2715;</span>
+          <span title="Minimize" onClick={() => onAction('minimize')} style={{ width: 40, height: 33, display: 'grid', placeItems: 'center', color: T.textFaint, fontSize: 15, cursor: 'pointer' }}>&#8212;</span>
+          <span title="Close"    onClick={() => onAction('close')}    style={{ width: 40, height: 33, display: 'grid', placeItems: 'center', color: T.textFaint, fontSize: 15, cursor: 'pointer' }}>&#x2715;</span>
         </div>
       </div>
 
