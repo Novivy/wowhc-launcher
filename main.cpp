@@ -116,6 +116,7 @@ enum : UINT {
 #define WM_HERMES_LINE        (WM_APP + 10) // lParam = new std::wstring* (one output line)
 #define WM_HERMES_CLOSED      (WM_APP + 11) // HermesProxy terminated — collapse console
 #define WM_LIVE_DATA_JSON     (WM_APP + 12) // lParam = new std::wstring* (JSON to post to WebView)
+#define WM_SET_REALM          (WM_APP + 13) // wParam = realm index — deferred from WebView2 callback
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
@@ -420,6 +421,21 @@ static bool IsNewer(const std::wstring& local, const std::wstring& remote)
 }
 
 // ── Tiny JSON field extractor ──────────────────────────────────────────────────
+static int JsonInt(const std::string& json, const std::string& key, int def = 0)
+{
+    auto pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return def;
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return def;
+    while (++pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) {}
+    if (pos >= json.size()) return def;
+    size_t start = pos;
+    if (json[start] == '-') pos++;
+    while (pos < json.size() && isdigit((unsigned char)json[pos])) pos++;
+    if (pos == start) return def;
+    try { return std::stoi(json.substr(start, pos - start)); } catch (...) { return def; }
+}
+
 static std::string JsonString(const std::string& json, const std::string& key)
 {
     auto pos = json.find("\"" + key + "\"");
@@ -1333,6 +1349,9 @@ static void PostStateToWebView()
 
     bool isInstalled = g_playReady.load();
     bool isRecording = RB_IsRunning();
+    bool workerBusy  = g_workerBusy.load();
+    bool playEnabled = !g_clientPath.empty() &&
+                       (g_clientInstalled.load() ? g_playReady.load() : !workerBusy);
 
     const char* lv = LAUNCHER_VERSION_STR;
     std::wstring verLauncher(lv, lv + strlen(lv));
@@ -1350,6 +1369,8 @@ static void PostStateToWebView()
         L"\"isInstalled\":%s,"
         L"\"isRecording\":%s,"
         L"\"canSaveReplay\":%s,"
+        L"\"playEnabled\":%s,"
+        L"\"workerBusy\":%s,"
         L"\"realmIndex\":%d,"
         L"\"clientType\":%d,"
         L"\"showConsole\":%s,"
@@ -1365,6 +1386,8 @@ static void PostStateToWebView()
         isInstalled  ? L"true" : L"false",
         isRecording  ? L"true" : L"false",
         isRecording  ? L"true" : L"false",
+        playEnabled  ? L"true" : L"false",
+        workerBusy   ? L"true" : L"false",
         g_realmIndex,
         (int)g_clientType,
         g_showConsole ? L"true" : L"false",
@@ -3145,10 +3168,8 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
         MessageBoxW(hwnd, L"General settings coming soon.", L"Settings", MB_OK | MB_ICONINFORMATION);
     }
     else if (action == "setRealm") {
-        std::string idxStr = JsonString(j, "index");
-        int idx = idxStr.empty() ? 0 : std::stoi(idxStr);
-        if (idx == 1) ShowPTRDialog(hwnd);
-        UpdateRealmConfig(idx);
+        int idx = JsonInt(j, "index");
+        PostMessageW(hwnd, WM_SET_REALM, (WPARAM)idx, 0);
     }
     else if (action == "startDrag") {
         // Let Windows move the borderless window as if the user dragged the caption
@@ -3933,6 +3954,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             delete msg;
         }
         break;
+    }
+
+    case WM_SET_REALM:
+    {
+        int idx = (int)wp;
+        if (idx == 1) ShowPTRDialog(hwnd);
+        UpdateRealmConfig(idx);
+        PostStateToWebView();
+        return 0;
     }
 
     case WM_GETMINMAXINFO:

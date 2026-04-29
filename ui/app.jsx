@@ -95,9 +95,11 @@ const PathIconBtn = ({ title, onClick, icon, disabled }) => {
 
 // ── Bottom bar ─────────────────────────────────────────────────────────────────
 const BottomBar = ({ state, onAction }) => {
-  const { status, progress, installPath, isInstalled, isRecording, realmIndex } = state;
+  const { status, progress, installPath, isInstalled, isRecording, canSaveReplay, playEnabled, workerBusy, realmIndex } = state;
   const progressPct = Math.max(0, Math.min(100, progress || 0));
   const statusColor = isInstalled ? T.amber : T.textDim;
+  const [localRealm, setLocalRealm] = React.useState(realmIndex || 0);
+  React.useEffect(function() { setLocalRealm(realmIndex || 0); }, [realmIndex]);
 
   return (
     <div style={{
@@ -109,10 +111,10 @@ const BottomBar = ({ state, onAction }) => {
       <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, height: 104, justifyContent: 'space-between' }}>
         {/* Action row */}
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {React.createElement(ActionBtn, { icon: 'save',   iconColor: T.amber, label: 'Save Replay',    title: 'Save the current replay buffer to a video file', onClick: () => onAction('saveReplay'),         active: false })}
+          {React.createElement(ActionBtn, { icon: 'save',   iconColor: T.amber, label: 'Save Replay',    title: 'Save the current replay buffer to a video file', onClick: () => onAction('saveReplay'),         active: false, disabled: !canSaveReplay })}
           {React.createElement(ActionBtn, { icon: 'upload', iconColor: T.amber, label: 'Upload Replays', title: 'Upload recorded replays to Google Drive',         onClick: () => onAction('uploadReplays'),      active: false })}
           <span style={{ flex: 1 }}/>
-          {React.createElement(ActionBtn, { icon: 'cog',    iconColor: T.amber, label: '',               title: 'Video recording settings',                              onClick: () => onAction('openRecordSettings'), active: false })}
+          {React.createElement(ActionBtn, { icon: 'cog',    iconColor: T.amber, label: '',               title: 'Video recording settings',                       onClick: () => onAction('openRecordSettings'), active: false })}
           {React.createElement(ActionBtn, { icon: 'rec',    iconColor: T.blood,
             label: isRecording ? 'Stop Recording' : 'Start Recording',
             title: isRecording ? 'Stop the replay buffer recording' : 'Start recording your recent gameplay for replays',
@@ -126,8 +128,8 @@ const BottomBar = ({ state, onAction }) => {
             color: T.textFaint, fontFamily: 'ui-monospace, monospace', fontSize: 12,
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 6,
           }}>{installPath || 'No installation path selected'}</span>
-          {React.createElement(PathIconBtn, { title: 'Edit install path', onClick: () => onAction('browse'),     icon: 'pen'    })}
-          {React.createElement(PathIconBtn, { title: 'Open folder',       onClick: () => onAction('openFolder'), icon: 'folder' })}
+          {React.createElement(PathIconBtn, { title: 'Edit install path', onClick: () => onAction('browse'),     icon: 'pen',    disabled: workerBusy })}
+          {React.createElement(PathIconBtn, { title: 'Open folder',       onClick: () => onAction('openFolder'), icon: 'folder', disabled: !installPath || workerBusy })}
         </div>
 
         {/* Status + progress bar */}
@@ -153,8 +155,8 @@ const BottomBar = ({ state, onAction }) => {
       {/* Right column — realm + START GAME + cog */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <select
-          value={realmIndex}
-          onChange={function(e) { onAction('setRealm', { index: parseInt(e.target.value) }); }}
+          value={localRealm}
+          onChange={function(e) { var idx = parseInt(e.target.value); setLocalRealm(idx); onAction('setRealm', { index: idx }); }}
           style={{
             appearance: 'none', WebkitAppearance: 'none', background: T.bg2,
             border: '1px solid ' + T.line, color: T.text, height: 35, boxSizing: 'border-box',
@@ -166,7 +168,7 @@ const BottomBar = ({ state, onAction }) => {
           {REALMS.map(function(r, i) { return React.createElement('option', { key: i, value: i }, r); })}
         </select>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 47px', gap: 6 }}>
-          {React.createElement(StartBtn, { isInstalled: isInstalled, onClick: () => onAction('startGame') })}
+          {React.createElement(StartBtn, { isInstalled: isInstalled, onClick: () => onAction('startGame'), disabled: !playEnabled })}
           {React.createElement(CogBtn,   { onClick: () => onAction('openSettings') })}
         </div>
       </div>
