@@ -410,6 +410,16 @@ static std::wstring DefaultVideosFolder()
     return buf;
 }
 
+static void CreateDirectoryRecursive(const std::wstring& path)
+{
+    if (path.empty()) return;
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return;
+    size_t pos = path.find_last_of(L"\\/");
+    if (pos != std::wstring::npos)
+        CreateDirectoryRecursive(path.substr(0, pos));
+    CreateDirectoryW(path.c_str(), nullptr);
+}
+
 static size_t MaxBufferBytes()
 {
     MEMORYSTATUSEX ms = { sizeof(ms) };
@@ -461,7 +471,12 @@ static void DoSave(std::deque<StoredPacket> pkts, AVRational timeBase,
     if (startIdx >= pkts.size()) { RB_ShowOsd(L"No keyframe found to save.", OSD_RED); return; }
 
     std::wstring saveDir = folder.empty() ? DefaultVideosFolder() : folder;
-    CreateDirectoryW(saveDir.c_str(), nullptr);
+    CreateDirectoryRecursive(saveDir);
+
+    if (GetFileAttributesW(saveDir.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        RB_ShowOsd(L"Cannot create save folder: " + saveDir, OSD_RED);
+        return;
+    }
 
     SYSTEMTIME st; GetLocalTime(&st);
     wchar_t fname[64];
@@ -477,7 +492,7 @@ static void DoSave(std::deque<StoredPacket> pkts, AVRational timeBase,
 
     AVFormatContext* fmtCtx = nullptr;
     if (avformat_alloc_output_context2(&fmtCtx, nullptr, "mp4", savePathA.c_str()) < 0) {
-        RB_ShowOsd(L"Failed to create output file.", OSD_RED);
+        RB_ShowOsd(L"Failed to create output context: " + saveDir, OSD_RED);
         return;
     }
 
@@ -488,7 +503,7 @@ static void DoSave(std::deque<StoredPacket> pkts, AVRational timeBase,
 
     if (avio_open(&fmtCtx->pb, savePathA.c_str(), AVIO_FLAG_WRITE) < 0) {
         avformat_free_context(fmtCtx);
-        RB_ShowOsd(L"Cannot open output file for writing.", OSD_RED);
+        RB_ShowOsd(L"Cannot write to: " + saveDir, OSD_RED);
         return;
     }
 
