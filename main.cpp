@@ -960,6 +960,27 @@ static void PatchConfigWtfPortal(const std::wstring& clientPath)
     }
 }
 
+// Protects key files from Battle.net auto-updates by toggling their read-only attribute.
+// Called with readOnly=true before launch and readOnly=false after game exits.
+static void SetClientFilesReadOnly(const std::wstring& clientPath, bool readOnly)
+{
+    const wchar_t* suffixes[] = {
+        L"\\.build.info",
+        L"\\_classic_era_\\.build.info",
+        L"\\_classic_era_\\WowClassic.exe",
+    };
+    for (auto* suffix : suffixes) {
+        std::wstring f = clientPath + suffix;
+        DWORD attr = GetFileAttributesW(f.c_str());
+        if (attr == INVALID_FILE_ATTRIBUTES) continue;
+        if (readOnly)
+            attr |= FILE_ATTRIBUTE_READONLY;
+        else
+            attr &= ~FILE_ATTRIBUTE_READONLY;
+        SetFileAttributesW(f.c_str(), attr);
+    }
+}
+
 // Launches exe and returns its process handle (caller must CloseHandle), or nullptr on failure.
 static HANDLE LaunchExeGetHandle(const std::wstring& exe, const std::wstring& args)
 {
@@ -3361,15 +3382,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             KillProcess(L"HermesProxy.exe");
                             Sleep(500);
                         }
-                        if (IsProcessRunning(L"Battle.net.exe")) {
-                            MessageBoxW(g_hwnd,
-                                L"Battle.net is currently running.\r\n\r\n"
-                                L"It may interfere with the game launch.\r\n"
-                                L"Please close Battle.net and try again.",
-                                L"Close Battle.net", MB_OK | MB_ICONWARNING);
-                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
-                            return;
-                        }
                         if (IsPortInUse(8084)) {
                             MessageBoxW(g_hwnd,
                                 L"Port 8084 is already in use by another application.\r\n"
@@ -3380,6 +3392,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             return;
                         }
                         PatchConfigWtfPortal(clientPath);
+                        SetClientFilesReadOnly(clientPath, true);
                         LaunchHermesWithPipe(hermesExe);
                         Sleep(1500);
                         // Keep Arctium's handle so we know exactly which process we started
@@ -3593,6 +3606,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         bool ok = (wp != 0) && !g_clientPath.empty();
         g_playReady = ok;
         if (ok) g_clientInstalled = true;
+        if (ok && g_clientType == CT_114) SetClientFilesReadOnly(g_clientPath, true);
         g_taskbarHasProgress = false;
         RefreshPlayButton();
         if (ok) PostStatus(WS_READY);
