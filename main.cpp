@@ -904,6 +904,62 @@ static bool IsPortInUse(int port)
     return inUse;
 }
 
+// Ensures SET portal "127.0.0.1" in _classic_era_\WTF\Config.wtf so HermesProxy intercepts traffic.
+static void PatchConfigWtfPortal(const std::wstring& clientPath)
+{
+    std::wstring path = clientPath + L"\\_classic_era_\\WTF\\Config.wtf";
+    // Read existing file
+    HANDLE hf = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    std::string content;
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD sz = GetFileSize(hf, nullptr);
+        if (sz && sz != INVALID_FILE_SIZE) {
+            content.resize(sz);
+            DWORD rd = 0;
+            ReadFile(hf, content.data(), sz, &rd, nullptr);
+            content.resize(rd);
+        }
+        CloseHandle(hf);
+    }
+
+    // Replace or append SET portal line (case-insensitive key match)
+    const std::string target = "SET portal \"127.0.0.1\"";
+    std::string out;
+    out.reserve(content.size() + 32);
+    bool found = false;
+    size_t i = 0;
+    while (i < content.size()) {
+        size_t nl = content.find('\n', i);
+        std::string line = content.substr(i, nl == std::string::npos ? std::string::npos : nl - i + 1);
+        i = (nl == std::string::npos) ? content.size() : nl + 1;
+        // Check if this line is "SET portal ..."
+        size_t s = line.find_first_not_of(" \t\r\n");
+        if (s != std::string::npos && _strnicmp(line.c_str() + s, "SET portal ", 11) == 0) {
+            // Replace with correct value, preserve line ending
+            std::string ending = (!line.empty() && line.back() == '\n')
+                ? (line.size() >= 2 && line[line.size()-2] == '\r' ? "\r\n" : "\n") : "";
+            out += target + ending;
+            found = true;
+        } else {
+            out += line;
+        }
+    }
+    if (!found) {
+        if (!out.empty() && out.back() != '\n') out += "\r\n";
+        out += target + "\r\n";
+    }
+
+    // Write back
+    hf = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
+        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD wr = 0;
+        WriteFile(hf, out.data(), (DWORD)out.size(), &wr, nullptr);
+        CloseHandle(hf);
+    }
+}
+
 // Launches exe and returns its process handle (caller must CloseHandle), or nullptr on failure.
 static HANDLE LaunchExeGetHandle(const std::wstring& exe, const std::wstring& args)
 {
@@ -3294,7 +3350,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     // ── 1.14.2: start HermesProxy + Arctium ─────────────────
                     std::wstring hermesExe  = g_hermesExePath;
                     std::wstring arctiumExe = g_arctiumExePath;
-                    std::thread([hermesExe, arctiumExe]() {
+                    std::wstring clientPath = g_clientPath;
+                    std::thread([hermesExe, arctiumExe, clientPath]() {
 
                         if (IsProcessRunning(L"WowClassic.exe")) {
                             KillProcess(L"WowClassic.exe");
@@ -3303,6 +3360,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         if (IsProcessRunning(L"HermesProxy.exe")) {
                             KillProcess(L"HermesProxy.exe");
                             Sleep(500);
+                        }
+                        if (IsProcessRunning(L"Battle.net.exe")) {
+                            MessageBoxW(g_hwnd,
+                                L"Battle.net is currently running.\r\n\r\n"
+                                L"It may interfere with the game launch.\r\n"
+                                L"Please close Battle.net and try again.",
+                                L"Close Battle.net", MB_OK | MB_ICONWARNING);
+                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                            return;
                         }
                         if (IsPortInUse(8084)) {
                             MessageBoxW(g_hwnd,
@@ -3313,6 +3379,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                             return;
                         }
+                        PatchConfigWtfPortal(clientPath);
                         LaunchHermesWithPipe(hermesExe);
                         Sleep(1500);
                         // Keep Arctium's handle so we know exactly which process we started
