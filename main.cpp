@@ -1793,6 +1793,8 @@ static void InitWebView2(HWND hwnd)
                         RECT rc; GetClientRect(hwnd, &rc);
                         ctrl->put_Bounds(rc);
                         ctrl->put_IsVisible(TRUE);
+                        // Prevent inherited Edge profile zoom from cropping the fixed-size UI
+                        ctrl->put_ZoomFactor(1.0);
 
                         // Settings
                         Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
@@ -1800,6 +1802,7 @@ static void InitWebView2(HWND hwnd)
                             settings->put_AreDevToolsEnabled(strstr(LAUNCHER_VERSION_STR, "-dev") ? TRUE : FALSE);
                             settings->put_AreDefaultContextMenusEnabled(FALSE);
                             settings->put_IsStatusBarEnabled(FALSE);
+                            settings->put_IsZoomControlEnabled(FALSE);
                         }
 
                         // Map virtual host → ui/ folder (AppData in release, ../ui in dev)
