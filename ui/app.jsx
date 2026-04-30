@@ -467,9 +467,9 @@ const App = ({ isNative }) => {
   var showConsole = appState.showConsole;
   var versionRows = [
     { name: 'Launcher',    ver: versions.launcher || 'v0.0.0-dev' },
-    { name: 'HermesProxy', ver: versions.hermes   || '—'     },
     { name: 'Addon',       ver: versions.addon    || '—'     },
     { name: 'Client',      ver: versions.client   || '—'     },
+    { name: 'HermesProxy', ver: versions.hermes   || '—'     },
   ];
 
   var latestNews = news[0];

@@ -212,6 +212,7 @@ static std::atomic<bool> g_clientInstalled{false};
 static std::atomic<bool> g_isLaunching{false};
 static std::atomic<bool> g_ffmpegBusy{false};
 
+static bool       g_testMode              = false; // --test flag: pulls latest pre-release
 static bool       g_freshInstall          = false;
 static ClientType g_clientType            = CT_UNKNOWN;
 static ClientType g_pendingInstallType    = CT_UNKNOWN;
@@ -1925,7 +1926,8 @@ static void RunAddonUpdateCheck()
 
 // Checks for a newer launcher release, prompts, downloads and hot-swaps the EXE.
 // Safe to call from any thread. Skips if a worker operation is in progress.
-static void RunLauncherUpdateCheck()
+// forced=true: server-enforced minimum version — MB_OK only, no way to skip.
+static void RunLauncherUpdateCheck(bool forced = false)
 {
     if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return; }
     if (g_workerBusy.load()) return;
@@ -1935,8 +1937,10 @@ static void RunLauncherUpdateCheck()
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     DeleteFileW((std::wstring(exePath) + L".old").c_str());
 
+    // /releases/latest skips pre-releases; /releases returns all (newest first)
     std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
-        + LAUNCHER_GH_OWNER + L"/" + LAUNCHER_GH_REPO + L"/releases/latest";
+        + LAUNCHER_GH_OWNER + L"/" + LAUNCHER_GH_REPO
+        + (g_testMode ? L"/releases" : L"/releases/latest");
     std::string json = HttpGet(apiUrl);
     if (json.empty()) return;
 
@@ -1945,10 +1949,16 @@ static void RunLauncherUpdateCheck()
     std::wstring localVer = GetLauncherVersion();
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
-    std::wstring payload = remoteVer + L"\n" + localVer;
-    LRESULT r = SendMessageW(g_hwnd, WM_ASK_UPDATE, UC_LAUNCHER,
-        (LPARAM)(new std::wstring(payload)));
-    if (r != IDYES) return;
+    if (forced) {
+        std::wstring text = L"Your launcher (v" + localVer + L") is too old to connect.\n\n"
+            L"Version " + remoteVer + L" is required. Click OK to download and install it now.";
+        MessageBoxW(g_hwnd, text.c_str(), L"Launcher Update Required", MB_OK | MB_ICONWARNING);
+    } else {
+        std::wstring payload = remoteVer + L"\n" + localVer;
+        LRESULT r = SendMessageW(g_hwnd, WM_ASK_UPDATE, UC_LAUNCHER,
+            (LPARAM)(new std::wstring(payload)));
+        if (r != IDYES) return;
+    }
 
     // Download the full zip (EXE + ui/ + DLLs) so the UI is updated too
     std::string zipUrl = FindFullZipAssetUrl(json);
@@ -3190,7 +3200,7 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
         g_wvPageReady = true;
         PostStateToWebView();
         std::thread(FetchLiveData).detach();
-        if (IsDevBuild()) g_webview->OpenDevToolsWindow();
+        if (IsDevBuild() || g_testMode) g_webview->OpenDevToolsWindow();
     }
     else if (action == "installModeChoice") {
         std::string choice = JsonString(j, "choice");
@@ -4044,6 +4054,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         auto* msg = reinterpret_cast<std::wstring*>(lp);
         if (msg) {
+            // Check server-enforced minimum launcher version (serverStats only, once per session)
+            static bool s_minVerChecked = false;
+            if (!s_minVerChecked && !IsDevBuild() && msg->find(L"\"serverStats\"") != std::wstring::npos) {
+                s_minVerChecked = true;
+                std::string narrow(msg->begin(), msg->end());
+                std::string minVer = JsonString(narrow, "launcher_min_version");
+                if (!minVer.empty()) {
+                    std::wstring minVerW(minVer.begin(), minVer.end());
+                    if (IsNewer(GetLauncherVersion(), minVerW))
+                        std::thread([]() { RunLauncherUpdateCheck(true); }).detach();
+                }
+            }
             if (g_webview && g_wvReady) g_webview->PostWebMessageAsJson(msg->c_str());
             delete msg;
         }
@@ -4199,9 +4221,12 @@ static void EnsureDesktopShortcut(bool onlyIfAlreadyExists)
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────
-int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
 {
     g_hInst = hInst;
+
+    if (lpCmdLine && wcsstr(lpCmdLine, L"--test"))
+        g_testMode = true;
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_dpi = GetDpiForSystem();
@@ -4241,9 +4266,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
             nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
     }
-    AppendLog(L"=== Launcher started (version %hs) ===", LAUNCHER_VERSION_STR);
+    AppendLog(L"=== Launcher started (version %hs)%s ===", LAUNCHER_VERSION_STR, g_testMode ? " [--test: pre-release updates]" : "");
     RB_SetLogPath(g_logPath);
-    if (IsDevBuild())
+    if (IsDevBuild() || g_testMode)
         ShellExecuteW(nullptr, L"open", g_logPath.c_str(), nullptr, nullptr, SW_SHOW);
 
     LoadConfig();
