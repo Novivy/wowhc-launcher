@@ -562,7 +562,7 @@ const GeneralSettingsModal = ({ settings, onAction }) => {
       >Video Recording Settings</a>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <ModalBtn label="Check for Updates" onClick={() => { onAction('generalSettingsClose', payload()); onAction('checkForUpdates'); }} />
-        <ModalBtn label="Save & Close" onClick={() => onAction('generalSettingsClose', payload())} />
+        <ModalBtn label="Close" onClick={() => onAction('generalSettingsClose', payload())} />
       </div>
     </ModalOverlay>
   );
@@ -578,6 +578,7 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
   const [folder,  setFolder]  = React.useState(ini.saveFolder ?? '');
   const [prompt,  setPrompt]  = React.useState(ini.promptSaveOnStop !== undefined ? ini.promptSaveOnStop : true);
   const [auto,    setAuto]    = React.useState(ini.autoStartOnPlay !== undefined ? ini.autoStartOnPlay : false);
+  const [stopOnWow, setStopOnWow] = React.useState(ini.stopOnWowExit !== undefined ? ini.stopOnWowExit : true);
   const [ssHk,    setSsHk]    = React.useState({ vk: ini.startStopVK || 0, mods: ini.startStopMods || 0 });
   const [svHk,    setSvHk]    = React.useState({ vk: ini.saveVK || 0, mods: ini.saveMods || 0 });
   const [hkError, setHkError] = React.useState(null);
@@ -604,6 +605,7 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
       saveFolder: folder,
       promptSaveOnStop: prompt,
       autoStartOnPlay: auto,
+      stopOnWowExit: stopOnWow,
       startStopVK: ssHk.vk, startStopMods: ssHk.mods,
       saveVK: svHk.vk, saveMods: svHk.mods,
     };
@@ -663,8 +665,9 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
       <div style={sep} />
 
       <div style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <Checkbox checked={prompt} onChange={e => setPrompt(e.target.checked)} label="Prompt to save replay when stopping recording" />
-        <Checkbox checked={auto}   onChange={e => setAuto(e.target.checked)}   label="Auto-start recording when hitting Play" />
+        <Checkbox checked={prompt}    onChange={e => setPrompt(e.target.checked)}    label="Prompt to save replay when stopping recording" />
+        <Checkbox checked={auto}      onChange={e => setAuto(e.target.checked)}      label="Auto-start recording when hitting Play" />
+        <Checkbox checked={stopOnWow} onChange={e => setStopOnWow(e.target.checked)} label="Auto-stop recording when WoW closes" />
       </div>
 
       <div style={sep} />
@@ -700,7 +703,7 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
       <div style={sep} />
 
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-        <ModalBtn label="Save & Close" onClick={() => { setHkError(null); onAction('recordSettingsClose', payload()); }} />
+        <ModalBtn label="Close" onClick={() => { setHkError(null); onAction('recordSettingsClose', payload()); }} />
       </div>
     </ModalOverlay>
   );

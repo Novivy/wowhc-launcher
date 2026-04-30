@@ -117,6 +117,7 @@ enum : UINT {
 #define WM_HERMES_CLOSED      (WM_APP + 11) // HermesProxy terminated — collapse console
 #define WM_LIVE_DATA_JSON     (WM_APP + 12) // lParam = new std::wstring* (JSON to post to WebView)
 #define WM_SET_REALM          (WM_APP + 13) // wParam = realm index — deferred from WebView2 callback
+#define WM_WOW_CLOSED         (WM_APP + 14) // WoW process exited — stop recording if stopOnWowExit
 #define WM_REC_SETTINGS_OPEN   (WM_APP + 31) // open record-settings React modal
 #define WM_REC_SETTINGS_BROWSE (WM_APP + 32) // open save-folder picker, result posted back to WebView
 #define WM_REC_SETTINGS_TOGGLE (WM_APP + 33) // lParam = new std::string* (JSON), toggle recording
@@ -228,6 +229,8 @@ static bool       g_showRecordingNotifications = true;
 // HermesProxy pipe
 static HANDLE g_hermesProcess  = nullptr;
 static HANDLE g_hermesPipeRead = nullptr;
+// PID of the specific WoW process we launched (0 if not running)
+static std::atomic<DWORD> g_wowPid{0};
 static HMODULE g_hRichEdit     = nullptr; // still loaded for existing RichEdit code paths
 
 static constexpr int WND_CLIENT_W = 875;
@@ -1513,6 +1516,7 @@ static void PostRecordSettingsStateToWebView()
         L"\"saveFolder\":\""      + JsonEscW(s.saveFolder)     + L"\","
         L"\"promptSaveOnStop\":"  + (s.promptSaveOnStop ? L"true" : L"false") + L","
         L"\"autoStartOnPlay\":"   + (s.autoStartOnPlay  ? L"true" : L"false") + L","
+        L"\"stopOnWowExit\":"     + (s.stopOnWowExit    ? L"true" : L"false") + L","
         L"\"startStopVK\":"   + std::to_wstring(s.startStopVK)   + L","
         L"\"startStopMods\":" + std::to_wstring(s.startStopMods) + L","
         L"\"saveVK\":"   + std::to_wstring(s.saveVK)   + L","
@@ -3951,8 +3955,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         if (!wowExe.empty()) { g_wowTweakedExePath = wowExe; SaveConfig(); }
                     }
                     std::thread([wowExe]() {
+                        HANDLE hWow = nullptr;
                         if (!wowExe.empty()) {
-                            LaunchExe(wowExe, L"");
+                            hWow = LaunchExeGetHandle(wowExe, L"");
                         } else {
                             MessageBoxW(g_hwnd,
                                 L"Wow_tweaked.exe was not found in the client folder.\r\n"
@@ -3960,6 +3965,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 L"Launch Error", MB_OK | MB_ICONERROR);
                         }
                         PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+
+                        if (hWow) {
+                            g_wowPid.store(GetProcessId(hWow));
+                            WaitForSingleObject(hWow, INFINITE);
+                            g_wowPid.store(0);
+                            CloseHandle(hWow);
+                            PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
+                        }
                     }).detach();
                 } else {
                     // ── 1.14.2: start HermesProxy + Arctium ─────────────────
@@ -4006,9 +4019,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
                                 HANDLE hWow = OpenProcess(SYNCHRONIZE, FALSE, wowPid);
                                 if (!hWow) return;
+                                g_wowPid.store(wowPid);
                                 WaitForSingleObject(hWow, INFINITE);
+                                g_wowPid.store(0);
                                 CloseHandle(hWow);
 
+                                PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
                                 // The specific WowClassic.exe we tracked has closed — stop HermesProxy.
                                 HANDLE hH = g_hermesProcess;
                                 if (hH) TerminateProcess(hH, 0);
@@ -4022,7 +4038,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (id == ID_BTN_RECORD) {
             if (RB_IsRunning()) {
                 if (RB_GetSettings().promptSaveOnStop) {
-                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?",
+                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
                         L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                     if (r == IDCANCEL) break;
                     if (r == IDYES) { RB_SaveNow(); Sleep(100); }
@@ -4135,7 +4151,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (RB_GetSettings().promptSaveOnStop) {
                     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
                     SetForegroundWindow(hwnd);
-                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?",
+                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
                         L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                     if (r == IDCANCEL) return 0;
                     if (r == IDYES) { RB_SaveNow(); Sleep(100); }
@@ -4220,6 +4236,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         s.saveFolder      = JsonStringW(body, "saveFolder");
         s.promptSaveOnStop = JsonBool(body, "promptSaveOnStop", s.promptSaveOnStop);
         s.autoStartOnPlay  = JsonBool(body, "autoStartOnPlay",  s.autoStartOnPlay);
+        s.stopOnWowExit    = JsonBool(body, "stopOnWowExit",    s.stopOnWowExit);
         s.startStopVK    = (UINT)JsonInt(body, "startStopVK");
         s.startStopMods  = (UINT)JsonInt(body, "startStopMods");
         s.saveVK         = (UINT)JsonInt(body, "saveVK");
@@ -4245,7 +4262,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         if (RB_IsRunning()) {
             if (RB_GetSettings().promptSaveOnStop) {
-                int r = MessageBoxW(hwnd, L"Save the replay before stopping?",
+                int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
                     L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                 if (r == IDCANCEL) { PostStateToWebView(); return 0; }
                 if (r == IDYES) { RB_SaveNow(); Sleep(100); }
@@ -4272,6 +4289,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         s.saveFolder      = JsonStringW(body, "saveFolder");
         s.promptSaveOnStop = JsonBool(body, "promptSaveOnStop", s.promptSaveOnStop);
         s.autoStartOnPlay  = JsonBool(body, "autoStartOnPlay",  s.autoStartOnPlay);
+        s.stopOnWowExit    = JsonBool(body, "stopOnWowExit",    s.stopOnWowExit);
         s.startStopVK    = (UINT)JsonInt(body, "startStopVK");
         s.startStopMods  = (UINT)JsonInt(body, "startStopMods");
         s.saveVK         = (UINT)JsonInt(body, "saveVK");
@@ -4497,6 +4515,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         PostStateToWebView();
         break;
 
+    case WM_WOW_CLOSED:
+        if (RB_IsRunning() && RB_GetSettings().stopOnWowExit) {
+            AppendLog(L"[Rec] WoW closed — auto-stopping recording");
+            if (RB_GetSettings().promptSaveOnStop) {
+                int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
+                    L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
+                if (r == IDCANCEL) break;
+                if (r == IDYES) { RB_SaveNow(); Sleep(100); }
+            }
+            RB_Stop();
+            PostStateToWebView();
+        }
+        break;
+
     case WM_LIVE_DATA_JSON:
     {
         auto* msg = reinterpret_cast<std::wstring*>(lp);
@@ -4549,8 +4581,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 L"Recorder Running", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
             if (r != IDYES) return 0;
         } else {
-            const wchar_t* gameExe = (g_clientType == CT_112) ? L"Wow_tweaked.exe" : L"WowClassic.exe";
-            if (IsProcessRunning(gameExe)) {
+            DWORD wowPid = g_wowPid.load();
+            bool wowRunning = false;
+            if (wowPid) {
+                HANDLE hCheck = OpenProcess(SYNCHRONIZE, FALSE, wowPid);
+                if (hCheck) {
+                    wowRunning = WaitForSingleObject(hCheck, 0) == WAIT_TIMEOUT;
+                    CloseHandle(hCheck);
+                }
+            }
+            if (wowRunning) {
                 int r = MessageBoxW(hwnd,
                     L"The game is still running.\n\nQuit the launcher anyway?",
                     L"Game Running", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);

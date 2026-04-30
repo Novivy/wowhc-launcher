@@ -19,6 +19,7 @@ struct ReplaySettings {
     UINT saveMods         = 0;
     bool promptSaveOnStop  = true;
     bool autoStartOnPlay   = false;
+    bool stopOnWowExit     = true;
 };
 
 struct MonitorDesc {

@@ -1053,6 +1053,8 @@ void SaveReplaySettings(const ReplaySettings& s, const std::wstring& iniPath)
                                s.promptSaveOnStop ? L"1" : L"0", ini);
     WritePrivateProfileStringW(sec, L"AutoStartOnPlay",
                                s.autoStartOnPlay ? L"1" : L"0", ini);
+    WritePrivateProfileStringW(sec, L"StopOnWowExit",
+                               s.stopOnWowExit ? L"1" : L"0", ini);
 }
 
 ReplaySettings LoadReplaySettings(const std::wstring& iniPath)
@@ -1084,6 +1086,7 @@ ReplaySettings LoadReplaySettings(const std::wstring& iniPath)
     s.saveMods          = RdUint(L"SaveMods");
     s.promptSaveOnStop  = (RdInt(L"PromptSaveOnStop", 1) != 0);
     s.autoStartOnPlay   = (RdInt(L"AutoStartOnPlay",  0) != 0);
+    s.stopOnWowExit     = (RdInt(L"StopOnWowExit",    1) != 0);
 
     if (s.minutes < 1)  s.minutes = 1;
     if (s.minutes > 60) s.minutes = 60;

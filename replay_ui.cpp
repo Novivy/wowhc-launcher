@@ -437,7 +437,7 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         Lbl(L"(Click then press a Key | Esc = clear)", 220, 346, 230, 16);
         Lbl(L"(Click then press a Key | Esc = clear)", 220, 404, 230, 16);
 
-        g_ruiBtnClose = CreateWindowExW(0, L"BUTTON", L"Save && Close",
+        g_ruiBtnClose = CreateWindowExW(0, L"BUTTON", L"Close",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
             D(14), D(462), D(160), D(36), hwnd,
             (HMENU)(UINT_PTR)RID_BTN_CLOSE, nullptr, nullptr);
@@ -530,7 +530,7 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (RB_IsRunning()) {
                 if (RB_GetSettings().promptSaveOnStop) {
                     int r = MessageBoxW(hwnd,
-                        L"Save the replay before stopping?",
+                    L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
                         L"Save Replay",
                         MB_YESNOCANCEL | MB_ICONQUESTION);
                     if (r == IDCANCEL) break;
