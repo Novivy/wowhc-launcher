@@ -4341,7 +4341,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             static bool s_minVerChecked = false;
             if (!s_minVerChecked && !IsDevBuild() && msg->find(L"\"serverStats\"") != std::wstring::npos) {
                 s_minVerChecked = true;
-                std::string narrow(msg->begin(), msg->end());
+                int nlen = WideCharToMultiByte(CP_UTF8, 0, msg->c_str(), (int)msg->size(), nullptr, 0, nullptr, nullptr);
+                std::string narrow(nlen, '\0');
+                WideCharToMultiByte(CP_UTF8, 0, msg->c_str(), (int)msg->size(), narrow.data(), nlen, nullptr, nullptr);
                 std::string minVer = JsonString(narrow, "launcher_min_version");
                 if (!minVer.empty()) {
                     std::wstring minVerW(minVer.begin(), minVer.end());
