@@ -216,6 +216,9 @@ static bool LoadFFmpegDynamic()
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 
+static bool   g_showNotifications = false;
+void RB_SetShowNotifications(bool show) { g_showNotifications = show; }
+
 // ── OSD window ────────────────────────────────────────────────────────────────
 static HWND   g_osdHwnd      = nullptr;
 static HFONT  g_osdFont      = nullptr;
@@ -534,7 +537,8 @@ static void DoSave(std::deque<StoredPacket> pkts, AVRational timeBase,
     avformat_free_context(fmtCtx);
     avcodec_parameters_free(&codecpar);
 
-    RB_ShowOsd(L"Last " + std::to_wstring(g_rbSettings.minutes) + L" minutes of gameplay saved to disk");
+    if (g_showNotifications)
+        RB_ShowOsd(L"Last " + std::to_wstring(g_rbSettings.minutes) + L" minutes of gameplay saved to disk");
 }
 
 // ── Encoder auto-detect ───────────────────────────────────────────────────────
@@ -703,7 +707,7 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     DWORD64 lastFrameTick = 0;
     int64_t framePts      = 0;
 
-    RB_ShowOsd(L"Recording Started", OSD_RED);
+    if (g_showNotifications) RB_ShowOsd(L"Recording Started", OSD_RED);
     PostMessageW(g_rbHwnd, WM_RB_STATUS, 1, 0);
 
     while (g_rbRunning.load()) {
@@ -827,7 +831,7 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     d3dDevice->Release();
 
     PostMessageW(g_rbHwnd, WM_RB_STATUS, 0, 0);
-    RB_ShowOsd(L"Recording Stopped", OSD_ORANGE);
+    if (g_showNotifications) RB_ShowOsd(L"Recording Stopped", OSD_ORANGE);
     g_rbRunning = false;
 }
 

@@ -41,7 +41,6 @@
 #include "WebView2.h"
 
 #include "replay_buffer.h"
-#include "replay_ui.h"
 #include "upload_window.h"
 
 // ── Build-time config ──────────────────────────────────────────────────────────
@@ -118,6 +117,11 @@ enum : UINT {
 #define WM_HERMES_CLOSED      (WM_APP + 11) // HermesProxy terminated — collapse console
 #define WM_LIVE_DATA_JSON     (WM_APP + 12) // lParam = new std::wstring* (JSON to post to WebView)
 #define WM_SET_REALM          (WM_APP + 13) // wParam = realm index — deferred from WebView2 callback
+#define WM_REC_SETTINGS_OPEN   (WM_APP + 31) // open record-settings React modal
+#define WM_REC_SETTINGS_BROWSE (WM_APP + 32) // open save-folder picker, result posted back to WebView
+#define WM_REC_SETTINGS_TOGGLE (WM_APP + 33) // lParam = new std::string* (JSON), toggle recording
+#define WM_REC_SETTINGS_CLOSE  (WM_APP + 34) // lParam = new std::string* (JSON), save & close modal
+#define WM_GEN_SETTINGS_CLOSE  (WM_APP + 35) // lParam = new std::string* (JSON), save & close general settings
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
@@ -213,11 +217,13 @@ static std::atomic<bool> g_isLaunching{false};
 static std::atomic<bool> g_ffmpegBusy{false};
 
 static bool       g_testMode              = false; // --test flag: pulls latest pre-release
+static bool       g_devMode               = false; // --dev flag: forces dev-mode behaviour (DevTools, skip update fetches)
 static bool       g_freshInstall          = false;
 static ClientType g_clientType            = CT_UNKNOWN;
 static ClientType g_pendingInstallType    = CT_UNKNOWN;
 static bool       g_pendingExistingInstall = false;
 static int        g_realmIndex            = 0;
+static bool       g_showRecordingNotifications = false;
 
 // HermesProxy pipe
 static HANDLE g_hermesProcess  = nullptr;
@@ -306,6 +312,7 @@ static void SaveConfig()
     WritePrivateProfileStringW(L"Launcher", L"WowTweakedExePath", g_wowTweakedExePath.c_str(), ini);
     wchar_t riBuf[8]; swprintf_s(riBuf, L"%d", g_realmIndex);
     WritePrivateProfileStringW(L"Launcher", L"RealmIndex", riBuf, ini);
+    WritePrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", g_showRecordingNotifications ? L"1" : L"0", ini);
 }
 
 static void LoadConfig()
@@ -343,6 +350,12 @@ static void LoadConfig()
         GetPrivateProfileStringW(L"Launcher", L"RealmIndex", L"0", ri, 8, ini);
         int idx = _wtoi(ri);
         g_realmIndex = (idx == 1) ? 1 : 0;
+    }
+    {
+        wchar_t rn[8] = {};
+        GetPrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", L"0", rn, 8, ini);
+        g_showRecordingNotifications = (_wtoi(rn) != 0);
+        RB_SetShowNotifications(g_showRecordingNotifications);
     }
 }
 
@@ -460,6 +473,45 @@ static std::string JsonString(const std::string& json, const std::string& key)
     }
     if (end >= json.size()) return {};
     return json.substr(start, end - start);
+}
+
+static bool JsonBool(const std::string& json, const std::string& key, bool def = false)
+{
+    auto pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return def;
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return def;
+    while (++pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) {}
+    if (pos >= json.size()) return def;
+    if (json.compare(pos, 4, "true")  == 0) return true;
+    if (json.compare(pos, 5, "false") == 0) return false;
+    return def;
+}
+
+static std::wstring JsonStringW(const std::string& json, const std::string& key)
+{
+    std::string raw = JsonString(json, key);
+    std::string out;
+    out.reserve(raw.size());
+    for (size_t i = 0; i < raw.size(); i++) {
+        if (raw[i] == '\\' && i + 1 < raw.size()) {
+            ++i;
+            switch (raw[i]) {
+                case '"': case '/': case '\\': out += raw[i]; break;
+                case 'n': out += '\n'; break;
+                case 'r': out += '\r'; break;
+                case 't': out += '\t'; break;
+                default:  out += '\\'; out += raw[i]; break;
+            }
+        } else {
+            out += raw[i];
+        }
+    }
+    if (out.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, out.c_str(), -1, nullptr, 0);
+    std::wstring w(n > 1 ? n - 1 : 0, L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, out.c_str(), -1, w.data(), n);
+    return w;
 }
 
 static std::string FindAssetUrl(const std::string& json)
@@ -1369,8 +1421,9 @@ static void PostStateToWebView()
     std::wstring verLauncher(lv, lv + strlen(lv));
     std::wstring verHermes = GetLocalHermesVersion();
     std::wstring verAddon  = ReadAddonTocVersion();
-    std::wstring verClient = (g_clientType == CT_114) ? L"1.14.2"
-                           : (g_clientType == CT_112) ? L"1.12.1" : L"";
+    if (!verAddon.empty() && verAddon[0] != L'v') verAddon = L"v" + verAddon;
+    std::wstring verClient = (g_clientType == CT_114) ? L"v1.14.2"
+                           : (g_clientType == CT_112) ? L"v1.12.1" : L"";
 
     wchar_t json[4096];
     swprintf_s(json,
@@ -1387,6 +1440,7 @@ static void PostStateToWebView()
         L"\"realmIndex\":%d,"
         L"\"clientType\":%d,"
         L"\"showConsole\":%s,"
+        L"\"showRecordingNotifications\":%s,"
         L"\"versions\":{"
           L"\"launcher\":\"%s\","
           L"\"hermes\":\"%s\","
@@ -1405,6 +1459,7 @@ static void PostStateToWebView()
         g_realmIndex,
         (int)g_clientType,
         g_showConsole ? L"true" : L"false",
+        g_showRecordingNotifications ? L"true" : L"false",
         JsonEscW(verLauncher).c_str(),
         JsonEscW(verHermes).c_str(),
         JsonEscW(verAddon).c_str(),
@@ -1433,6 +1488,48 @@ static void PostShowModal(const wchar_t* type)
     if (!g_webview || !g_wvReady) return;
     std::wstring j = std::wstring(L"{\"type\":\"showModal\",\"modal\":\"") + type + L"\"}";
     g_webview->PostWebMessageAsJson(j.c_str());
+}
+
+static void PostRecordSettingsStateToWebView()
+{
+    if (!g_webview || !g_wvReady) return;
+    const ReplaySettings& s = RB_GetSettings();
+    auto monitors = RB_EnumMonitors();
+
+    std::wstring monsJson = L"[";
+    for (int i = 0; i < (int)monitors.size(); i++) {
+        if (i > 0) monsJson += L",";
+        monsJson += L"{\"index\":" + std::to_wstring(i)
+                  + L",\"name\":\"" + JsonEscW(monitors[i].name) + L"\"}";
+    }
+    monsJson += L"]";
+
+    std::wstring json =
+        L"{\"type\":\"recordSettingsState\","
+        L"\"monitors\":" + monsJson + L","
+        L"\"monitorIndex\":" + std::to_wstring(s.monitorIndex) + L","
+        L"\"minutes\":"      + std::to_wstring(s.minutes)      + L","
+        L"\"fps\":"          + std::to_wstring(s.fps)          + L","
+        L"\"saveFolder\":\""      + JsonEscW(s.saveFolder)     + L"\","
+        L"\"promptSaveOnStop\":"  + (s.promptSaveOnStop ? L"true" : L"false") + L","
+        L"\"autoStartOnPlay\":"   + (s.autoStartOnPlay  ? L"true" : L"false") + L","
+        L"\"startStopVK\":"   + std::to_wstring(s.startStopVK)   + L","
+        L"\"startStopMods\":" + std::to_wstring(s.startStopMods) + L","
+        L"\"saveVK\":"   + std::to_wstring(s.saveVK)   + L","
+        L"\"saveMods\":" + std::to_wstring(s.saveMods) + L"}";
+
+    g_webview->PostWebMessageAsJson(json.c_str());
+}
+
+static void PostGeneralSettingsStateToWebView()
+{
+    if (!g_webview || !g_wvReady) return;
+    wchar_t json[256];
+    swprintf_s(json,
+        L"{\"type\":\"generalSettingsState\","
+        L"\"showRecordingNotifications\":%s}",
+        g_showRecordingNotifications ? L"true" : L"false");
+    g_webview->PostWebMessageAsJson(json);
 }
 
 // Runs a nested Win32 message pump (same pattern as native modal dialogs) until
@@ -1736,8 +1833,7 @@ static std::wstring GetLauncherVersion()
 
 static bool IsDevBuild()
 {
-    //return false;
-    return strstr(LAUNCHER_VERSION_STR, "-dev") != nullptr;
+    return g_devMode || strstr(LAUNCHER_VERSION_STR, "-dev") != nullptr;
 }
 
 // ── EXE asset URL (for self-update) ────────────────────────────────────────────
@@ -3243,13 +3339,32 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
         PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_SAVE_REPLAY, BN_CLICKED), 0);
     }
     else if (action == "openRecordSettings") {
-        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_RECORD_SETTINGS, BN_CLICKED), 0);
+        PostMessageW(hwnd, WM_REC_SETTINGS_OPEN, 0, 0);
+    }
+    else if (action == "recordSettingsBrowse") {
+        PostMessageW(hwnd, WM_REC_SETTINGS_BROWSE, 0, 0);
+    }
+    else if (action == "recordSettingsStartStop") {
+        auto* ps = new std::string(j);
+        PostMessageW(hwnd, WM_REC_SETTINGS_TOGGLE, 0, (LPARAM)ps);
+    }
+    else if (action == "recordSettingsSaveNow") {
+        PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_SAVE_REPLAY, BN_CLICKED), 0);
+    }
+    else if (action == "recordSettingsClose") {
+        auto* ps = new std::string(j);
+        PostMessageW(hwnd, WM_REC_SETTINGS_CLOSE, 0, (LPARAM)ps);
     }
     else if (action == "uploadReplays") {
         PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_UPLOAD, BN_CLICKED), 0);
     }
     else if (action == "openSettings") {
-        MessageBoxW(hwnd, L"General settings coming soon.", L"Settings", MB_OK | MB_ICONINFORMATION);
+        PostShowModal(L"generalSettings");
+        PostGeneralSettingsStateToWebView();
+    }
+    else if (action == "generalSettingsClose") {
+        auto* ps = new std::string(j);
+        PostMessageW(hwnd, WM_GEN_SETTINGS_CLOSE, 0, (LPARAM)ps);
     }
     else if (action == "setRealm") {
         int idx = JsonInt(j, "index");
@@ -3272,6 +3387,17 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
     }
     else if (action == "openGetAddons") {
         ShellExecuteW(nullptr, L"open", L"https://wow-hc.com/addons/classic", nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    else if (action == "openAddonsFolder") {
+        if (!g_clientPath.empty()) {
+            std::wstring addonsPath = g_clientPath + L"\\_classic_era_\\Interface\\AddOns";
+            ShellExecuteW(nullptr, L"open", addonsPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+    }
+    else if (action == "checkForUpdates") {
+        if (!g_workerBusy) {
+            std::thread([]() { PeriodicUpdateCheck(); }).detach();
+        }
     }
     else if (action == "openWebsite") {
         ShellExecuteW(nullptr, L"open", L"https://wow-hc.com", nullptr, nullptr, SW_SHOWNORMAL);
@@ -3749,10 +3875,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
         }
         else if (id == ID_BTN_RECORD_SETTINGS) {
-            ShowReplayWindow(hwnd);
+            PostMessageW(hwnd, WM_REC_SETTINGS_OPEN, 0, 0);
         }
         else if (id == ID_BTN_SAVE_REPLAY) {
             RB_SaveNow();
+            if (g_showRecordingNotifications && g_webview && g_wvReady)
+                g_webview->PostWebMessageAsJson(L"{\"type\":\"notification\",\"text\":\"Replay saved\"}");
         }
         else if (id == ID_BTN_UPLOAD) {
             ShowUploadWindow(hwnd, g_configDir);
@@ -3841,11 +3969,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == HOTKEY_ID_RB_STARTSTOP) {
             if (RB_IsRunning()) {
                 if (RB_GetSettings().promptSaveOnStop) {
-                    HWND dlgOwner = GetReplayWindowHwnd();
-                    if (!dlgOwner) dlgOwner = hwnd;
-                    if (IsIconic(dlgOwner)) ShowWindow(dlgOwner, SW_RESTORE);
-                    SetForegroundWindow(dlgOwner);
-                    int r = MessageBoxW(dlgOwner, L"Save the replay before stopping?",
+                    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+                    SetForegroundWindow(hwnd);
+                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?",
                         L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                     if (r == IDCANCEL) return 0;
                     if (r == IDYES) { RB_SaveNow(); Sleep(100); }
@@ -3874,6 +4000,162 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_APP + 30:
         SaveReplaySettings(RB_GetSettings(), ConfigPath());
         return 0;
+
+    case WM_REC_SETTINGS_OPEN:
+        PostShowModal(L"recordSettings");
+        PostRecordSettingsStateToWebView();
+        return 0;
+
+    case WM_REC_SETTINGS_BROWSE:
+    {
+        IFileOpenDialog* pDlg = nullptr;
+        std::wstring chosen;
+        if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg)))) {
+            DWORD opts = 0;
+            pDlg->GetOptions(&opts);
+            pDlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+            pDlg->SetTitle(L"Choose folder to save replays in");
+            std::wstring cur = RB_GetSettings().saveFolder;
+            if (!cur.empty()) {
+                IShellItem* pInit = nullptr;
+                if (SUCCEEDED(SHCreateItemFromParsingName(cur.c_str(), nullptr, IID_PPV_ARGS(&pInit)))) {
+                    pDlg->SetFolder(pInit);
+                    pInit->Release();
+                }
+            }
+            if (SUCCEEDED(pDlg->Show(hwnd))) {
+                IShellItem* pItem = nullptr;
+                if (SUCCEEDED(pDlg->GetResult(&pItem))) {
+                    wchar_t* path = nullptr;
+                    pItem->GetDisplayName(SIGDN_FILESYSPATH, &path);
+                    if (path) { chosen = path; CoTaskMemFree(path); }
+                    pItem->Release();
+                }
+            }
+            pDlg->Release();
+        }
+        if (!chosen.empty() && g_webview && g_wvReady) {
+            std::wstring j2 = L"{\"type\":\"recordSettingsFolderChosen\",\"folder\":\""
+                            + JsonEscW(chosen) + L"\"}";
+            g_webview->PostWebMessageAsJson(j2.c_str());
+        }
+        return 0;
+    }
+
+    case WM_REC_SETTINGS_TOGGLE:
+    {
+        std::string* ps = reinterpret_cast<std::string*>(lp);
+        std::string body = ps ? *ps : "";
+        delete ps;
+
+        ReplaySettings s = RB_GetSettings();
+        s.monitorIndex    = JsonInt(body, "monitorIndex", s.monitorIndex);
+        s.minutes         = std::max(1, std::min(60, JsonInt(body, "minutes", s.minutes)));
+        s.fps             = std::max(20, std::min(60, JsonInt(body, "fps", s.fps)));
+        s.saveFolder      = JsonStringW(body, "saveFolder");
+        s.promptSaveOnStop = JsonBool(body, "promptSaveOnStop", s.promptSaveOnStop);
+        s.autoStartOnPlay  = JsonBool(body, "autoStartOnPlay",  s.autoStartOnPlay);
+        s.startStopVK    = (UINT)JsonInt(body, "startStopVK");
+        s.startStopMods  = (UINT)JsonInt(body, "startStopMods");
+        s.saveVK         = (UINT)JsonInt(body, "saveVK");
+        s.saveMods       = (UINT)JsonInt(body, "saveMods");
+
+        RB_SetSettings(s);
+        RB_UnregisterHotkeys();
+        int hkFail = RB_RegisterHotkeys();
+        if (hkFail & RB_HK_STARTSTOP_FAILED) {
+            s.startStopVK = 0; s.startStopMods = 0;
+            RB_SetSettings(s);
+            if (g_webview && g_wvReady)
+                g_webview->PostWebMessageAsJson(
+                    L"{\"type\":\"recordSettingsConflict\",\"field\":\"startStop\"}");
+        }
+        if (hkFail & RB_HK_SAVE_FAILED) {
+            s.saveVK = 0; s.saveMods = 0;
+            RB_SetSettings(s);
+            if (g_webview && g_wvReady)
+                g_webview->PostWebMessageAsJson(
+                    L"{\"type\":\"recordSettingsConflict\",\"field\":\"save\"}");
+        }
+
+        if (RB_IsRunning()) {
+            if (RB_GetSettings().promptSaveOnStop) {
+                int r = MessageBoxW(hwnd, L"Save the replay before stopping?",
+                    L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
+                if (r == IDCANCEL) { PostStateToWebView(); return 0; }
+                if (r == IDYES) { RB_SaveNow(); Sleep(100); }
+            }
+            RB_Stop();
+        } else {
+            EnsureRecordingSaveFolder(hwnd);
+            RB_Start();
+        }
+        PostStateToWebView();
+        return 0;
+    }
+
+    case WM_REC_SETTINGS_CLOSE:
+    {
+        std::string* ps = reinterpret_cast<std::string*>(lp);
+        std::string body = ps ? *ps : "";
+        delete ps;
+
+        ReplaySettings s = RB_GetSettings();
+        s.monitorIndex    = JsonInt(body, "monitorIndex", s.monitorIndex);
+        s.minutes         = std::max(1, std::min(60, JsonInt(body, "minutes", s.minutes)));
+        s.fps             = std::max(20, std::min(60, JsonInt(body, "fps", s.fps)));
+        s.saveFolder      = JsonStringW(body, "saveFolder");
+        s.promptSaveOnStop = JsonBool(body, "promptSaveOnStop", s.promptSaveOnStop);
+        s.autoStartOnPlay  = JsonBool(body, "autoStartOnPlay",  s.autoStartOnPlay);
+        s.startStopVK    = (UINT)JsonInt(body, "startStopVK");
+        s.startStopMods  = (UINT)JsonInt(body, "startStopMods");
+        s.saveVK         = (UINT)JsonInt(body, "saveVK");
+        s.saveMods       = (UINT)JsonInt(body, "saveMods");
+
+        RB_SetSettings(s);
+        int hkFail = RB_RegisterHotkeys();
+
+        if (hkFail & RB_HK_STARTSTOP_FAILED) {
+            s.startStopVK = 0; s.startStopMods = 0;
+            RB_SetSettings(s);
+            SaveReplaySettings(RB_GetSettings(), ConfigPath());
+            if (g_webview && g_wvReady)
+                g_webview->PostWebMessageAsJson(
+                    L"{\"type\":\"recordSettingsConflict\",\"field\":\"startStop\"}");
+            return 0;
+        }
+        if (hkFail & RB_HK_SAVE_FAILED) {
+            s.saveVK = 0; s.saveMods = 0;
+            RB_SetSettings(s);
+            SaveReplaySettings(RB_GetSettings(), ConfigPath());
+            if (g_webview && g_wvReady)
+                g_webview->PostWebMessageAsJson(
+                    L"{\"type\":\"recordSettingsConflict\",\"field\":\"save\"}");
+            return 0;
+        }
+
+        SaveReplaySettings(RB_GetSettings(), ConfigPath());
+        if (g_webview && g_wvReady)
+            g_webview->PostWebMessageAsJson(L"{\"type\":\"hideModal\"}");
+        PostStateToWebView();
+        return 0;
+    }
+
+    case WM_GEN_SETTINGS_CLOSE:
+    {
+        std::string* ps = reinterpret_cast<std::string*>(lp);
+        std::string body = ps ? *ps : "";
+        delete ps;
+
+        g_showRecordingNotifications = JsonBool(body, "showRecordingNotifications", g_showRecordingNotifications);
+        RB_SetShowNotifications(g_showRecordingNotifications);
+        SaveConfig();
+        if (g_webview && g_wvReady)
+            g_webview->PostWebMessageAsJson(L"{\"type\":\"hideModal\"}");
+        PostStateToWebView();
+        return 0;
+    }
 
     case WM_WORKER_STATUS:
     {
@@ -4228,6 +4510,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
 
     if (lpCmdLine && wcsstr(lpCmdLine, L"--test"))
         g_testMode = true;
+    if (lpCmdLine && wcsstr(lpCmdLine, L"--dev"))
+        g_devMode = true;
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_dpi = GetDpiForSystem();
@@ -4267,7 +4551,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
             nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hf != INVALID_HANDLE_VALUE) CloseHandle(hf);
     }
-    AppendLog(L"=== Launcher started (version %hs)%s ===", LAUNCHER_VERSION_STR, g_testMode ? " [--test: pre-release updates]" : "");
+    AppendLog(L"=== Launcher started (version %hs)%s%s ===", LAUNCHER_VERSION_STR,
+        g_testMode ? " [--test]" : "", g_devMode ? " [--dev]" : "");
     RB_SetLogPath(g_logPath);
     if (IsDevBuild() || g_testMode)
         ShellExecuteW(nullptr, L"open", g_logPath.c_str(), nullptr, nullptr, SW_SHOW);

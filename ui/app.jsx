@@ -36,6 +36,14 @@ const Icon = ({ k, c, size }) => {
     case 'cog':    return React.createElement('svg', p,
       React.createElement('circle', { cx: 12, cy: 12, r: 3 }),
       React.createElement('path',   { d: 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z' }));
+    case 'cart':   return React.createElement('svg', p,
+      React.createElement('circle', { cx: 9,  cy: 20, r: 1.4 }),
+      React.createElement('circle', { cx: 18, cy: 20, r: 1.4 }),
+      React.createElement('path',   { d: 'M2 3h3l2.4 11.2a1.5 1.5 0 0 0 1.5 1.2h8.7a1.5 1.5 0 0 0 1.5-1.1L21 7H6' }));
+    case 'addon':  return React.createElement('svg', p,
+      React.createElement('rect', { x: 3, y: 3, width: 18, height: 18, rx: 1 }),
+      React.createElement('line', { x1: 12, y1: 8,  x2: 12, y2: 16 }),
+      React.createElement('line', { x1: 8,  y1: 12, x2: 16, y2: 12 }));
     default: return null;
   }
 };
@@ -292,7 +300,7 @@ const ConsoleOverlay = React.forwardRef(function ConsoleOverlay({ lines }, ref) 
 });
 
 // ── Modal system ───────────────────────────────────────────────────────────────
-const ModalOverlay = ({ children }) => (
+const ModalOverlay = ({ children, width }) => (
   React.createElement('div', {
     style: {
       position: 'absolute', inset: 0, zIndex: 100,
@@ -302,7 +310,7 @@ const ModalOverlay = ({ children }) => (
   }, React.createElement('div', {
     style: {
       background: T.bg1, border: '1px solid ' + T.line,
-      padding: '26px 26px 22px', width: 380,
+      padding: '26px 26px 22px', width: width || 380,
       boxShadow: '0 12px 48px rgba(0,0,0,0.7)',
     }
   }, children))
@@ -314,14 +322,15 @@ const ModalTitle = ({ text }) => (
     React.createElement('span', { style: { fontFamily: '"Cinzel", Georgia, serif', fontSize: 13, fontWeight: 600, color: T.text, letterSpacing: '0.06em', textTransform: 'uppercase' } }, text))
 );
 
-const ModalBtn = ({ label, onClick, secondary }) => {
+const ModalBtn = ({ label, onClick, secondary, disabled }) => {
   var [hov, setHov] = React.useState(false);
   return React.createElement('button', {
     onClick: onClick,
+    disabled: !!disabled,
     onMouseEnter: function() { setHov(true); },
     onMouseLeave: function() { setHov(false); },
     style: {
-      height: 32, padding: '0 16px', fontFamily: 'inherit', cursor: 'pointer',
+      height: 32, padding: '0 16px', fontFamily: 'inherit', cursor: disabled ? 'not-allowed' : 'pointer',
       background: secondary ? (hov ? T.bg2 : T.bg1) : (hov ? T.plate : T.bg2),
       border: '1px solid ' + (secondary
         ? (hov ? T.line : 'rgba(180,130,60,0.12)')
@@ -329,6 +338,7 @@ const ModalBtn = ({ label, onClick, secondary }) => {
       color: secondary ? T.textDim : T.text,
       fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600,
       transition: 'background 120ms, border-color 120ms, color 120ms',
+      opacity: disabled ? 0.4 : 1,
     }
   }, label);
 };
@@ -396,6 +406,306 @@ const VersionPickerModal = ({ onChoice, onBack }) => {
       React.createElement(ModalBtn, { label: 'Continue', onClick: function() { onChoice(sel); } })));
 };
 
+// ── Hotkey helpers ─────────────────────────────────────────────────────────────
+function vkName(vk) {
+  if (vk >= 0x41 && vk <= 0x5A) return String.fromCharCode(vk);
+  if (vk >= 0x30 && vk <= 0x39) return String.fromCharCode(vk);
+  if (vk >= 0x70 && vk <= 0x7B) return 'F' + (vk - 0x6F);
+  const m = {
+    0x20: 'Space', 0x08: 'Backspace', 0x09: 'Tab', 0x0D: 'Enter',
+    0x1B: 'Esc', 0x21: 'PgUp', 0x22: 'PgDn', 0x23: 'End', 0x24: 'Home',
+    0x25: 'Left', 0x26: 'Up', 0x27: 'Right', 0x28: 'Down',
+    0x2D: 'Insert', 0x2E: 'Delete',
+    0xBB: '=', 0xBD: '-', 0xBE: '.', 0xBC: ',',
+    0x60: 'Num0', 0x61: 'Num1', 0x62: 'Num2', 0x63: 'Num3',
+    0x64: 'Num4', 0x65: 'Num5', 0x66: 'Num6', 0x67: 'Num7',
+    0x68: 'Num8', 0x69: 'Num9', 0x6A: 'Num*', 0x6B: 'Num+',
+    0x6D: 'Num-', 0x6E: 'Num.', 0x6F: 'Num/',
+  };
+  return m[vk] ?? ('Key' + vk.toString(16).toUpperCase());
+}
+
+function formatHotkey(vk, mods) {
+  if (!vk) return 'None';
+  const parts = [];
+  if (mods & 0x0002) parts.push('Ctrl');
+  if (mods & 0x0004) parts.push('Shift');
+  if (mods & 0x0001) parts.push('Alt');
+  parts.push(vkName(vk));
+  return parts.join('+');
+}
+
+const Checkbox = ({ checked, onChange, label }) => {
+  const [hov, setHov] = React.useState(false);
+  return React.createElement('label', {
+    style: { display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: T.textDim, userSelect: 'none' },
+    onMouseEnter: () => setHov(true), onMouseLeave: () => setHov(false)
+  },
+    React.createElement('input', { type: 'checkbox', checked, onChange, style: { position: 'absolute', opacity: 0, width: 0, height: 0 } }),
+    React.createElement('div', {
+      style: {
+        width: 14, height: 14, flexShrink: 0,
+        border: '1.5px solid ' + (checked ? T.amber : hov ? T.amber2 : T.textFaint),
+        background: checked ? T.amber : 'transparent',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        transition: 'border-color 0.15s, background 0.15s',
+        boxShadow: checked ? '0 0 6px ' + T.amberGlow : 'none',
+      }
+    },
+      checked && React.createElement('svg', { width: 9, height: 9, viewBox: '0 0 10 10', fill: 'none', stroke: T.bg0, strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' },
+        React.createElement('polyline', { points: '1.5,5 4,7.5 8.5,2' }))
+    ),
+    React.createElement('span', null, label)
+  );
+};
+
+const HotkeyField = ({ hk, onChange, otherHk, onDuplicate }) => {
+  const [capturing, setCapturing] = React.useState(false);
+  const [hov, setHov] = React.useState(false);
+  const ref = React.useRef(null);
+
+  function handleFocus() { setCapturing(true); }
+  function handleBlur()  { setCapturing(false); }
+
+  function handleKeyDown(e) {
+    if (!capturing) return;
+    e.preventDefault(); e.stopPropagation();
+    if ([16, 17, 18, 91, 92].includes(e.keyCode)) return; // modifier-only keys
+    if (e.keyCode === 27) { // Esc = clear
+      onChange({ vk: 0, mods: 0 });
+      setCapturing(false); ref.current && ref.current.blur();
+      return;
+    }
+    const mods = (e.ctrlKey ? 0x0002 : 0) | (e.shiftKey ? 0x0004 : 0) | (e.altKey ? 0x0001 : 0);
+    const newHk = { vk: e.keyCode, mods };
+    if (otherHk && otherHk.vk && otherHk.vk === newHk.vk && otherHk.mods === newHk.mods) {
+      onChange({ vk: 0, mods: 0 });
+      if (onDuplicate) onDuplicate();
+    } else {
+      onChange(newHk);
+    }
+    setCapturing(false); ref.current && ref.current.blur();
+  }
+
+  return (
+    <div ref={ref} tabIndex={0}
+      onFocus={handleFocus} onBlur={handleBlur} onKeyDown={handleKeyDown}
+      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      style={{
+        height: 28, padding: '0 10px', display: 'flex', alignItems: 'center',
+        background: capturing ? 'rgba(224,160,74,0.06)' : T.bg2,
+        border: '1px solid ' + (capturing ? T.amber : (hov ? 'rgba(180,130,60,0.40)' : T.line)),
+        color: capturing ? T.amber : (hk.vk ? T.text : T.textFaint),
+        fontSize: 11, fontFamily: 'ui-monospace, monospace',
+        cursor: 'pointer', outline: 'none',
+        transition: 'border-color 120ms, background 120ms',
+        userSelect: 'none',
+      }}>
+      {capturing ? '(press a key...)' : formatHotkey(hk.vk, hk.mods)}
+    </div>
+  );
+};
+
+// ── Toast notification ─────────────────────────────────────────────────────────
+const ToastNotification = ({ text, onDone }) => (
+  React.createElement('div', {
+    onAnimationEnd: onDone,
+    style: {
+      background: T.plate, border: '1px solid ' + T.line,
+      padding: '7px 13px', fontSize: 11, color: T.text,
+      fontFamily: 'Inter, system-ui, sans-serif', letterSpacing: '0.04em',
+      boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+      animation: 'toast-cycle 3s ease-out forwards',
+      display: 'flex', alignItems: 'center', gap: 8, whiteSpace: 'nowrap',
+    }
+  },
+    React.createElement('span', { style: { width: 5, height: 5, borderRadius: '50%', background: T.amber, flexShrink: 0 } }),
+    text
+  )
+);
+
+// ── General Settings Modal ─────────────────────────────────────────────────────
+const GeneralSettingsModal = ({ settings, onAction }) => {
+  const ini = settings || {};
+  const [showRecordingNotifications, setShowRecordingNotifications] = React.useState(
+    ini.showRecordingNotifications !== undefined ? ini.showRecordingNotifications : false
+  );
+
+  const sep = { height: 1, background: T.line, margin: '14px 0', opacity: 0.5 };
+
+  function payload() {
+    return { showRecordingNotifications };
+  }
+
+  return (
+    <ModalOverlay width={400}>
+      <ModalTitle text="General Settings" />
+
+      <div style={{ marginBottom: 4, fontSize: 10, color: T.textFaint, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+        Notifications
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 6 }}>
+        <Checkbox
+          checked={showRecordingNotifications}
+          onChange={e => setShowRecordingNotifications(e.target.checked)}
+          label="Show WOW-HC notifications (top right toasts)"
+        />
+      </div>
+
+      <div style={sep} />
+
+      <a
+        onClick={() => { onAction('generalSettingsClose', payload()); onAction('openRecordSettings'); }}
+        style={{ display: 'block', marginBottom: 10, fontSize: 11, color: T.textFaint2, textDecoration: 'underline', cursor: 'pointer', transition: 'color 0.15s' }}
+        onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
+        onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
+      >Video Recording Settings</a>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <ModalBtn label="Check for Updates" onClick={() => { onAction('generalSettingsClose', payload()); onAction('checkForUpdates'); }} />
+        <ModalBtn label="Save & Close" onClick={() => onAction('generalSettingsClose', payload())} />
+      </div>
+    </ModalOverlay>
+  );
+};
+
+// ── Record Settings Modal ──────────────────────────────────────────────────────
+const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, onAction, onClearConflict, onClearPendingFolder }) => {
+  const ini = settings || {};
+  const [monitors]         = React.useState(ini.monitors || []);
+  const [monIdx,  setMonIdx]  = React.useState(ini.monitorIndex ?? 0);
+  const [mins,    setMins]    = React.useState(String(ini.minutes ?? 2));
+  const [fps,     setFps]     = React.useState(String(ini.fps ?? 30));
+  const [folder,  setFolder]  = React.useState(ini.saveFolder ?? '');
+  const [prompt,  setPrompt]  = React.useState(ini.promptSaveOnStop !== undefined ? ini.promptSaveOnStop : true);
+  const [auto,    setAuto]    = React.useState(ini.autoStartOnPlay !== undefined ? ini.autoStartOnPlay : false);
+  const [ssHk,    setSsHk]    = React.useState({ vk: ini.startStopVK || 0, mods: ini.startStopMods || 0 });
+  const [svHk,    setSvHk]    = React.useState({ vk: ini.saveVK || 0, mods: ini.saveMods || 0 });
+  const [hkError, setHkError] = React.useState(null);
+
+  React.useEffect(() => {
+    if (pendingFolder != null) { setFolder(pendingFolder); onClearPendingFolder(); }
+  }, [pendingFolder]);
+
+  React.useEffect(() => {
+    if (!conflict) return;
+    if (conflict === 'startStop') setSsHk({ vk: 0, mods: 0 });
+    if (conflict === 'save')      setSvHk({ vk: 0, mods: 0 });
+    setHkError(conflict === 'startStop'
+      ? 'Start/Stop hotkey is already in use by another app — it has been cleared.'
+      : 'Save Replay hotkey is already in use by another app — it has been cleared.');
+    onClearConflict();
+  }, [conflict]);
+
+  function payload() {
+    return {
+      monitorIndex: monIdx,
+      minutes: Math.max(1, Math.min(60, parseInt(mins) || 2)),
+      fps: Math.max(20, Math.min(60, parseInt(fps) || 30)),
+      saveFolder: folder,
+      promptSaveOnStop: prompt,
+      autoStartOnPlay: auto,
+      startStopVK: ssHk.vk, startStopMods: ssHk.mods,
+      saveVK: svHk.vk, saveMods: svHk.mods,
+    };
+  }
+
+  const inp = {
+    background: T.bg2, border: '1px solid ' + T.line, color: T.text,
+    height: 28, padding: '0 8px', fontSize: 12, fontFamily: 'inherit',
+    outline: 'none', boxSizing: 'border-box', width: '100%',
+  };
+  const lbl = { fontSize: 10, color: T.textFaint, marginBottom: 4, letterSpacing: '0.08em', textTransform: 'uppercase' };
+  const sep = { height: 1, background: T.line, margin: '12px 0', opacity: 0.5 };
+
+  return (
+    <ModalOverlay width={500}>
+      <ModalTitle text="Video Recorder Settings" />
+      <p style={{ margin: '0 0 14px', fontSize: 11, color: T.textDim, lineHeight: 1.6 }}>
+        Records the last few minutes of gameplay as a video. Useful for death appeals.
+      </p>
+
+      <div style={{ marginBottom: 10 }}>
+        <div style={lbl}>Monitor</div>
+        <select value={monIdx} onChange={e => setMonIdx(parseInt(e.target.value))} style={{
+          ...inp, appearance: 'none', WebkitAppearance: 'none',
+          backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M1 1l4 4 4-4' stroke='%236a5638' fill='none' stroke-width='1.4'/></svg>\")",
+          backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center', paddingRight: 26,
+        }}>
+          {monitors.map((m, i) => <option key={i} value={m.index}>{m.name}</option>)}
+        </select>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 10 }}>
+        <div>
+          <div style={lbl}>Duration (min, 1–60)</div>
+          <input type="number" min={1} max={60} value={mins} onChange={e => setMins(e.target.value)} style={inp} />
+        </div>
+        <div>
+          <div style={lbl}>Frame rate (fps, 20–60)</div>
+          <input type="number" min={20} max={60} value={fps} onChange={e => setFps(e.target.value)} style={inp} />
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 10 }}>
+        <div style={lbl}>Save folder</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{
+            flex: 1, height: 28, padding: '0 8px', display: 'flex', alignItems: 'center',
+            background: T.bg2, border: '1px solid ' + T.line,
+            fontSize: 11, fontFamily: 'ui-monospace, monospace',
+            color: folder ? T.text : T.textFaint,
+            overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+          }}>{folder || 'Not set'}</div>
+          <ModalBtn label="Browse..." onClick={() => onAction('recordSettingsBrowse')} />
+        </div>
+      </div>
+
+      <div style={sep} />
+
+      <div style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <Checkbox checked={prompt} onChange={e => setPrompt(e.target.checked)} label="Prompt to save replay when stopping recording" />
+        <Checkbox checked={auto}   onChange={e => setAuto(e.target.checked)}   label="Auto-start recording when hitting Play" />
+      </div>
+
+      <div style={sep} />
+
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 12px' }}>
+          <div>
+            <div style={lbl}>Start/Stop hotkey</div>
+            <HotkeyField hk={ssHk}
+              onChange={hk => { setSsHk(hk); setHkError(null); }}
+              otherHk={svHk}
+              onDuplicate={() => setHkError('Both hotkeys cannot be the same — the duplicate has been cleared.')} />
+          </div>
+          <div>
+            <div style={lbl}>Save replay hotkey</div>
+            <HotkeyField hk={svHk}
+              onChange={hk => { setSvHk(hk); setHkError(null); }}
+              otherHk={ssHk}
+              onDuplicate={() => setHkError('Both hotkeys cannot be the same — the duplicate has been cleared.')} />
+          </div>
+        </div>
+        <div style={{ fontSize: 10, color: T.textFaint, marginTop: 5, letterSpacing: '0.04em' }}>
+          Click a field then press a key. Esc to clear.
+        </div>
+        {hkError && (
+          <div style={{ marginTop: 7, fontSize: 11, color: T.ember, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+            <span style={{ flexShrink: 0, fontWeight: 700 }}>!</span>
+            <span>{hkError}</span>
+          </div>
+        )}
+      </div>
+
+      <div style={sep} />
+
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <ModalBtn label="Save & Close" onClick={() => { setHkError(null); onAction('recordSettingsClose', payload()); }} />
+      </div>
+    </ModalOverlay>
+  );
+};
+
 // ── Main App ───────────────────────────────────────────────────────────────────
 const App = ({ isNative }) => {
   const [fallen,  setFallen]  = React.useState([]);
@@ -408,7 +718,7 @@ const App = ({ isNative }) => {
 
   React.useEffect(function() {
     var s = document.createElement('style');
-    s.textContent = '@keyframes wv-scan{0%{left:-45%}100%{left:110%}}';
+    s.textContent = '@keyframes wv-scan{0%{left:-45%}100%{left:110%}}@keyframes rec-blink{0%,100%{opacity:1}50%{opacity:0.35}}@keyframes toast-cycle{0%{opacity:0;transform:translateX(12px)}8%{opacity:1;transform:translateX(0)}80%{opacity:1;transform:translateX(0)}100%{opacity:0;transform:translateX(4px)}}';
     document.head.appendChild(s);
     return function() { s.remove(); };
   }, []);
@@ -427,6 +737,16 @@ const App = ({ isNative }) => {
   });
   const [hermesLines, setHermesLines] = React.useState([]);
   const [modal, setModal] = React.useState(null);
+  const [rsSettings,      setRsSettings]      = React.useState(null);
+  const [rsPendingFolder, setRsPendingFolder]  = React.useState(null);
+  const [rsConflict,      setRsConflict]       = React.useState(null);
+  const [rsOpenCount,     setRsOpenCount]      = React.useState(0);
+  const [gsSettings,      setGsSettings]      = React.useState(null);
+  const [gsOpenCount,     setGsOpenCount]      = React.useState(0);
+  const [toasts,          setToasts]           = React.useState([]);
+  const toastIdRef       = React.useRef(0);
+  const prevRecordRef    = React.useRef(null); // null = not yet initialised
+  const showNotifRef     = React.useRef(false); // mirrors appState.showRecordingNotifications for bridge closure
   const consoleScrollRef = React.useRef(null);
 
   // Bridge: receive messages from C++ host
@@ -439,8 +759,16 @@ const App = ({ isNative }) => {
         console.log('[bridge] msg.type=' + msg.type + ' installPath=' + msg.installPath + ' isInstalled=' + msg.isInstalled);
         if (msg.type === 'state')       { setAppState(function(s) { return Object.assign({}, s, msg); }); setBooting(false); }
         if (msg.type === 'showModal')   setModal(msg.modal);
-        if (msg.type === 'hideModal')   setModal(null);
+        if (msg.type === 'hideModal')   { setModal(null); setRsConflict(null); setRsPendingFolder(null); }
         if (msg.type === 'hermesLine')  setHermesLines(function(prev) { return prev.slice(-500).concat([msg.text]); });
+        if (msg.type === 'recordSettingsState')      { setRsSettings(msg); setRsOpenCount(function(c) { return c + 1; }); }
+        if (msg.type === 'generalSettingsState')     { setGsSettings(msg); setGsOpenCount(function(c) { return c + 1; }); }
+        if (msg.type === 'notification' && msg.text && showNotifRef.current) {
+          var nid = ++toastIdRef.current;
+          setToasts(function(prev) { return prev.concat([{ id: nid, text: msg.text }]); });
+        }
+        if (msg.type === 'recordSettingsFolderChosen') setRsPendingFolder(msg.folder);
+        if (msg.type === 'recordSettingsConflict')   setRsConflict(msg.field);
         if (msg.type === 'serverStats') {
           if (msg.data.last_deaths)            setFallen(msg.data.last_deaths);
           if (msg.data.online_players != null) setOnline(msg.data.online_players);
@@ -453,6 +781,29 @@ const App = ({ isNative }) => {
     send('ready');
     return function() { window.chrome.webview.removeEventListener('message', handler); };
   }, [isNative]);
+
+  function addToast(text) {
+    var id = ++toastIdRef.current;
+    setToasts(function(prev) { return prev.concat([{ id: id, text: text }]); });
+  }
+
+  function removeToast(id) {
+    setToasts(function(prev) { return prev.filter(function(t) { return t.id !== id; }); });
+  }
+
+  // Keep ref in sync so the bridge closure always reads the latest setting value
+  React.useEffect(function() { showNotifRef.current = !!appState.showRecordingNotifications; }, [appState.showRecordingNotifications]);
+
+  // Detect recording start/stop and show a toast notification
+  React.useEffect(function() {
+    if (prevRecordRef.current === null) {
+      prevRecordRef.current = appState.isRecording;
+      return;
+    }
+    if (appState.isRecording && !prevRecordRef.current)  addToast('Recording started');
+    if (!appState.isRecording && prevRecordRef.current)  addToast('Recording stopped');
+    prevRecordRef.current = appState.isRecording;
+  }, [appState.isRecording]);
 
   // Auto-scroll console
   React.useEffect(function() {
@@ -536,7 +887,18 @@ const App = ({ isNative }) => {
           <span style={{ width: 6, height: 6, borderRadius: '50%', background: T.amber, boxShadow: '0 0 8px ' + T.amberGlow }}/>
           WOW-HC Launcher
         </div>
-        <div style={{ display: 'flex' }}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          {appState.isRecording && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 5, padding: '0 10px',
+              fontSize: 9, letterSpacing: '0.14em', color: T.blood, fontWeight: 700,
+              textTransform: 'uppercase', animation: 'rec-blink 1.4s ease-in-out infinite',
+            }}>
+              {React.createElement('svg', { width: 7, height: 7, viewBox: '0 0 24 24' },
+                React.createElement('circle', { cx: 12, cy: 12, r: 7, fill: T.blood }))}
+              REC
+            </div>
+          )}
           <span title="Minimize" onClick={() => onAction('minimize')} style={{ width: 40, height: 33, display: 'grid', placeItems: 'center', color: T.textFaint, fontSize: 15, cursor: 'pointer', transition: 'background 0.15s, color 0.15s' }}
             onMouseEnter={function(e) { e.currentTarget.style.background = 'rgba(180,130,60,0.10)'; e.currentTarget.style.color = T.textDim; }}
             onMouseLeave={function(e) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = T.textFaint; }}
@@ -587,25 +949,44 @@ const App = ({ isNative }) => {
 
           <div style={{ display: 'flex', justifyContent: 'center' }}>
             <div style={{ display: 'flex', flexDirection: 'column', width: 135, gap:8 }}>
-              <a onClick={() => onAction('openUrl', { url: 'https://wow-hc.com/shop' })} style={{
+              <a title="Cosmetics, Teleport, Bags and Services" onClick={() => onAction('openUrl', { url: 'https://wow-hc.com/shop' })} style={{
                 fontSize: 10, color: T.amber, textDecoration: 'none',
                 letterSpacing: '0.14em', textTransform: 'uppercase', fontWeight: 700,
                 textAlign: 'center', padding: '10px 10px', border: '1px solid ' + T.line,
-                background: T.plate, cursor: 'pointer', display: 'block', transition: 'background 0.15s, border-color 0.15s',
+                background: T.plate, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                transition: 'background 0.15s, border-color 0.15s',
               }}
                 onMouseEnter={function(e) { e.currentTarget.style.background = 'rgba(180,130,60,0.10)'; e.currentTarget.style.borderColor = 'rgba(180,130,60,0.45)'; }}
                 onMouseLeave={function(e) { e.currentTarget.style.background = T.plate; e.currentTarget.style.borderColor = T.line; }}
-              >Shop</a>
+              >{React.createElement(Icon, { k: 'cart', size: 12 })}Shop</a>
 
-              <a onClick={() => onAction('openUrl', { url: appState.clientType === 2 ? 'https://wow-hc.com/addons/vanilla' : 'https://wow-hc.com/addons/classic' })} style={{
-                fontSize: 10, color: T.amber, textDecoration: 'none',
-                letterSpacing: '0.14em', textTransform: 'uppercase', fontWeight: 700,
-                textAlign: 'center', padding: '10px 10px', border: '1px solid ' + T.line,
-                marginTop: -1, background: T.plate, cursor: 'pointer', display: 'block', transition: 'background 0.15s, border-color 0.15s',
-              }}
-                onMouseEnter={function(e) { e.currentTarget.style.background = 'rgba(180,130,60,0.10)'; e.currentTarget.style.borderColor = 'rgba(180,130,60,0.45)'; }}
-                onMouseLeave={function(e) { e.currentTarget.style.background = T.plate; e.currentTarget.style.borderColor = T.line; }}
-              >Addons</a>
+              <div style={{ display: 'flex', gap: 4, marginTop: -1 }}>
+                <a title="Get more addons on wow-hc.com" onClick={() => onAction('openUrl', { url: appState.clientType === 2 ? 'https://wow-hc.com/addons/vanilla' : 'https://wow-hc.com/addons/classic' })} style={{
+                  flex: 1, fontSize: 10, color: T.amber, textDecoration: 'none',
+                  letterSpacing: '0.14em', textTransform: 'uppercase', fontWeight: 700,
+                  textAlign: 'center', padding: '10px 8px', border: '1px solid ' + T.line,
+                  background: T.plate, cursor: 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  transition: 'background 0.15s, border-color 0.15s',
+                }}
+                  onMouseEnter={function(e) { e.currentTarget.style.background = 'rgba(180,130,60,0.10)'; e.currentTarget.style.borderColor = 'rgba(180,130,60,0.45)'; }}
+                  onMouseLeave={function(e) { e.currentTarget.style.background = T.plate; e.currentTarget.style.borderColor = T.line; }}
+                >{React.createElement(Icon, { k: 'addon', size: 12 })}Addons</a>
+                <button
+                  onClick={() => onAction('openAddonsFolder')}
+                  title="Open AddOns folder"
+                  style={{
+                    flexShrink: 0, padding: '0 9px',
+                    background: T.plate, border: '1px solid ' + T.line,
+                    color: T.textDim, cursor: 'pointer',
+                    display: 'grid', placeItems: 'center',
+                    transition: 'color 140ms, border-color 140ms, background 140ms',
+                  }}
+                  onMouseEnter={function(e) { e.currentTarget.style.background = 'rgba(180,130,60,0.10)'; e.currentTarget.style.borderColor = 'rgba(180,130,60,0.45)'; e.currentTarget.style.color = T.amber; }}
+                  onMouseLeave={function(e) { e.currentTarget.style.background = T.plate; e.currentTarget.style.borderColor = T.line; e.currentTarget.style.color = T.textDim; }}
+                >{React.createElement(Icon, { k: 'folder', size: 12 })}</button>
+              </div>
             </div>
           </div>
 
@@ -765,6 +1146,13 @@ const App = ({ isNative }) => {
       {/* Bottom bar */}
       {React.createElement(BottomBar, { state: appState, onAction: onAction, booting: booting })}
 
+      {/* Toast notifications */}
+      {toasts.length > 0 && (
+        <div style={{ position: 'absolute', top: 43, right: 12, zIndex: 150, display: 'flex', flexDirection: 'column', gap: 6, pointerEvents: 'none' }}>
+          {toasts.map(function(t) { return React.createElement(ToastNotification, { key: t.id, text: t.text, onDone: function() { removeToast(t.id); } }); })}
+        </div>
+      )}
+
       {/* Modal overlays */}
       {modal === 'ptr' && React.createElement(PTRModal, {
         onDismiss:       function() { setModal(null); onAction('ptrDismiss'); },
@@ -778,6 +1166,23 @@ const App = ({ isNative }) => {
         onChoice: function(ver) { setModal(null); onAction('versionPickerChoice', { version: ver }); },
         onBack:   function()    { setModal(null); onAction('versionPickerBack'); },
       })}
+      {modal === 'recordSettings' && rsSettings &&
+        <RecordSettingsModal
+          key={rsOpenCount}
+          settings={rsSettings}
+          pendingFolder={rsPendingFolder}
+          conflict={rsConflict}
+          isRecording={appState.isRecording}
+          onAction={onAction}
+          onClearConflict={() => setRsConflict(null)}
+          onClearPendingFolder={() => setRsPendingFolder(null)}
+        />}
+      {modal === 'generalSettings' && gsSettings &&
+        React.createElement(GeneralSettingsModal, {
+          key: gsOpenCount,
+          settings: gsSettings,
+          onAction: onAction,
+        })}
     </div>
   );
 };

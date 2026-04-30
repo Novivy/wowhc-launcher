@@ -33,7 +33,6 @@ set(WEBVIEW2_DIR "${CMAKE_SOURCE_DIR}/third_party/webview2")
 add_executable(${PROJECT_NAME} WIN32
     main.cpp
     replay_buffer.cpp
-    replay_ui.cpp
     google_drive.cpp
     upload_window.cpp
     app.rc
