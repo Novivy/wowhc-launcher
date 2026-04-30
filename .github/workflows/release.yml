@@ -21,6 +21,16 @@ jobs:
         with:
           arch: x64
 
+      - name: Download WebView2 SDK (NuGet)
+        run: |
+          nuget install Microsoft.Web.WebView2 -OutputDirectory third_party\nuget -NonInteractive
+          $pkg = Get-ChildItem third_party\nuget\Microsoft.Web.WebView2.* | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path third_party\webview2\include | Out-Null
+          New-Item -ItemType Directory -Force -Path third_party\webview2\lib\x64 | Out-Null
+          Copy-Item "$($pkg.FullName)\build\native\include\*" "third_party\webview2\include\"
+          Copy-Item "$($pkg.FullName)\build\native\x64\WebView2LoaderStatic.lib" "third_party\webview2\lib\x64\"
+        shell: pwsh
+
       - name: Download FFmpeg (GPL shared)
         run: |
           New-Item -ItemType Directory -Force -Path third_party | Out-Null
