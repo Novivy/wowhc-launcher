@@ -398,8 +398,9 @@ struct StoredPacket {
 
 // ── Module globals ────────────────────────────────────────────────────────────
 static HWND          g_rbHwnd    = nullptr;
-static std::atomic<bool> g_rbRunning{false};
-static std::atomic<bool> g_rbSaveRequested{false};
+static std::atomic<bool>    g_rbRunning{false};
+static std::atomic<bool>    g_rbSaveRequested{false};
+static std::atomic<ULONGLONG> g_rbStartTick{0};
 static std::thread   g_rbThread;
 
 static std::deque<StoredPacket> g_packets;
@@ -929,6 +930,7 @@ bool RB_Start()
     }
 
     g_rbRunning  = true;
+    g_rbStartTick = GetTickCount64();
     g_rbThread   = std::thread(CaptureThread, adapterIdx, outputIdx);
     return true;
 }
@@ -940,14 +942,19 @@ void RB_Stop()
     if (g_rbThread.joinable()) g_rbThread.join();
 }
 
-void RB_SaveNow()
+RbSaveResult RB_SaveNow()
 {
     if (!g_rbRunning.load()) {
         RB_ShowOsd(L"Replay buffer is not running.", OSD_RED);
-        return;
+        return RB_SAVE_NOT_RUNNING;
+    }
+    if (GetTickCount64() - g_rbStartTick.load() < 15000) {
+        RB_ShowOsd(L"Recording just started, try again in a few seconds.", OSD_ORANGE);
+        return RB_SAVE_TOO_EARLY;
     }
     RB_ShowOsd(L"Saving replay...");
     g_rbSaveRequested = true;
+    return RB_SAVE_OK;
 }
 
 bool RB_IsRunning()
