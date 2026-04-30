@@ -3615,6 +3615,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     }
 
+    case WM_DPICHANGED:
+    {
+        g_dpi = LOWORD(wp);
+        // Windows provides the correctly-sized rect for the new DPI in lParam
+        const RECT* r = reinterpret_cast<const RECT*>(lp);
+        SetWindowPos(hwnd, nullptr, r->left, r->top,
+                     r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        // Re-pin WebView2 rasterization scale to match the new DPI
+        if (g_wvCtrl) {
+            Microsoft::WRL::ComPtr<ICoreWebView2Controller3> ctrl3;
+            if (SUCCEEDED(g_wvCtrl.As(&ctrl3))) {
+                ctrl3->put_RasterizationScale((double)g_dpi / 96.0);
+            }
+        }
+        return 0;
+    }
+
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
