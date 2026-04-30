@@ -1579,6 +1579,93 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
         MB_OKCANCEL | MB_ICONINFORMATION);
     if (r != IDOK) return false;
 
+    // ── Progress window ──────────────────────────────────────────────────────
+    static const wchar_t kPrgCls[] = L"WV2ProgressWnd";
+    {
+        WNDCLASSW wc    = {};
+        wc.lpfnWndProc  = DefWindowProcW;
+        wc.hInstance    = GetModuleHandleW(nullptr);
+        wc.hbrBackground= (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hCursor      = LoadCursor(nullptr, IDC_WAIT);
+        wc.lpszClassName= kPrgCls;
+        RegisterClassW(&wc); // ignore failure if already registered
+    }
+
+    int dlgW = MulDiv(380, g_dpi, 96);
+    int dlgH = MulDiv(92, g_dpi, 96);
+    HWND hDlg = CreateWindowExW(0, kPrgCls, L"Installing WebView2 Runtime",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        (GetSystemMetrics(SM_CXSCREEN) - dlgW) / 2,
+        (GetSystemMetrics(SM_CYSCREEN) - dlgH) / 2,
+        dlgW, dlgH,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+
+    HWND hLabel = nullptr, hBar = nullptr;
+    if (hDlg) {
+        // Gray out the close button so the user can't cancel mid-install
+        HMENU hSys = GetSystemMenu(hDlg, FALSE);
+        if (hSys) EnableMenuItem(hSys, SC_CLOSE, MF_BYCOMMAND | MF_GRAYED);
+
+        RECT cr; GetClientRect(hDlg, &cr);
+        int pad  = MulDiv(12, g_dpi, 96);
+        int lblH = MulDiv(16, g_dpi, 96);
+        int barH = MulDiv(20, g_dpi, 96);
+        int cW   = cr.right - cr.left;
+
+        hLabel = CreateWindowW(L"STATIC", L"Connecting...",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            pad, pad, cW - 2*pad, lblH,
+            hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+        SendMessage(hLabel, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), FALSE);
+
+        hBar = CreateWindowW(PROGRESS_CLASS, nullptr,
+            WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+            pad, pad + lblH + MulDiv(6, g_dpi, 96), cW - 2*pad, barH,
+            hDlg, nullptr, GetModuleHandleW(nullptr), nullptr);
+        SendMessage(hBar, PBM_SETRANGE32, 0, 100);
+
+        ShowWindow(hDlg, SW_SHOW);
+        UpdateWindow(hDlg);
+    }
+
+    auto Pump = [&]() {
+        MSG m;
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+    };
+    auto SetLabel = [&](const wchar_t* s) {
+        if (hLabel) SetWindowTextW(hLabel, s);
+        Pump();
+    };
+    auto SetPct = [&](int pct) {
+        if (hBar) SendMessage(hBar, PBM_SETPOS, pct, 0);
+        Pump();
+    };
+    bool marqueeOn = false;
+    auto StartMarquee = [&]() {
+        if (!hBar || marqueeOn) return;
+        SetWindowLongPtrW(hBar, GWL_STYLE,
+            GetWindowLongPtrW(hBar, GWL_STYLE) | PBS_MARQUEE);
+        SendMessage(hBar, PBM_SETMARQUEE, TRUE, 40);
+        marqueeOn = true;
+        Pump();
+    };
+    auto StopMarquee = [&]() {
+        if (!hBar || !marqueeOn) return;
+        SendMessage(hBar, PBM_SETMARQUEE, FALSE, 0);
+        SetWindowLongPtrW(hBar, GWL_STYLE,
+            GetWindowLongPtrW(hBar, GWL_STYLE) & ~PBS_MARQUEE);
+        InvalidateRect(hBar, nullptr, TRUE);
+        UpdateWindow(hBar);
+        marqueeOn = false;
+        Pump();
+    };
+
+    // ── Download ─────────────────────────────────────────────────────────────
+    SetLabel(L"Downloading WebView2 installer...");
+
     std::wstring tmp = TempFile(L"MicrosoftEdgeWebview2Setup.exe");
     bool downloaded = false;
     {
@@ -1591,13 +1678,28 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
                 if (WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                         WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
                     && WinHttpReceiveResponse(hReq, nullptr)) {
+
+                    // Try to get Content-Length for percentage-based progress
+                    DWORD totalBytes = 0, sz = sizeof(totalBytes);
+                    WinHttpQueryHeaders(hReq,
+                        WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX,
+                        &totalBytes, &sz, WINHTTP_NO_HEADER_INDEX);
+                    if (totalBytes == 0)
+                        StartMarquee(); // no Content-Length: use marquee
+
                     HANDLE hf = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr,
                         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
                     if (hf != INVALID_HANDLE_VALUE) {
                         std::vector<BYTE> buf(65536);
-                        DWORD rd = 0;
-                        while (WinHttpReadData(hReq, buf.data(), (DWORD)buf.size(), &rd) && rd)
-                        { DWORD wr; WriteFile(hf, buf.data(), rd, &wr, nullptr); }
+                        DWORD rd = 0, totalRead = 0;
+                        while (WinHttpReadData(hReq, buf.data(), (DWORD)buf.size(), &rd) && rd) {
+                            DWORD wr;
+                            WriteFile(hf, buf.data(), rd, &wr, nullptr);
+                            totalRead += rd;
+                            if (totalBytes > 0)
+                                SetPct((int)((DWORD64)totalRead * 100 / totalBytes));
+                        }
                         CloseHandle(hf);
                         downloaded = true;
                     }
@@ -1610,6 +1712,7 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
     }
 
     if (!downloaded) {
+        if (hDlg) DestroyWindow(hDlg);
         MessageBoxW(hwnd,
             L"Download failed. Please install WebView2 manually:\n"
             L"https://developer.microsoft.com/microsoft-edge/webview2/",
@@ -1617,18 +1720,30 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
         return false;
     }
 
+    // ── Install ──────────────────────────────────────────────────────────────
+    StopMarquee();
+    SetPct(100);
+    SetLabel(L"Installing WebView2 Runtime, please wait...");
+    StartMarquee();
+
     SHELLEXECUTEINFOW sei = {};
-    sei.cbSize     = sizeof(sei);
-    sei.fMask      = SEE_MASK_NOCLOSEPROCESS;
-    sei.lpVerb     = L"open";
-    sei.lpFile     = tmp.c_str();
+    sei.cbSize       = sizeof(sei);
+    sei.fMask        = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb       = L"open";
+    sei.lpFile       = tmp.c_str();
     sei.lpParameters = L"/silent /install";
-    sei.nShow      = SW_SHOW;
+    sei.nShow        = SW_SHOW;
     if (ShellExecuteExW(&sei) && sei.hProcess) {
-        WaitForSingleObject(sei.hProcess, 120000);
+        DWORD wait;
+        do {
+            wait = WaitForSingleObject(sei.hProcess, 100);
+            Pump();
+        } while (wait == WAIT_TIMEOUT);
         CloseHandle(sei.hProcess);
     }
     DeleteFileW(tmp.c_str());
+
+    if (hDlg) DestroyWindow(hDlg);
 
     MessageBoxW(hwnd,
         L"WebView2 has been installed.\nPlease restart the launcher.",
@@ -4628,6 +4743,31 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
     if (!CheckWebView2Runtime()) {
         ShowWebView2InstallPrompt(nullptr);
         return 1;
+    }
+
+    // Check that the ui/ folder is present next to (or near) the EXE.
+    // Without it, WebView2 has no virtual host mapping and shows ERR_NAME_NOT_RESOLVED.
+    {
+        std::wstring exeDir = GetExeDir();
+        bool uiFound = false;
+        wchar_t full[MAX_PATH] = {};
+        std::wstring cand = exeDir + L"\\..\\ui";
+        if (GetFullPathNameW(cand.c_str(), MAX_PATH, full, nullptr) &&
+                GetFileAttributesW(full) != INVALID_FILE_ATTRIBUTES)
+            uiFound = true;
+        if (!uiFound) {
+            cand = exeDir + L"\\ui";
+            if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES)
+                uiFound = true;
+        }
+        if (!uiFound) {
+            MessageBoxW(nullptr,
+                L"The 'ui' folder was not found next to the launcher executable.\n\n"
+                L"Please download 'WOW-HC-Launcher-Full.zip' instead of the\n"
+                L"standalone .exe, and extract all files to the same folder.",
+                L"Missing UI Files", MB_OK | MB_ICONERROR);
+            return 1;
+        }
     }
 
     g_hbrBg  = CreateSolidBrush(CLR_BG);
