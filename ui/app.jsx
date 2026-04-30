@@ -1022,10 +1022,8 @@ const App = ({ isNative }) => {
                 display: 'block', textDecoration: 'none',
                 cursor: latestNews.slug ? 'pointer' : 'default',
                 padding: '26px 30px', borderBottom: '1px solid ' + T.line,
-                background: heroHov
-                  ? 'radial-gradient(ellipse at 80% 50%, rgba(224,160,74,0.18) 0%, transparent 60%), ' + T.bg1
-                  : 'radial-gradient(ellipse at 80% 50%, rgba(224,160,74,0.10) 0%, transparent 60%), ' + T.bg1,
-                flexShrink: 0, transition: 'background 0.2s',
+                background: 'radial-gradient(ellipse at 80% 50%, rgba(224,160,74,0.10) 0%, transparent 60%), ' + T.bg1,
+                flexShrink: 0,
               }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 5 }}>
                 <span style={{ width: 22, height: 1, background: T.amber, display: 'inline-block' }}/>
@@ -1051,15 +1049,12 @@ const App = ({ isNative }) => {
 
             {/* Recent Deaths */}
             <div style={{ borderRight: '1px solid ' + T.line, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-              <div style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid ' + T.line2, background: 'rgba(154,52,34,0.08)', flexShrink: 0 }}>
+              <div style={{ padding: '5px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid ' + T.line2, background: 'rgba(154,52,34,0.08)', flexShrink: 0 }}>
                 <span style={{ fontSize: 11, letterSpacing: '0.14em', color: T.blood, fontWeight: 700 }}>RECENT DEATHS</span>
-                {online != null && (
-                  <span style={{ display: 'flex', alignItems: 'center', color: '#bdd1bb', fontSize: 11, fontFamily: 'Inter, system-ui, sans-serif', gap: 4 }} title="Players currently in-game">
-                    {React.createElement('svg', { width: 11, height: 11, viewBox: '0 0 24 24' }, React.createElement('circle', { cx: 12, cy: 12, r: 7, fill: '#2CD90A' }))}
-                    {online.toLocaleString()}
-                    <span style={{ color: T.textFaint, fontSize: 10, letterSpacing: '0.08em' }}>In-game</span>
-                  </span>
-                )}
+                <div style={{ textAlign: 'right', fontFamily: 'Inter, system-ui, sans-serif', lineHeight: 1.3 }} title="Recent deaths, Online players, and latest news are fetched from the server every 10 minutes">
+                  <div style={{ fontSize: 9, color: T.textFaint, letterSpacing: '0.04em' }}>Auto-refresh in</div>
+                  <div style={{ fontSize: 10, color: '#bdd1bb', letterSpacing: '0.04em' }}>{statsCountdown}</div>
+                </div>
               </div>
               <div style={{ flex: 1, overflowY: 'auto' }}>
                 {fallen.map(function(f, i) {
@@ -1092,12 +1087,15 @@ const App = ({ isNative }) => {
 
             {/* Last News + optional HermesProxy console overlay */}
             <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', position: 'relative' }}>
-              <div style={{ padding: '5px 14px', borderBottom: '1px solid ' + T.line2, background: T.bg3, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+              <div style={{ padding: '10px 14px 10px 10px', borderBottom: '1px solid ' + T.line2, background: T.bg3, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                  <div style={{ textAlign: 'left', fontFamily: 'Inter, system-ui, sans-serif', lineHeight: 1.3 }} title="Recent deaths and latest news are fetched from the server every 10 minutes">
-                    <div style={{ fontSize: 9, color: T.textFaint, letterSpacing: '0.04em' }}>Auto-refresh in</div>
-                    <div style={{ fontSize: 10, color: '#bdd1bb', letterSpacing: '0.04em' }}>{statsCountdown}</div>
-                  </div>
+                  {online != null && (
+                    <span style={{ display: 'flex', alignItems: 'center', color: '#bdd1bb', fontSize: 11, fontFamily: 'Inter, system-ui, sans-serif', gap: 4 }} title="Players currently in-game">
+                      {React.createElement('svg', { width: 11, height: 11, viewBox: '0 0 24 24' }, React.createElement('circle', { cx: 12, cy: 12, r: 7, fill: '#2CD90A' }))}
+                      {online.toLocaleString()}
+                      <span style={{ color: T.textFaint, fontSize: 10, letterSpacing: '0.08em' }}>Players in-game</span>
+                    </span>
+                  )}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
                   <span style={{ fontSize: 11, letterSpacing: '0.14em', color: T.lightBlue, fontWeight: 700 }}>LATEST NEWS</span>
