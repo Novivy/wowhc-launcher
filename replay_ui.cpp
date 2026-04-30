@@ -437,23 +437,9 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         Lbl(L"(Click then press a Key | Esc = clear)", 220, 346, 230, 16);
         Lbl(L"(Click then press a Key | Esc = clear)", 220, 404, 230, 16);
 
-        // Start/Stop & Save buttons
-        g_ruiBtnStartStop = CreateWindowExW(0, L"BUTTON",
-            RB_IsRunning() ? L"Stop Recording" : L"Start Recording",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            D(14), D(462), D(160), D(36), hwnd,
-            (HMENU)(UINT_PTR)RID_BTN_STARTSTOP, nullptr, nullptr);
-        SF(g_ruiBtnStartStop, g_ruiFontBold);
-
-        g_ruiBtnSave = CreateWindowExW(0, L"BUTTON", L"Save Replay Now",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW | WS_DISABLED,
-            D(184), D(462), D(160), D(36), hwnd,
-            (HMENU)(UINT_PTR)RID_BTN_SAVENOW, nullptr, nullptr);
-        SF(g_ruiBtnSave, g_ruiFontBold);
-
         g_ruiBtnClose = CreateWindowExW(0, L"BUTTON", L"Save && Close",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            D(384), D(462), D(160), D(36), hwnd,
+            D(14), D(462), D(160), D(36), hwnd,
             (HMENU)(UINT_PTR)RID_BTN_CLOSE, nullptr, nullptr);
         SF(g_ruiBtnClose, g_ruiFontBold);
 

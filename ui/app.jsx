@@ -202,7 +202,9 @@ const StartBtn = ({ label, onClick, disabled }) => {
         color: '#1a0a04', fontFamily: '"Cinzel", Georgia, serif',
         fontSize: 20, fontWeight: 700, letterSpacing: '0.2em', textTransform: 'uppercase',
         cursor: disabled ? 'not-allowed' : 'pointer', textShadow: '0 1px 0 rgba(255,220,160,0.4)',
-        filter: !disabled && hov ? 'brightness(1.12)' : 'none', transition: 'filter 120ms',
+        filter: !disabled && hov ? 'brightness(1.28)' : 'none',
+        boxShadow: !disabled && hov ? '0 0 18px rgba(224,160,74,0.55)' : 'none',
+        transition: 'filter 120ms, box-shadow 120ms',
         opacity: disabled ? 0.35 : 1,
       }}>
       {label}
@@ -608,7 +610,7 @@ const App = ({ isNative }) => {
           </div>
 
           <a onClick={() => onAction('openWebsite')} style={{ fontSize: 11, color: T.textFaint2, fontFamily: 'ui-monospace, monospace', textDecoration:'underline', textAlign: 'center', letterSpacing: '0.1em', cursor: 'pointer', transition: 'color 0.15s' }}
-            onMouseEnter={function(e) { e.currentTarget.style.color = T.textDim; }}
+            onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
             onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
           >
             wow-hc.com
@@ -624,7 +626,7 @@ const App = ({ isNative }) => {
             fontSize: 11, color: T.textFaint2, fontFamily: 'ui-monospace, monospace',
             letterSpacing: '0.1em', textDecoration: 'underline', zIndex: 2, cursor: 'pointer', transition: 'color 0.15s',
           }}
-            onMouseEnter={function(e) { e.currentTarget.style.color = T.textDim; }}
+            onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
             onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
           >Get Help</a>
 
