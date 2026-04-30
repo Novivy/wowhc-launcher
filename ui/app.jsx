@@ -976,14 +976,16 @@ const App = ({ isNative }) => {
                 <button
                   onClick={() => onAction('openAddonsFolder')}
                   title="Open AddOns folder"
+                  disabled={!appState.installPath || appState.workerBusy}
                   style={{
                     flexShrink: 0, padding: '0 9px',
                     background: T.plate, border: '1px solid ' + T.line,
-                    color: T.textDim, cursor: 'pointer',
+                    color: T.textDim, cursor: (!appState.installPath || appState.workerBusy) ? 'not-allowed' : 'pointer',
                     display: 'grid', placeItems: 'center',
                     transition: 'color 140ms, border-color 140ms, background 140ms',
+                    opacity: (!appState.installPath || appState.workerBusy) ? 0.35 : 1,
                   }}
-                  onMouseEnter={function(e) { e.currentTarget.style.background = 'rgba(180,130,60,0.10)'; e.currentTarget.style.borderColor = 'rgba(180,130,60,0.45)'; e.currentTarget.style.color = T.amber; }}
+                  onMouseEnter={function(e) { if (!appState.installPath || appState.workerBusy) return; e.currentTarget.style.background = 'rgba(180,130,60,0.10)'; e.currentTarget.style.borderColor = 'rgba(180,130,60,0.45)'; e.currentTarget.style.color = T.amber; }}
                   onMouseLeave={function(e) { e.currentTarget.style.background = T.plate; e.currentTarget.style.borderColor = T.line; e.currentTarget.style.color = T.textDim; }}
                 >{React.createElement(Icon, { k: 'folder', size: 12 })}</button>
               </div>

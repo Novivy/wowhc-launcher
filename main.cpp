@@ -1535,15 +1535,17 @@ static void PostGeneralSettingsStateToWebView()
 // Runs a nested Win32 message pump (same pattern as native modal dialogs) until
 // JS sends a modal response action that sets g_reactModalDone.
 // Waits for the page to be ready first if called before JS fires "ready".
-static int WaitForModalResponse()
+// modalType: if non-null, PostShowModal is called after confirming the page is ready,
+// eliminating the race where the caller posts before JS has attached its listener.
+static int WaitForModalResponse(const wchar_t* modalType = nullptr)
 {
-    // Ensure the page is loaded before showing a modal
     if (!g_wvPageReady) {
         MSG m;
         while (!g_wvPageReady && GetMessageW(&m, nullptr, 0, 0) > 0) {
             TranslateMessage(&m); DispatchMessageW(&m);
         }
     }
+    if (modalType) PostShowModal(modalType);
     g_reactModalDone   = false;
     g_reactModalResult = 0;
     MSG m;
@@ -1570,7 +1572,7 @@ static bool CheckWebView2Runtime()
 static bool ShowWebView2InstallPrompt(HWND hwnd)
 {
     int r = MessageBoxW(hwnd,
-        L"WoW HC Launcher requires the Microsoft Edge WebView2 runtime,\n"
+        L"WoW HC Launcher requires the Microsoft WebView2 runtime,\n"
         L"which is not installed on this system.\n\n"
         L"Click OK to download and install it automatically (~2 MB),\n"
         L"then restart the launcher.\n\n"
@@ -1723,7 +1725,7 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
     // ── Install ──────────────────────────────────────────────────────────────
     StopMarquee();
     SetPct(100);
-    SetLabel(L"Installing WebView2 Runtime, please wait...");
+    SetLabel(L"Installing WebView2 Runtime, please wait a few minutes...");
     StartMarquee();
 
     SHELLEXECUTEINFOW sei = {};
@@ -1745,9 +1747,15 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
 
     if (hDlg) DestroyWindow(hDlg);
 
-    MessageBoxW(hwnd,
-        L"WebView2 has been installed.\nPlease restart the launcher.",
-        L"Restart Required", MB_OK | MB_ICONINFORMATION);
+    // Relaunch the launcher so it picks up the newly installed WebView2 runtime.
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    HINSTANCE h = ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL);
+    if ((INT_PTR)h <= 32) {
+        MessageBoxW(hwnd,
+            L"WebView2 has been installed.\nPlease restart the launcher.",
+            L"Restart Required", MB_OK | MB_ICONINFORMATION);
+    }
     return false;
 }
 
@@ -3643,12 +3651,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 bool doFolderPick = false;
                 while (true) {
-                    PostShowModal(L"installMode");
-                    int modeChoice = WaitForModalResponse();
+                    int modeChoice = WaitForModalResponse(L"installMode");
                     if (modeChoice == 0) break;          // cancelled
                     if (modeChoice == 1) {               // new install → pick version
-                        PostShowModal(L"versionPicker");
-                        int verChoice = WaitForModalResponse();
+                        int verChoice = WaitForModalResponse(L"versionPicker");
                         if (verChoice == 0) continue;    // back → re-show installMode
                         g_pendingInstallType     = (verChoice == 2) ? CT_112 : CT_114;
                         g_pendingExistingInstall = false;
@@ -3821,8 +3827,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 ClientType newType = g_pendingInstallType;
                                 g_pendingInstallType = CT_UNKNOWN;
                                 if (newType == CT_UNKNOWN) {
-                                    PostShowModal(L"versionPicker");
-                                    int verChoice = WaitForModalResponse();
+                                    int verChoice = WaitForModalResponse(L"versionPicker");
                                     if (verChoice == 0) {
                                         pItem->Release();
                                         pDlg->Release();
@@ -4671,7 +4676,7 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
     }
 
     int dlgW = MulDiv(380, g_dpi, 96);
-    int dlgH = MulDiv(92,  g_dpi, 96);
+    int dlgH = MulDiv(112, g_dpi, 96);
     HWND hDlg = CreateWindowExW(0, kCls, L"WoW HC Launcher",
         WS_POPUP | WS_CAPTION,
         (GetSystemMetrics(SM_CXSCREEN) - dlgW) / 2,
