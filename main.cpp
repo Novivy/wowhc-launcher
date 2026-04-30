@@ -1342,11 +1342,12 @@ static std::wstring JsonEscW(const std::wstring& s)
     std::wstring r; r.reserve(s.size());
     for (wchar_t c : s) {
         switch (c) {
-            case L'"':  r += L"\\\""; break;
-            case L'\\': r += L"\\\\"; break;
-            case L'\n': r += L"\\n";  break;
-            case L'\r':               break;
-            default:    r += c;
+            case L'"':    r += L"\\\"";    break;
+            case L'\\':   r += L"\\\\";    break;
+            case L'\n':   r += L"\\n";     break;
+            case L'\r':                    break;
+            case L'\x1b': r += L"\\u001b"; break;
+            default:      r += c;
         }
     }
     return r;

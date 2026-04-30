@@ -228,6 +228,40 @@ const CogBtn = ({ onClick, disabled }) => {
   );
 };
 
+// ── ANSI colour parser ─────────────────────────────────────────────────────────
+const ANSI_16 = [
+  '#000000','#800000','#008000','#808000','#000080','#800080','#008080','#c0c0c0',
+  '#808080','#ff0000','#00ff00','#ffff00','#0000ff','#ff00ff','#00ffff','#ffffff',
+];
+function ansi256(idx) {
+  if (idx < 16) return ANSI_16[idx];
+  if (idx >= 232) { const v = 8 + (idx - 232) * 10; return `rgb(${v},${v},${v})`; }
+  const n = idx - 16, r = Math.floor(n / 36), g = Math.floor((n % 36) / 6), b = n % 6;
+  return `rgb(${r?55+r*40:0},${g?55+g*40:0},${b?55+b*40:0})`;
+}
+function parseAnsi(text) {
+  const DEFAULT = '#c0c0c0';
+  const segs = [];
+  let color = DEFAULT, last = 0;
+  const re = /\x1b\[([0-9;]*)m/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) segs.push({ text: text.slice(last, m.index), color });
+    const codes = m[1].split(';').map(Number);
+    for (let i = 0; i < codes.length; i++) {
+      const c = codes[i];
+      if (c === 0 || c === 39)            color = DEFAULT;
+      else if (c >= 30 && c <= 37)        color = ANSI_16[c - 30];
+      else if (c >= 90 && c <= 97)        color = ANSI_16[c - 90 + 8];
+      else if (c === 38 && codes[i+1] === 5 && i+2 < codes.length) { color = ansi256(codes[i+2]); i += 2; }
+      else if (c === 38 && codes[i+1] === 2 && i+4 < codes.length) { color = `rgb(${codes[i+2]},${codes[i+3]},${codes[i+4]})`; i += 4; }
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) segs.push({ text: text.slice(last), color });
+  return segs.length ? segs : [{ text, color: DEFAULT }];
+}
+
 // ── HermesProxy console overlay ────────────────────────────────────────────────
 const ConsoleOverlay = React.forwardRef(function ConsoleOverlay({ lines }, ref) {
   return (
@@ -236,14 +270,19 @@ const ConsoleOverlay = React.forwardRef(function ConsoleOverlay({ lines }, ref) 
       height: '55%', background: 'rgba(0,0,0,0.96)',
       borderTop: '1px solid rgba(180,130,60,0.15)',
       display: 'flex', flexDirection: 'column', overflow: 'hidden',
-      fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 12, zIndex: 10,
+      fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 10, zIndex: 10,
     }}>
       <div style={{ padding: '4px 10px', borderBottom: '1px solid rgba(180,130,60,0.1)', color: T.textFaint, fontSize: 11, letterSpacing: '0.1em', flexShrink: 0 }}>
         HERMESPROXY OUTPUT
       </div>
       <div ref={ref} style={{ flex: 1, overflowY: 'auto', padding: '5px 10px' }}>
         {lines.map(function(l, i) {
-          return React.createElement('div', { key: i, style: { color: '#c0c0c0', lineHeight: 1.45, whiteSpace: 'pre-wrap', wordBreak: 'break-all' } }, l);
+          const segs = parseAnsi(l);
+          return React.createElement('div', { key: i, style: { lineHeight: 1.35, whiteSpace: 'pre-wrap', wordBreak: 'break-all' } },
+            segs.map(function(s, j) {
+              return React.createElement('span', { key: j, style: { color: s.color } }, s.text);
+            })
+          );
         })}
       </div>
     </div>
@@ -417,7 +456,7 @@ const App = ({ isNative }) => {
   React.useEffect(function() {
     if (consoleScrollRef.current)
       consoleScrollRef.current.scrollTop = consoleScrollRef.current.scrollHeight;
-  }, [hermesLines]);
+  }, [hermesLines, appState.showConsole]);
 
   // Fetch live server data (wow-hc.com /json/ serves Access-Control-Allow-Origin: *)
   React.useEffect(function() {
