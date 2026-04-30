@@ -1793,8 +1793,19 @@ static void InitWebView2(HWND hwnd)
                         RECT rc; GetClientRect(hwnd, &rc);
                         ctrl->put_Bounds(rc);
                         ctrl->put_IsVisible(TRUE);
-                        // Prevent inherited Edge profile zoom from cropping the fixed-size UI
                         ctrl->put_ZoomFactor(1.0);
+                        // Pin rasterization scale to the DPI we used to size the window.
+                        // WebView2 auto-detects monitor DPI via GetDpiForWindow, which can
+                        // differ from GetDpiForSystem used in window creation, causing a
+                        // mismatch where the CSS viewport is smaller than the window width
+                        // and the fixed 875x530 content gets cropped.
+                        {
+                            Microsoft::WRL::ComPtr<ICoreWebView2Controller3> ctrl3;
+                            if (SUCCEEDED(g_wvCtrl.As(&ctrl3))) {
+                                ctrl3->put_ShouldDetectMonitorScaleChanges(FALSE);
+                                ctrl3->put_RasterizationScale((double)g_dpi / 96.0);
+                            }
+                        }
 
                         // Settings
                         Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
