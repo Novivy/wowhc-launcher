@@ -33,7 +33,8 @@ void                     RB_Shutdown();
 std::vector<MonitorDesc> RB_EnumMonitors();
 bool                     RB_Start();
 void                     RB_Stop();
-void                     RB_SaveNow();
+enum RbSaveResult { RB_SAVE_OK, RB_SAVE_NOT_RUNNING, RB_SAVE_TOO_EARLY };
+RbSaveResult             RB_SaveNow();
 bool                     RB_IsRunning();
 void                     RB_SetSettings(const ReplaySettings& s);   // set only, no restart
 void                     RB_ApplySettings(const ReplaySettings& s); // set + restart if running

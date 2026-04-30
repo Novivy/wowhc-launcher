@@ -4006,9 +4006,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             PostMessageW(hwnd, WM_REC_SETTINGS_OPEN, 0, 0);
         }
         else if (id == ID_BTN_SAVE_REPLAY) {
-            RB_SaveNow();
-            if (g_showRecordingNotifications && g_webview && g_wvReady)
-                g_webview->PostWebMessageAsJson(L"{\"type\":\"notification\",\"text\":\"Replay saved\"}");
+            RbSaveResult sr = RB_SaveNow();
+            if (g_showRecordingNotifications && g_webview && g_wvReady) {
+                if (sr == RB_SAVE_OK)
+                    g_webview->PostWebMessageAsJson(L"{\"type\":\"notification\",\"text\":\"Replay saved\"}");
+                else if (sr == RB_SAVE_TOO_EARLY)
+                    g_webview->PostWebMessageAsJson(L"{\"type\":\"notification\",\"text\":\"Recording just started, try again in a few seconds.\"}");
+            }
         }
         else if (id == ID_BTN_UPLOAD) {
             ShowUploadWindow(hwnd, g_configDir);
