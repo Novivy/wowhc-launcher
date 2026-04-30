@@ -223,7 +223,7 @@ static ClientType g_clientType            = CT_UNKNOWN;
 static ClientType g_pendingInstallType    = CT_UNKNOWN;
 static bool       g_pendingExistingInstall = false;
 static int        g_realmIndex            = 0;
-static bool       g_showRecordingNotifications = false;
+static bool       g_showRecordingNotifications = true;
 
 // HermesProxy pipe
 static HANDLE g_hermesProcess  = nullptr;
@@ -353,7 +353,7 @@ static void LoadConfig()
     }
     {
         wchar_t rn[8] = {};
-        GetPrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", L"0", rn, 8, ini);
+        GetPrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", L"1", rn, 8, ini);
         g_showRecordingNotifications = (_wtoi(rn) != 0);
         RB_SetShowNotifications(g_showRecordingNotifications);
     }
@@ -4886,9 +4886,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
     AppendLog(L"Config loaded: installPath='%s' clientPath='%s' clientType=%d hermesExePath='%s' arctiumExePath='%s' wowTweakedExePath='%s' realmIndex=%d",
         g_installPath.c_str(), g_clientPath.c_str(), (int)g_clientType,
         g_hermesExePath.c_str(), g_arctiumExePath.c_str(), g_wowTweakedExePath.c_str(), g_realmIndex);
-    ReplaySettings g_replaySettingsInit = LoadReplaySettings(ConfigPath());
-    if (g_replaySettingsInit.saveFolder.empty() && !g_clientPath.empty())
-        g_replaySettingsInit.saveFolder = g_clientPath + L"\\_classic_era_\\Videos";
+    RB_SetSettings(LoadReplaySettings(ConfigPath()));
     EnsureDesktopShortcut(true); // refresh shortcut target to current exe path if it exists
 
     // If client path is saved but the game exe is missing, reset so the user is
@@ -4988,7 +4986,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
         nullptr, nullptr, hInst, nullptr);
 
     RB_Init(g_hwnd);
-    RB_ApplySettings(g_replaySettingsInit);
+    RB_ApplySettings(LoadReplaySettings(ConfigPath()));
     RB_RegisterHotkeys();
 
     BOOL darkMode = TRUE;
