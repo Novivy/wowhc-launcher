@@ -15,14 +15,15 @@
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "dwmapi.lib")
 
-// ── Dark palette (mirrors main.cpp) ──────────────────────────────────────────
-static const COLORREF RUI_BG      = RGB(22,  22,  26);
-static const COLORREF RUI_BG2     = RGB(38,  38,  44);
-static const COLORREF RUI_TEXT    = RGB(210, 210, 215);
-static const COLORREF RUI_DIM     = RGB(100, 100, 110);
-static const COLORREF RUI_SEP     = RGB(55,  55,  62);
-static const COLORREF RUI_GREEN   = RGB(60,  180, 90);
-static const COLORREF RUI_RED     = RGB(200, 60,  60);
+// ── Dark palette (mirrors app.jsx T colors) ────────────────────────────────
+static const COLORREF RUI_BG      = RGB(10,   8,   6);
+static const COLORREF RUI_BG2     = RGB(29,  24,  16);
+static const COLORREF RUI_TEXT    = RGB(236, 218, 176);
+static const COLORREF RUI_DIM     = RGB(106,  86,  56);
+static const COLORREF RUI_AMBER   = RGB(224, 160,  74);
+static const COLORREF RUI_SEP     = RGB(46,  34,  18);
+static const COLORREF RUI_GREEN   = RGB(60,  180,  90);
+static const COLORREF RUI_RED     = RGB(200,  74,  26);
 
 // ── Control IDs ───────────────────────────────────────────────────────────────
 enum : UINT {
@@ -210,13 +211,13 @@ static void DrawDarkButton(LPDRAWITEMSTRUCT dis, float t, bool isAccent, bool is
 
     COLORREF bg, border;
     if (isSecondary) {
-        bg     = pressed ? RGB(30, 30, 36) : RuiLerpColor(RGB(26, 26, 31), RGB(36, 36, 42), t);
-        border = pressed ? RGB(55, 55, 62) : RuiLerpColor(RGB(50, 50, 57), RGB(70, 70, 78), t);
+        bg     = pressed ? RGB(10,  8,  6) : RuiLerpColor(RGB(20, 16, 10), RGB(29, 24, 16), t);
+        border = pressed ? RGB(46, 34, 18) : RuiLerpColor(RGB(30, 22, 12), RGB(46, 34, 18), t);
     } else {
-        bg     = pressed ? RGB(55, 55, 62)
-                         : RuiLerpColor(RGB(45, 45, 52), isAccent ? RGB(68, 58, 30) : RGB(58, 58, 66), t);
-        border = pressed ? RGB(80, 80, 88)
-                         : RuiLerpColor(RGB(80, 80, 88), isAccent ? RGB(140, 105, 20) : RGB(100, 100, 110), t);
+        bg     = pressed ? RGB(20, 16, 10)
+                         : RuiLerpColor(RGB(29, 24, 16), isAccent ? RGB(48, 36, 18) : RGB(34, 26, 18), t);
+        border = pressed ? RGB(46, 34, 18)
+                         : RuiLerpColor(RGB(46, 34, 18), isAccent ? RGB(110, 82, 28) : RGB(70, 52, 22), t);
     }
     COLORREF fg = disabled ? RUI_DIM : RUI_TEXT;
 

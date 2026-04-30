@@ -22,13 +22,13 @@
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "msimg32.lib")
 
-// ── Dark palette (mirrors main.cpp) ──────────────────────────────────────────
-static const COLORREF UP_BG      = RGB(22,  22,  26);
-static const COLORREF UP_BG2     = RGB(38,  38,  44);
-static const COLORREF UP_TEXT    = RGB(210, 210, 215);
-static const COLORREF UP_DIM     = RGB(100, 100, 110);
-static const COLORREF UP_ACCENT  = RGB(185, 140, 25);
-static const COLORREF UP_SEP     = RGB(55,  55,  62);
+// ── Dark palette (mirrors app.jsx T colors) ────────────────────────────────
+static const COLORREF UP_BG      = RGB(10,   8,   6);
+static const COLORREF UP_BG2     = RGB(29,  24,  16);
+static const COLORREF UP_TEXT    = RGB(236, 218, 176);
+static const COLORREF UP_DIM     = RGB(106,  86,  56);
+static const COLORREF UP_ACCENT  = RGB(224, 160,  74);
+static const COLORREF UP_SEP     = RGB(46,  34,  18);
 
 // ── Control IDs ───────────────────────────────────────────────────────────────
 enum : UINT {
@@ -258,14 +258,14 @@ static void DrawUpButton(LPDRAWITEMSTRUCT dis, float t, bool isAccent,
 
     COLORREF bg, border;
     if (isAccent) {
-        bg     = pressed ? RGB(40, 33, 13) : UpLerpColor(RGB(58, 47, 18), RGB(80,  65,  25), t);
-        border = pressed ? RGB(100,75, 12) : UpLerpColor(RGB(130,98, 16), RGB(160, 120, 20), t);
+        bg     = pressed ? RGB(10,  8,  6) : UpLerpColor(RGB(29, 24, 16), RGB(48,  36,  18), t);
+        border = pressed ? RGB(46, 34, 18) : UpLerpColor(RGB(70, 52, 22), RGB(110,  82,  28), t);
     } else if (isSecondary) {
-        bg     = pressed ? RGB(30, 30, 36) : UpLerpColor(RGB(26, 26, 31), RGB(36,  36,  42), t);
-        border = pressed ? RGB(55, 55, 62) : UpLerpColor(RGB(50, 50, 57), RGB(70,  70,  78), t);
+        bg     = pressed ? RGB(10,  8,  6) : UpLerpColor(RGB(20, 16, 10), RGB(29,  24,  16), t);
+        border = pressed ? RGB(46, 34, 18) : UpLerpColor(RGB(30, 22, 12), RGB(46,  34,  18), t);
     } else {
-        bg     = pressed ? RGB(55, 55, 62) : UpLerpColor(RGB(45, 45, 52), RGB(58,  58,  66), t);
-        border = pressed ? RGB(80, 80, 88) : UpLerpColor(RGB(80, 80, 88), RGB(100, 100, 110), t);
+        bg     = pressed ? RGB(20, 16, 10) : UpLerpColor(RGB(29, 24, 16), RGB(34,  26,  18), t);
+        border = pressed ? RGB(46, 34, 18) : UpLerpColor(RGB(46, 34, 18), RGB(80,  60,  22), t);
     }
 
     COLORREF fg = disabled ? UP_DIM : UP_TEXT;
@@ -302,7 +302,7 @@ static void DrawVideoItem(LPDRAWITEMSTRUCT dis)
     bool sel = (dis->itemState & ODS_SELECTED) != 0;
 
     // Background
-    COLORREF bgClr = sel ? RGB(38, 42, 52) : UP_BG;
+    COLORREF bgClr = sel ? RGB(40, 30, 16) : UP_BG;
     HBRUSH hbr = CreateSolidBrush(bgClr);
     FillRect(hdc, &rc, hbr); DeleteObject(hbr);
 
@@ -331,7 +331,7 @@ static void DrawVideoItem(LPDRAWITEMSTRUCT dis)
         SelectObject(hdcMem, hOld);
         DeleteDC(hdcMem);
     } else {
-        HBRUSH ph = CreateSolidBrush(RGB(35, 35, 42));
+        HBRUSH ph = CreateSolidBrush(RGB(20, 16, 10));
         FillRect(hdc, &thumbRc, ph); DeleteObject(ph);
     }
 
@@ -727,8 +727,8 @@ static LRESULT CALLBACK UploadWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             hwnd, (HMENU)(UINT_PTR)UID_PROGRESS, nullptr, nullptr);
         SendMessageW(g_upProgress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
         SendMessageW(g_upProgress, PBM_SETPOS, 0, 0);
-        SendMessageW(g_upProgress, PBM_SETBKCOLOR, 0, (LPARAM)UP_BG2);
-        SendMessageW(g_upProgress, PBM_SETBARCOLOR, 0, (LPARAM)RGB(30, 100, 210));
+        SendMessageW(g_upProgress, PBM_SETBKCOLOR,  0, (LPARAM)UP_BG2);
+        SendMessageW(g_upProgress, PBM_SETBARCOLOR, 0, (LPARAM)UP_ACCENT);
 
         // Upload button — 20px below progress bar, double height
         g_upBtnUpload = CreateWindowExW(0, L"BUTTON", L"Upload with Google Drive",
@@ -981,13 +981,13 @@ static LRESULT CALLBACK UploadWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (ctl == g_upLinkFolder || ctl == g_upLinkDrive) {
             float raw = (ctl == g_upLinkFolder) ? g_upFolderHoverT : g_upDriveHoverT;
             float t = raw * raw * (3.0f - 2.0f * raw);
-            SetTextColor(hdc, UpLerpColor(RGB(100,170,240), RGB(140,200,255), t));
+            SetTextColor(hdc, UpLerpColor(RGB(160, 120, 60), RGB(224, 160, 74), t));
             SetBkMode(hdc, TRANSPARENT);
             return (LRESULT)GetStockObject(NULL_BRUSH);
         }
         if (ctl == g_upLinkDisconnect) {
             float t = g_upDisconnectHoverT; t = t * t * (3.0f - 2.0f * t);
-            SetTextColor(hdc, UpLerpColor(RGB(160,65,60), RGB(210,90,80), t));
+            SetTextColor(hdc, UpLerpColor(RGB(154, 52, 34), RGB(200, 74, 26), t));
             SetBkMode(hdc, TRANSPARENT);
             return (LRESULT)GetStockObject(NULL_BRUSH);
         }

@@ -74,12 +74,13 @@ static const int IDR_LOGO_CLEAN = 201;
 static const int IDR_LOGO_ROUND = 202;
 
 // ── Dark-mode palette ──────────────────────────────────────────────────────────
-static const COLORREF CLR_BG     = RGB(22,  22,  26);
-static const COLORREF CLR_BG2    = RGB(38,  38,  44);
-static const COLORREF CLR_TEXT   = RGB(210, 210, 215);
-static const COLORREF CLR_ACCENT = RGB(185, 140, 25);  // kept for potential future use
-static const COLORREF CLR_BAR    = RGB(30,  100, 210);
-static const COLORREF CLR_SEP    = RGB(55,  55,  62);
+static const COLORREF CLR_BG     = RGB(10,   8,   6);
+static const COLORREF CLR_BG2    = RGB(29,  24,  16);
+static const COLORREF CLR_TEXT   = RGB(236, 218, 176);
+static const COLORREF CLR_DIM    = RGB(106,  86,  56);
+static const COLORREF CLR_ACCENT = RGB(224, 160,  74);
+static const COLORREF CLR_BAR    = RGB(224, 160,  74);
+static const COLORREF CLR_SEP    = RGB(46,  34,  18);
 
 // ── Control / message IDs ──────────────────────────────────────────────────────
 enum : UINT {
@@ -159,7 +160,12 @@ static HWND      g_hwnd  = nullptr;
 // WebView2
 static Microsoft::WRL::ComPtr<ICoreWebView2>           g_webview;
 static Microsoft::WRL::ComPtr<ICoreWebView2Controller> g_wvCtrl;
-static bool g_wvReady = false;
+static bool g_wvReady    = false;
+static bool g_wvPageReady = false; // set when JS sends "ready" (page fully loaded)
+
+// React modal handshake (nested message-pump pattern, same as native modal loops)
+static bool g_reactModalDone   = false;
+static int  g_reactModalResult = 0;    // 0=cancel/back, 1=first option, 2=second option
 
 // App state mirrored to WebView
 static std::wstring g_currentStatus;
@@ -203,6 +209,8 @@ static std::wstring g_logPath;
 static std::atomic<bool> g_workerBusy{false};
 static std::atomic<bool> g_playReady{false};
 static std::atomic<bool> g_clientInstalled{false};
+static std::atomic<bool> g_isLaunching{false};
+static std::atomic<bool> g_ffmpegBusy{false};
 
 static bool       g_freshInstall          = false;
 static ClientType g_clientType            = CT_UNKNOWN;
@@ -1347,11 +1355,13 @@ static void PostStateToWebView()
 {
     if (!g_webview || !g_wvReady) return;
 
-    bool isInstalled = g_playReady.load();
-    bool isRecording = RB_IsRunning();
-    bool workerBusy  = g_workerBusy.load();
-    bool playEnabled = !g_clientPath.empty() &&
-                       (g_clientInstalled.load() ? g_playReady.load() : !workerBusy);
+    bool isInstalled  = g_playReady.load();
+    bool isRecording  = RB_IsRunning();
+    bool workerBusy   = g_workerBusy.load() || g_ffmpegBusy.load();
+    bool isLaunching  = g_isLaunching.load();
+    // playEnabled: never true when worker is running or game is launching
+    bool playEnabled  = !g_clientPath.empty() && !workerBusy && !isLaunching &&
+                        (!g_clientInstalled.load() || g_playReady.load());
 
     const char* lv = LAUNCHER_VERSION_STR;
     std::wstring verLauncher(lv, lv + strlen(lv));
@@ -1371,6 +1381,7 @@ static void PostStateToWebView()
         L"\"canSaveReplay\":%s,"
         L"\"playEnabled\":%s,"
         L"\"workerBusy\":%s,"
+        L"\"isLaunching\":%s,"
         L"\"realmIndex\":%d,"
         L"\"clientType\":%d,"
         L"\"showConsole\":%s,"
@@ -1388,6 +1399,7 @@ static void PostStateToWebView()
         isRecording  ? L"true" : L"false",
         playEnabled  ? L"true" : L"false",
         workerBusy   ? L"true" : L"false",
+        isLaunching  ? L"true" : L"false",
         g_realmIndex,
         (int)g_clientType,
         g_showConsole ? L"true" : L"false",
@@ -1411,6 +1423,38 @@ static void PostHermesLineToWebView(const std::wstring& line)
     if (!g_webview || !g_wvReady) return;
     std::wstring json = L"{\"type\":\"hermesLine\",\"text\":\"" + JsonEscW(line) + L"\"}";
     g_webview->PostWebMessageAsJson(json.c_str());
+}
+
+// ── React modal bridge ────────────────────────────────────────────────────────
+static void PostShowModal(const wchar_t* type)
+{
+    if (!g_webview || !g_wvReady) return;
+    std::wstring j = std::wstring(L"{\"type\":\"showModal\",\"modal\":\"") + type + L"\"}";
+    g_webview->PostWebMessageAsJson(j.c_str());
+}
+
+// Runs a nested Win32 message pump (same pattern as native modal dialogs) until
+// JS sends a modal response action that sets g_reactModalDone.
+// Waits for the page to be ready first if called before JS fires "ready".
+static int WaitForModalResponse()
+{
+    // Ensure the page is loaded before showing a modal
+    if (!g_wvPageReady) {
+        MSG m;
+        while (!g_wvPageReady && GetMessageW(&m, nullptr, 0, 0) > 0) {
+            TranslateMessage(&m); DispatchMessageW(&m);
+        }
+    }
+    g_reactModalDone   = false;
+    g_reactModalResult = 0;
+    MSG m;
+    while (!g_reactModalDone) {
+        BOOL r = GetMessageW(&m, nullptr, 0, 0);
+        if (r == 0) { PostQuitMessage(0); break; }
+        if (r < 0) break;
+        TranslateMessage(&m); DispatchMessageW(&m);
+    }
+    return g_reactModalResult;
 }
 
 static void HandleWebMessage(HWND hwnd, const std::string& jsonStr);  // forward decl
@@ -1690,6 +1734,7 @@ static std::wstring GetLauncherVersion()
 
 static bool IsDevBuild()
 {
+    //return false;
     return strstr(LAUNCHER_VERSION_STR, "-dev") != nullptr;
 }
 
@@ -2022,6 +2067,7 @@ static void CheckAndBootstrapFFmpegDlls()
         return;
     }
 
+    g_ffmpegBusy = true;
     PostText(L"Downloading FFmpeg libraries (first-time setup)...");
     PostPct(0);
 
@@ -2061,6 +2107,7 @@ static void CheckAndBootstrapFFmpegDlls()
     if (!ok) {
         AppendLog(L"FFmpeg bootstrap: all attempts failed");
         DeleteFileW(tmpZip.c_str());
+        g_ffmpegBusy = false;
         PostText(L"Failed to download FFmpeg libraries. Click Start Recording to retry.");
         PostPct(0);
         return;
@@ -2119,6 +2166,7 @@ static void CheckAndBootstrapFFmpegDlls()
         PostText(L"FFmpeg install failed. Replay buffer will be unavailable.");
     }
     Sleep(1500);
+    g_ffmpegBusy = false;
     PostPct(0);
 }
 
@@ -2598,18 +2646,18 @@ static void DrawModalButton(DRAWITEMSTRUCT* dis, bool isSecondary, bool hovered)
     float t      = hovered ? 1.0f : 0.0f;
 
     COLORREF bg;
-    if      (pressed && isSecondary) bg = RGB(30, 30, 36);
-    else if (pressed)                bg = RGB(55, 55, 62);
-    else if (isSecondary)            bg = LerpColor(RGB(26, 26, 31), RGB(36, 36, 42), t);
-    else                             bg = LerpColor(RGB(45, 45, 52), RGB(58, 58, 66), t);
+    if      (pressed && isSecondary) bg = RGB(10,  8,  6);
+    else if (pressed)                bg = RGB(20, 16, 10);
+    else if (isSecondary)            bg = LerpColor(RGB(20, 16, 10), RGB(29, 24, 16), t);
+    else                             bg = LerpColor(RGB(29, 24, 16), RGB(40, 30, 16), t);
 
     HBRUSH hbr = CreateSolidBrush(bg);
     FillRect(hdc, &rc, hbr);
     DeleteObject(hbr);
 
     COLORREF borderClr = isSecondary
-        ? (pressed ? RGB(55, 55, 62) : LerpColor(RGB(50, 50, 57), RGB(70, 70, 78), t))
-        : LerpColor(RGB(80, 80, 88), RGB(100, 100, 110), t);
+        ? (pressed ? RGB(46, 34, 18) : LerpColor(RGB(30, 22, 12), RGB(46, 34, 18), t))
+        : (pressed ? RGB(46, 34, 18) : LerpColor(RGB(46, 34, 18), RGB(90, 68, 24), t));
     HPEN hpen    = CreatePen(PS_SOLID, 1, borderClr);
     HPEN hpenOld = (HPEN)SelectObject(hdc, hpen);
     MoveToEx(hdc, rc.left,    rc.top,      nullptr);
@@ -3139,9 +3187,34 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
     std::string action = JsonString(j, "action");
 
     if (action == "ready") {
+        g_wvPageReady = true;
         PostStateToWebView();
         std::thread(FetchLiveData).detach();
         if (IsDevBuild()) g_webview->OpenDevToolsWindow();
+    }
+    else if (action == "installModeChoice") {
+        std::string choice = JsonString(j, "choice");
+        g_reactModalResult = (choice == "existing") ? 2 : 1;
+        g_reactModalDone   = true;
+    }
+    else if (action == "installModeClose") {
+        g_reactModalResult = 0;
+        g_reactModalDone   = true;
+    }
+    else if (action == "versionPickerChoice") {
+        int ver = JsonInt(j, "version");
+        g_reactModalResult = (ver == 112) ? 2 : 1;
+        g_reactModalDone   = true;
+    }
+    else if (action == "versionPickerBack") {
+        g_reactModalResult = 0;
+        g_reactModalDone   = true;
+    }
+    else if (action == "ptrRequestAccess") {
+        ShellExecuteW(nullptr, L"open", L"https://wow-hc.com/ptr", nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    else if (action == "ptrDismiss") {
+        // JS already dismissed — nothing for C++ to do
     }
     else if (action == "startGame") {
         PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_PLAY, BN_CLICKED), 0);
@@ -3228,6 +3301,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
     case WM_CREATE:
     {
+        // Force NC recalculation so WM_NCCALCSIZE suppresses the caption before
+        // the window is first painted (avoids the caption flash on launch).
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
         SetTimer(hwnd, ID_TIMER_UPDATE, 24u * 60u * 60u * 1000u, nullptr);
         SetTimer(hwnd, ID_TIMER_LIVE,   10u * 60u * 1000u, nullptr);
 
@@ -3267,6 +3345,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
+    case WM_NCCALCSIZE:
+        // Make the entire window rect the client area so no caption is visible,
+        // while keeping WS_CAPTION in the style so DWM animates minimize/restore.
+        if (wp) return 0;
+        break;
+
+    case WM_NCACTIVATE:
+        // Prevent Windows from painting a caption bar on activation changes.
+        return TRUE;
+
     case WM_COMMAND:
     {
         WORD id = LOWORD(wp);
@@ -3295,16 +3383,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             {
                 bool doFolderPick = false;
                 while (true) {
-                    ClientType mode = ShowInstallModeDialog(hwnd);
-                    if (mode == CT_UNKNOWN) break;
-                    if (mode == CT_114) {
-                        ClientType chosen = ShowVersionPickerDialog(hwnd);
-                        if (chosen == CT_UNKNOWN) continue; // Back → re-show InstallMode
-                        g_pendingInstallType     = chosen;
+                    PostShowModal(L"installMode");
+                    int modeChoice = WaitForModalResponse();
+                    if (modeChoice == 0) break;          // cancelled
+                    if (modeChoice == 1) {               // new install → pick version
+                        PostShowModal(L"versionPicker");
+                        int verChoice = WaitForModalResponse();
+                        if (verChoice == 0) continue;    // back → re-show installMode
+                        g_pendingInstallType     = (verChoice == 2) ? CT_112 : CT_114;
                         g_pendingExistingInstall = false;
                         doFolderPick = true;
                         break;
-                    } else {
+                    } else {                             // existing install
                         g_pendingExistingInstall = true;
                         g_pendingInstallType     = CT_UNKNOWN;
                         doFolderPick = true;
@@ -3422,10 +3512,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                             if (pathChanged) {
                                                 ResetLastCheckTime();
                                                 SaveConfig();
-                                                if (!g_workerBusy.load()) {
-                                                    g_workerBusy = true;
-                                                    std::thread(Worker).detach();
-                                                }
+                                            }
+                                            if (!g_workerBusy.load() && (pathChanged || !g_playReady.load())) {
+                                                g_workerBusy = true;
+                                                std::thread(Worker).detach();
                                             }
                                             RefreshPlayButton();
                                         }
@@ -3457,10 +3547,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                         if (pathChanged) {
                                             ResetLastCheckTime();
                                             SaveConfig();
-                                            if (!g_workerBusy.load()) {
-                                                g_workerBusy = true;
-                                                std::thread(Worker).detach();
-                                            }
+                                        }
+                                        if (!g_workerBusy.load() && (pathChanged || !g_playReady.load())) {
+                                            g_workerBusy = true;
+                                            std::thread(Worker).detach();
                                         }
                                         RefreshPlayButton();
                                     }
@@ -3471,12 +3561,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 ClientType newType = g_pendingInstallType;
                                 g_pendingInstallType = CT_UNKNOWN;
                                 if (newType == CT_UNKNOWN) {
-                                    newType = ShowVersionPickerDialog(hwnd);
-                                    if (newType == CT_UNKNOWN) {
+                                    PostShowModal(L"versionPicker");
+                                    int verChoice = WaitForModalResponse();
+                                    if (verChoice == 0) {
                                         pItem->Release();
                                         pDlg->Release();
                                         break;
                                     }
+                                    newType = (verChoice == 2) ? CT_112 : CT_114;
                                 }
 
                                 std::wstring effectivePath = selected + L"\\WOW-HC";
@@ -3541,6 +3633,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 std::thread(Worker).detach();
             }
             else if (installed && g_playReady.load()) {
+                g_isLaunching = true;
                 if (RB_GetSettings().autoStartOnPlay && !RB_IsRunning()) {
                     EnsureRecordingSaveFolder(hwnd);
                     RB_Start();
@@ -3808,6 +3901,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_WORKER_DONE:
     {
         bool ok = (wp != 0) && !g_clientPath.empty();
+        g_isLaunching = false;
         g_playReady = ok;
         if (ok) g_clientInstalled = true;
         if (ok && g_clientType == CT_114) SetClientFilesReadOnly(g_clientPath, true);
@@ -3959,7 +4053,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SET_REALM:
     {
         int idx = (int)wp;
-        if (idx == 1) ShowPTRDialog(hwnd);
+        if (idx == 1) PostShowModal(L"ptr");
         UpdateRealmConfig(idx);
         PostStateToWebView();
         return 0;
@@ -4245,9 +4339,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int)
     int xpos = wa.left + ((wa.right  - wa.left > WND_W) ? (wa.right  - wa.left - WND_W) / 2 : 0);
     int ypos = wa.top  + ((wa.bottom - wa.top  > WND_H) ? (wa.bottom - wa.top  - WND_H) / 2 : 0);
 
-    // WS_EX_APPWINDOW: show in taskbar even though WS_POPUP has no owner
+    // WS_CAPTION | WS_MINIMIZEBOX: required for DWM to play the native minimize/restore
+    // animation. WM_NCCALCSIZE returning 0 eliminates the visible NC area so the
+    // window still looks fully borderless.
     g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, L"WOWHCLauncherWnd", APP_NAME,
-        WS_POPUP,
+        WS_POPUP | WS_CAPTION | WS_MINIMIZEBOX,
         xpos, ypos, WND_W, WND_H,
         nullptr, nullptr, hInst, nullptr);
 
