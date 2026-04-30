@@ -1592,7 +1592,7 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
     }
 
     int dlgW = MulDiv(380, g_dpi, 96);
-    int dlgH = MulDiv(92, g_dpi, 96);
+    int dlgH = MulDiv(112, g_dpi, 96);
     HWND hDlg = CreateWindowExW(0, kPrgCls, L"Installing WebView2 Runtime",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         (GetSystemMetrics(SM_CXSCREEN) - dlgW) / 2,
@@ -1758,8 +1758,8 @@ static void InitWebView2(HWND hwnd)
     std::wstring dataDir  = g_configDir + L"\\webview2_data";
     std::wstring exeDir   = GetExeDir();
 
-    // Prefer the source-tree ui/ (sibling of cmake-build-*/) so JSX edits are
-    // visible after a plain restart — no rebuild or copy needed.
+    // Dev: prefer source-tree ../ui so JSX edits are visible after a plain restart.
+    // Release: use AppData ui/ (migrated there from the Full ZIP on first run).
     std::wstring uiFolder;
     {
         wchar_t full[MAX_PATH] = {};
@@ -1767,20 +1767,16 @@ static void InitWebView2(HWND hwnd)
         if (GetFullPathNameW(candidate.c_str(), MAX_PATH, full, nullptr) &&
             GetFileAttributesW(full) != INVALID_FILE_ATTRIBUTES)
             uiFolder = full;
-        else {
-            candidate = exeDir + L"\\ui";
-            if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
-                uiFolder = candidate;
-        }
     }
-    bool devMode = !uiFolder.empty();
+    if (uiFolder.empty())
+        uiFolder = g_configDir + L"\\ui";
 
     auto envCb = Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-        [hwnd, uiFolder, devMode](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+        [hwnd, uiFolder](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
             if (FAILED(hr) || !env) return hr;
             env->CreateCoreWebView2Controller(hwnd,
                 Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-                    [hwnd, uiFolder, devMode](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
+                    [hwnd, uiFolder](HRESULT hr, ICoreWebView2Controller* ctrl) -> HRESULT {
                         if (FAILED(hr) || !ctrl) return hr;
 
                         g_wvCtrl = ctrl;
@@ -1798,22 +1794,15 @@ static void InitWebView2(HWND hwnd)
                             settings->put_IsStatusBarEnabled(FALSE);
                         }
 
-                        // Map virtual host → ui/ folder (dev) or temp extract (release)
-                        std::wstring navUrl;
-                        if (devMode) {
-                            Microsoft::WRL::ComPtr<ICoreWebView2_3> wv3;
-                            g_webview.As(&wv3);
-                            if (wv3) {
-                                wv3->SetVirtualHostNameToFolderMapping(
-                                    L"wow-hc-client-launcher.local", uiFolder.c_str(),
-                                    COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
-                            }
-                            navUrl = L"https://wow-hc-client-launcher.local/index.html";
-                        } else {
-                            // TODO: extract RCDATA resources to temp folder and map there.
-                            // For now require the ui/ folder to be distributed alongside the EXE.
-                            navUrl = L"https://wow-hc-client-launcher.local/index.html";
+                        // Map virtual host → ui/ folder (AppData in release, ../ui in dev)
+                        Microsoft::WRL::ComPtr<ICoreWebView2_3> wv3;
+                        g_webview.As(&wv3);
+                        if (wv3) {
+                            wv3->SetVirtualHostNameToFolderMapping(
+                                L"wow-hc-client-launcher.local", uiFolder.c_str(),
+                                COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_ALLOW);
                         }
+                        std::wstring navUrl = L"https://wow-hc-client-launcher.local/index.html";
                         // Append ?v=VERSION so each release gets a fresh cache entry for
                         // index.html and (via JS in the page) for app.jsx / data.jsx too.
                         {
@@ -2188,9 +2177,8 @@ static void RunLauncherUpdateCheck(bool forced = false)
         return;
     }
 
-    // Extract new EXE to temp + overwrite ui/ folder in place — one PS script
+    // Extract new EXE to temp + overwrite ui/ in AppData — one PS script
     std::wstring tmpExe  = TempFile(L"wowhc_launcher_new.exe");
-    std::wstring exeDir  = GetExeDir();
     auto escPS = [](const std::wstring& s) {
         std::wstring r;
         for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
@@ -2206,9 +2194,9 @@ static void RunLauncherUpdateCheck(bool forced = false)
         L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile("
               L"$e,'" + escPS(tmpExe) + L"',$true)\r\n"
         L"    } elseif($e.FullName -like 'ui/*' -and $e.Name -ne ''){\r\n"
-        // ui/ folder entries — replace in exe directory
+        // ui/ folder entries — extract into AppData so they survive EXE-only updates
         L"      $rel=$e.FullName -replace '/','\\'\r\n"
-        L"      $dst='" + escPS(exeDir) + L"\\'+$rel\r\n"
+        L"      $dst='" + escPS(g_configDir) + L"\\'+$rel\r\n"
         L"      $dir=[System.IO.Path]::GetDirectoryName($dst)\r\n"
         L"      if(-not(Test-Path $dir)){New-Item -ItemType Directory -Force -Path $dir|Out-Null}\r\n"
         L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e,$dst,$true)\r\n"
@@ -2260,6 +2248,26 @@ static std::wstring GetExeDir()
     std::wstring p(buf);
     auto pos = p.rfind(L'\\');
     return (pos != std::wstring::npos) ? p.substr(0, pos) : p;
+}
+
+static bool CopyUiFolder(const std::wstring& src, const std::wstring& dst)
+{
+    CreateDirectoryW(dst.c_str(), nullptr);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((src + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        std::wstring s = src + L"\\" + fd.cFileName;
+        std::wstring d = dst + L"\\" + fd.cFileName;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            ok &= CopyUiFolder(s, d);
+        else
+            ok &= (CopyFileW(s.c_str(), d.c_str(), FALSE) != 0);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return ok;
 }
 
 static bool FFmpegDllsPresent(const std::wstring& dir)
@@ -4620,6 +4628,201 @@ static void EnsureDesktopShortcut(bool onlyIfAlreadyExists)
         WritePrivateProfileStringW(L"Launcher", L"ShortcutCreated", L"1", ConfigPath().c_str());
 }
 
+// ── UI files bootstrap ─────────────────────────────────────────────────────────
+// Downloads the Full ZIP from GitHub and extracts ui/ to AppData if missing.
+// Called before WebView2 init; runs synchronously on the main thread.
+// Returns true if ui/ is available (or dev build using ../ui).
+static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
+{
+    std::wstring appDataUi = g_configDir + L"\\ui";
+
+    // Dev: ../ui (source tree) takes priority — no AppData copy needed.
+    {
+        std::wstring exeDir = GetExeDir();
+        wchar_t full[MAX_PATH] = {};
+        if (GetFullPathNameW((exeDir + L"\\..\\ui").c_str(), MAX_PATH, full, nullptr) &&
+                GetFileAttributesW(full) != INVALID_FILE_ATTRIBUTES)
+            return true;
+    }
+
+    // Already in AppData?
+    if (GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return true;
+
+    // Copy from EXE dir (user extracted the Full ZIP alongside the EXE).
+    std::wstring exeUi = GetExeDir() + L"\\ui";
+    if (GetFileAttributesW(exeUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        CopyUiFolder(exeUi, appDataUi);
+        return GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES;
+    }
+
+    if (IsDevBuild()) return false;
+
+    // Nothing found: download the Full ZIP and extract ui/ into AppData.
+    static const wchar_t kCls[] = L"WOWHCUiBoot";
+    {
+        WNDCLASSW wc     = {};
+        wc.lpfnWndProc   = DefWindowProcW;
+        wc.hInstance     = hInst;
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hCursor       = LoadCursor(nullptr, IDC_WAIT);
+        wc.lpszClassName = kCls;
+        RegisterClassW(&wc);
+    }
+
+    int dlgW = MulDiv(380, g_dpi, 96);
+    int dlgH = MulDiv(92,  g_dpi, 96);
+    HWND hDlg = CreateWindowExW(0, kCls, L"WoW HC Launcher",
+        WS_POPUP | WS_CAPTION,
+        (GetSystemMetrics(SM_CXSCREEN) - dlgW) / 2,
+        (GetSystemMetrics(SM_CYSCREEN) - dlgH) / 2,
+        dlgW, dlgH, nullptr, nullptr, hInst, nullptr);
+
+    HWND hLabel = nullptr, hBar = nullptr;
+    if (hDlg) {
+        RECT cr; GetClientRect(hDlg, &cr);
+        int pad  = MulDiv(12, g_dpi, 96);
+        int lblH = MulDiv(16, g_dpi, 96);
+        int barH = MulDiv(20, g_dpi, 96);
+        int cW   = cr.right - cr.left;
+
+        hLabel = CreateWindowW(L"STATIC", L"Downloading launcher UI (first-time setup)...",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            pad, pad, cW - 2*pad, lblH,
+            hDlg, nullptr, hInst, nullptr);
+        SendMessageW(hLabel, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), FALSE);
+
+        hBar = CreateWindowW(PROGRESS_CLASS, nullptr,
+            WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
+            pad, pad + lblH + MulDiv(6, g_dpi, 96), cW - 2*pad, barH,
+            hDlg, nullptr, hInst, nullptr);
+        SendMessageW(hBar, PBM_SETRANGE32, 0, 100);
+
+        ShowWindow(hDlg, SW_SHOW);
+        UpdateWindow(hDlg);
+    }
+
+    auto Pump = [&]() {
+        MSG m;
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+    };
+    auto SetPct = [&](int pct) {
+        if (hBar) SendMessageW(hBar, PBM_SETPOS, pct, 0);
+        Pump();
+    };
+    auto StartMarquee = [&]() {
+        if (!hBar) return;
+        SetWindowLongPtrW(hBar, GWL_STYLE,
+            GetWindowLongPtrW(hBar, GWL_STYLE) | PBS_MARQUEE);
+        SendMessageW(hBar, PBM_SETMARQUEE, TRUE, 40);
+        Pump();
+    };
+    auto StopMarquee = [&]() {
+        if (!hBar) return;
+        SendMessageW(hBar, PBM_SETMARQUEE, FALSE, 0);
+        SetWindowLongPtrW(hBar, GWL_STYLE,
+            GetWindowLongPtrW(hBar, GWL_STYLE) & ~PBS_MARQUEE);
+        InvalidateRect(hBar, nullptr, TRUE);
+        UpdateWindow(hBar);
+        Pump();
+    };
+
+    // Fetch release JSON, find Full ZIP asset URL.
+    const char* verA = LAUNCHER_VERSION_STR;
+    std::wstring verW(verA, verA + strlen(verA));
+    std::wstring repoBase = std::wstring(L"https://api.github.com/repos/")
+        + LAUNCHER_GH_OWNER + L"/" + LAUNCHER_GH_REPO;
+    std::wstring apiUrls[] = {
+        repoBase + L"/releases/tags/" + verW,
+        repoBase + L"/releases/latest"
+    };
+
+    std::wstring tmpZip = TempFile(L"WOW-HC-Launcher-Full.zip");
+    bool ok = false;
+    for (const auto& apiUrl : apiUrls) {
+        std::string json = HttpGet(apiUrl);
+        if (json.empty()) continue;
+        std::string url = FindFullZipAssetUrl(json);
+        if (url.empty()) continue;
+        std::wstring zipUrl(url.begin(), url.end());
+        ok = HttpDownload(zipUrl, tmpZip, [&](DWORD64 dl, DWORD64 tot) {
+            if (tot > 0) SetPct((int)(dl * 90 / tot));
+        });
+        if (ok) break;
+        DeleteFileW(tmpZip.c_str());
+    }
+
+    if (!ok) {
+        DeleteFileW(tmpZip.c_str());
+        if (hDlg) DestroyWindow(hDlg);
+        MessageBoxW(nullptr,
+            L"Could not download the launcher UI files.\n\n"
+            L"Check your internet connection and restart the launcher,\n"
+            L"or download 'WOW-HC-Launcher-Full.zip' and extract it.",
+            L"Download Failed", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    // Extract ui/ entries from the zip into AppData.
+    StopMarquee();
+    SetPct(90);
+    if (hLabel) SetWindowTextW(hLabel, L"Installing launcher UI...");
+    StartMarquee();
+    Pump();
+
+    auto escPS = [](const std::wstring& s) {
+        std::wstring r;
+        for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
+        return r;
+    };
+    std::wstring script =
+        L"Add-Type -AN System.IO.Compression.FileSystem\r\n"
+        L"try {\r\n"
+        L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(tmpZip) + L"')\r\n"
+        L"  foreach($e in $z.Entries){\r\n"
+        L"    if($e.FullName -like 'ui/*' -and $e.Name -ne ''){\r\n"
+        L"      $rel=$e.FullName -replace '/','\\'\r\n"
+        L"      $dst='" + escPS(g_configDir) + L"\\'+$rel\r\n"
+        L"      $dir=[System.IO.Path]::GetDirectoryName($dst)\r\n"
+        L"      if(-not(Test-Path $dir)){New-Item -ItemType Directory -Force -Path $dir|Out-Null}\r\n"
+        L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e,$dst,$true)\r\n"
+        L"    }\r\n"
+        L"  }\r\n"
+        L"  $z.Dispose()\r\n"
+        L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
+
+    std::wstring scriptPath = TempFile(L"launcher_ui_install.ps1");
+    bool psOk = false;
+    if (WritePsScript(scriptPath, script)) {
+        std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \""
+            + scriptPath + L"\"";
+        std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
+        STARTUPINFOW si = {}; si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi = {};
+        if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
+                CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            DWORD wait;
+            do { wait = WaitForSingleObject(pi.hProcess, 100); Pump(); }
+            while (wait == WAIT_TIMEOUT);
+            DWORD code = 1;
+            GetExitCodeProcess(pi.hProcess, &code);
+            psOk = (code == 0);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+        DeleteFileW(scriptPath.c_str());
+    }
+    DeleteFileW(tmpZip.c_str());
+
+    if (hDlg) DestroyWindow(hDlg);
+
+    return psOk && GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────────
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
 {
@@ -4745,30 +4948,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
         return 1;
     }
 
-    // Check that the ui/ folder is present next to (or near) the EXE.
-    // Without it, WebView2 has no virtual host mapping and shows ERR_NAME_NOT_RESOLVED.
-    {
-        std::wstring exeDir = GetExeDir();
-        bool uiFound = false;
-        wchar_t full[MAX_PATH] = {};
-        std::wstring cand = exeDir + L"\\..\\ui";
-        if (GetFullPathNameW(cand.c_str(), MAX_PATH, full, nullptr) &&
-                GetFileAttributesW(full) != INVALID_FILE_ATTRIBUTES)
-            uiFound = true;
-        if (!uiFound) {
-            cand = exeDir + L"\\ui";
-            if (GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES)
-                uiFound = true;
-        }
-        if (!uiFound) {
-            MessageBoxW(nullptr,
-                L"The 'ui' folder was not found next to the launcher executable.\n\n"
-                L"Please download 'WOW-HC-Launcher-Full.zip' instead of the\n"
-                L"standalone .exe, and extract all files to the same folder.",
-                L"Missing UI Files", MB_OK | MB_ICONERROR);
-            return 1;
-        }
-    }
+    // Ensure ui/ is in AppData. Downloads from GitHub if missing (standalone EXE install).
+    if (!CheckAndBootstrapUiFiles(hInst))
+        return 1;
 
     g_hbrBg  = CreateSolidBrush(CLR_BG);
     g_hbrBg2 = CreateSolidBrush(CLR_BG2);
