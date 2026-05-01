@@ -560,8 +560,7 @@ const GeneralSettingsModal = ({ settings, onAction }) => {
         onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
         onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
       >Video Recording Settings</a>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <ModalBtn label="Check for Updates" onClick={() => { onAction('generalSettingsClose', payload()); onAction('checkForUpdates'); }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
         <ModalBtn label="Close" onClick={() => onAction('generalSettingsClose', payload())} />
       </div>
     </ModalOverlay>

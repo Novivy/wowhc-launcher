@@ -413,6 +413,25 @@ static std::wstring ReadAddonTocVersion()
     return {};
 }
 
+static std::wstring ReadTocVersion(const std::wstring& addonName, const std::wstring& tocFile)
+{
+    if (g_clientPath.empty()) return {};
+    std::wstring path = GetAddonsDir() + L"\\" + addonName + L"\\" + tocFile;
+    std::wifstream f(path);
+    if (!f.is_open()) return {};
+    std::wstring line;
+    while (std::getline(f, line)) {
+        while (!line.empty() && (line.back() == L'\r' || line.back() == L'\n' || line.back() == L' '))
+            line.pop_back();
+        if (line.rfind(L"## Version:", 0) == 0) {
+            std::wstring ver = line.substr(11);
+            size_t start = ver.find_first_not_of(L" \t");
+            return start != std::wstring::npos ? ver.substr(start) : L"";
+        }
+    }
+    return {};
+}
+
 static void WriteLastCheckTime()
 {
     wchar_t buf[32];
@@ -535,6 +554,28 @@ static std::string FindAssetUrl(const std::string& json)
         pos = found + 1;
     }
     return fallback;
+}
+
+// Extracts a raw JSON object or array block for the given key (returns text including outer braces/brackets).
+static std::string JsonExtractBlock(const std::string& json, const std::string& key)
+{
+    auto pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return {};
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return {};
+    while (++pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' ||
+           json[pos] == '\n'  || json[pos] == '\r')) {}
+    if (pos >= json.size()) return {};
+    char open  = json[pos];
+    char close = (open == '{') ? '}' : (open == '[') ? ']' : '\0';
+    if (!close) return {};
+    int depth = 0;
+    size_t start = pos;
+    for (; pos < json.size(); ++pos) {
+        if (json[pos] == open)  ++depth;
+        else if (json[pos] == close && --depth == 0) { ++pos; break; }
+    }
+    return json.substr(start, pos - start);
 }
 
 static void PostText(std::wstring text); // forward declaration
@@ -2151,6 +2192,123 @@ static void RunAddonUpdateCheck()
     }
 }
 
+// ── Third-party addon updates (server-managed, silent) ────────────────────────
+struct ThirdPartyAddon {
+    std::string name;
+    std::string toc;
+    std::string version;
+    std::string repo;
+};
+
+static std::vector<ThirdPartyAddon> ParseAddonList(const std::string& obj)
+{
+    std::vector<ThirdPartyAddon> result;
+    if (obj.size() < 2 || obj[0] != '{') return result;
+    size_t pos = 1;
+    while (pos < obj.size()) {
+        auto q1 = obj.find('"', pos);
+        if (q1 == std::string::npos) break;
+        auto q2 = obj.find('"', q1 + 1);
+        if (q2 == std::string::npos) break;
+        std::string name = obj.substr(q1 + 1, q2 - q1 - 1);
+        auto colon = obj.find(':', q2 + 1);
+        if (colon == std::string::npos) break;
+        auto brace = obj.find('{', colon + 1);
+        if (brace == std::string::npos) break;
+        int depth = 0;
+        size_t end = brace;
+        for (; end < obj.size(); ++end) {
+            if (obj[end] == '{') ++depth;
+            else if (obj[end] == '}' && --depth == 0) { ++end; break; }
+        }
+        std::string sub = obj.substr(brace, end - brace);
+        ThirdPartyAddon a;
+        a.name    = name;
+        a.toc     = JsonString(sub, "toc");
+        a.version = JsonString(sub, "version");
+        a.repo    = JsonString(sub, "repo");
+        if (!a.toc.empty() && !a.version.empty() && !a.repo.empty())
+            result.push_back(a);
+        pos = end;
+    }
+    return result;
+}
+
+static void RunThirdPartyAddonUpdates()
+{
+    //if (IsDevBuild()) return;
+    if (g_clientPath.empty()) return;
+
+    std::string statsJson = HttpGetSimple(L"https://wow-hc.com/json/server-stats.json");
+    if (statsJson.empty()) return;
+
+    std::string updatesBlock = JsonExtractBlock(statsJson, "addons_updates");
+    if (updatesBlock.empty()) return;
+
+    const char* clientKey = (g_clientType == CT_112) ? "vanilla" : "classic";
+    std::string addonListBlock = JsonExtractBlock(updatesBlock, clientKey);
+    if (addonListBlock.empty() || addonListBlock == "[]") return;
+
+    std::vector<ThirdPartyAddon> addons = ParseAddonList(addonListBlock);
+    if (addons.empty()) return;
+
+    std::wstring addonsDir = GetAddonsDir();
+    for (const ThirdPartyAddon& a : addons) {
+        std::wstring addonNameW(a.name.begin(), a.name.end());
+        std::wstring tocFileW(a.toc.begin(), a.toc.end());
+        std::wstring requiredVer(a.version.begin(), a.version.end());
+
+        std::wstring addonPath = addonsDir + L"\\" + addonNameW;
+        if (GetFileAttributesW(addonPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+            continue;
+
+        std::wstring localVer = ReadTocVersion(addonNameW, tocFileW);
+        if (!IsNewer(localVer, requiredVer)) continue;
+
+        // repo field contains "owner/repo" with JSON-escaped slashes (\/); unescape them
+        std::wstring repoW;
+        for (size_t i = 0; i < a.repo.size(); ++i) {
+            if (a.repo[i] == '\\' && i + 1 < a.repo.size()) { ++i; }
+            repoW += (wchar_t)(unsigned char)a.repo[i];
+        }
+        std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
+            + repoW + L"/releases/latest";
+        std::string releaseJson = HttpGet(apiUrl);
+        if (releaseJson.empty()) continue;
+
+        std::string assetUrl = FindAssetUrl(releaseJson);
+        if (assetUrl.empty()) assetUrl = JsonString(releaseJson, "zipball_url");
+        if (assetUrl.empty()) continue;
+
+        std::wstring assetW(assetUrl.begin(), assetUrl.end());
+        std::wstring tmpZip = InstallTempFile(L"addon_" + addonNameW + L"_update.zip");
+
+        g_currentStatus = L"Downloading " + addonNameW + L" addon...";
+        PostPct(0);
+        DlProgress dlProg{L"Downloading " + addonNameW + L" addon...", 70};
+        bool ok = HttpDownload(assetW, tmpZip,
+            [&dlProg](DWORD64 dl, DWORD64 tot) { dlProg(dl, tot); });
+
+        if (ok) {
+            g_currentStatus = L"Installing " + addonNameW + L"...";
+            std::wstring interfaceDir = addonsDir.substr(0, addonsDir.rfind(L'\\'));
+            std::wstring gameDir      = interfaceDir.substr(0, interfaceDir.rfind(L'\\'));
+            CreateDirectoryW(gameDir.c_str(), nullptr);
+            CreateDirectoryW(interfaceDir.c_str(), nullptr);
+            CreateDirectoryW(addonsDir.c_str(), nullptr);
+            DeleteDirRecursive(addonPath);
+            CreateDirectoryW(addonPath.c_str(), nullptr);
+            ok = ExtractZipSmart(tmpZip, addonPath, true, [](int pct) {
+                PostPct(70 + pct * 30 / 100);
+            });
+            DeleteFileW(tmpZip.c_str());
+            if (ok) PostPct(100);
+        } else {
+            DeleteFileW(tmpZip.c_str());
+        }
+    }
+}
+
 // Checks for a newer launcher release, prompts, downloads and hot-swaps the EXE.
 // Safe to call from any thread. Skips if a worker operation is in progress.
 // forced=true: server-enforced minimum version — MB_OK only, no way to skip.
@@ -2564,6 +2722,9 @@ static void PeriodicUpdateCheck()
             }
         }
         RunAddonUpdateCheck(); // addon check runs for both versions
+        g_workerBusy = true;
+        RunThirdPartyAddonUpdates();
+        g_workerBusy = false;
         WriteLastCheckTime();
     }
     if (g_playReady.load()) { PostStatus(WS_READY); PostPct(100); }
@@ -2684,6 +2845,7 @@ static void Worker()
         }
     }
     RunAddonUpdateCheck(); // addon is compatible with both 1.14.2 and 1.12.1
+    RunThirdPartyAddonUpdates();
     WriteLastCheckTime();
     SaveConfig();
 
