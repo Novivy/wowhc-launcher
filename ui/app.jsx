@@ -103,7 +103,7 @@ const PathIconBtn = ({ title, onClick, icon, disabled }) => {
 
 // ── Bottom bar ─────────────────────────────────────────────────────────────────
 const BottomBar = ({ state, onAction, booting }) => {
-  const { status, progress, installPath, isInstalled, isRecording, canSaveReplay, playEnabled, workerBusy, isLaunching, realmIndex } = state;
+  const { status, progress, installPath, isInstalled, isRecording, canSaveReplay, playEnabled, workerBusy, isLaunching, realmIndex, isDev } = state;
   const progressPct = Math.max(0, Math.min(100, progress || 0));
   const statusColor = booting ? T.textDim : (isInstalled ? T.amber2 : T.textDim);
   const ctrlDisabled = workerBusy || !isInstalled;
@@ -186,7 +186,7 @@ const BottomBar = ({ state, onAction, booting }) => {
             backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23a08868' fill='none' stroke-width='1.4'/></svg>\")",
             backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center',
           }}>
-          {REALMS.map(function(r, i) { return React.createElement('option', { key: i, value: i }, r); })}
+          {REALMS.map(function(r, i) { if (i === 2 && !isDev) return null; return React.createElement('option', { key: i, value: i }, r); })}
         </select>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 47px', gap: 6 }}>
           {React.createElement(StartBtn, { label: (isInstalled || !installPath) ? 'START GAME' : 'INSTALL', onClick: () => onAction('startGame'), disabled: !playEnabled })}
@@ -560,7 +560,7 @@ const GeneralSettingsModal = ({ settings, onAction }) => {
         onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
         onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
       >Video Recording Settings</a>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
         <ModalBtn label="Close" onClick={() => onAction('generalSettingsClose', payload())} />
       </div>
     </ModalOverlay>

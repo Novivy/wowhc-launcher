@@ -56,6 +56,7 @@ function timeAgo(ts) {
 const REALMS = [
   "Permadeath (Normal) / Dawnrest (PVP)",
   "Player Testing Realm (PTR)",
+  "Local Dev (192.168.0.30)",
 ];
 
 

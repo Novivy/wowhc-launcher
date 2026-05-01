@@ -53,6 +53,7 @@ static constexpr wchar_t CLIENT_112_DOWNLOAD_URL[] =
 
 static constexpr wchar_t REALM_NORMAL_SERVER[] = L"logon-eu-0.wow-hc.com";
 static constexpr wchar_t REALM_PTR_SERVER[]    = L"ptr-logon-eu-2.wow-hc.com";
+static constexpr wchar_t REALM_DEV_SERVER[]    = L"192.168.0.30";
 
 static constexpr wchar_t APP_NAME[]        = L"WOW-HC Launcher";
 static constexpr wchar_t HERMES_GH_OWNER[] = L"Novivy";
@@ -353,7 +354,7 @@ static void LoadConfig()
         wchar_t ri[8] = {};
         GetPrivateProfileStringW(L"Launcher", L"RealmIndex", L"0", ri, 8, ini);
         int idx = _wtoi(ri);
-        g_realmIndex = (idx == 1) ? 1 : 0;
+        g_realmIndex = (idx >= 0 && idx <= 2) ? idx : 0;
     }
     {
         wchar_t rn[8] = {};
@@ -580,6 +581,7 @@ static std::string JsonExtractBlock(const std::string& json, const std::string& 
 }
 
 static void PostText(std::wstring text); // forward declaration
+static bool IsDevBuild();               // forward declaration
 
 // ── WinHTTP helpers ────────────────────────────────────────────────────────────
 static HINTERNET OpenSession()
@@ -1483,6 +1485,7 @@ static void PostStateToWebView()
         L"\"workerBusy\":%s,"
         L"\"isLaunching\":%s,"
         L"\"realmIndex\":%d,"
+        L"\"isDev\":%s,"
         L"\"clientType\":%d,"
         L"\"showConsole\":%s,"
         L"\"showRecordingNotifications\":%s,"
@@ -1502,6 +1505,7 @@ static void PostStateToWebView()
         workerBusy   ? L"true" : L"false",
         isLaunching  ? L"true" : L"false",
         g_realmIndex,
+        IsDevBuild()  ? L"true" : L"false",
         (int)g_clientType,
         g_showConsole ? L"true" : L"false",
         g_showRecordingNotifications ? L"true" : L"false",
@@ -2291,7 +2295,7 @@ static void RunThirdPartyAddonUpdates()
             [&dlProg](DWORD64 dl, DWORD64 tot) { dlProg(dl, tot); });
 
         if (ok) {
-            g_currentStatus = L"Installing " + addonNameW + L"...";
+            g_currentStatus = L"Updating " + addonNameW + L" addon...";
             std::wstring interfaceDir = addonsDir.substr(0, addonsDir.rfind(L'\\'));
             std::wstring gameDir      = interfaceDir.substr(0, interfaceDir.rfind(L'\\'));
             CreateDirectoryW(gameDir.c_str(), nullptr);
@@ -3102,7 +3106,9 @@ static void DrawModalButton(DRAWITEMSTRUCT* dis, bool isSecondary, bool hovered)
 // ── Realm config update ────────────────────────────────────────────────────────
 static void UpdateRealmConfig(int realmIndex)
 {
-    const wchar_t* server = (realmIndex == 1) ? REALM_PTR_SERVER : REALM_NORMAL_SERVER;
+    const wchar_t* server = (realmIndex == 1) ? REALM_PTR_SERVER
+                          : (realmIndex == 2) ? REALM_DEV_SERVER
+                          : REALM_NORMAL_SERVER;
     g_realmIndex = realmIndex;
     wchar_t riBuf[8]; swprintf_s(riBuf, L"%d", realmIndex);
     WritePrivateProfileStringW(L"Launcher", L"RealmIndex", riBuf, ConfigPath().c_str());
