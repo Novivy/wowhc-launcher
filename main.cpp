@@ -212,6 +212,7 @@ static std::wstring g_configDir;
 static std::wstring g_logPath;
 
 static std::atomic<bool> g_workerBusy{false};
+static std::atomic<bool> g_startupCheckBusy{true}; // true until WM_STARTUP_CHECK_DONE
 static std::atomic<bool> g_playReady{false};
 static std::atomic<bool> g_clientInstalled{false};
 static std::atomic<bool> g_isLaunching{false};
@@ -1455,7 +1456,7 @@ static void PostStateToWebView()
 
     bool isInstalled  = g_playReady.load();
     bool isRecording  = RB_IsRunning();
-    bool workerBusy   = g_workerBusy.load() || g_ffmpegBusy.load();
+    bool workerBusy   = g_workerBusy.load() || g_ffmpegBusy.load() || g_startupCheckBusy.load();
     bool isLaunching  = g_isLaunching.load();
     // playEnabled: never true when worker is running or game is launching
     bool playEnabled  = !g_clientPath.empty() && !workerBusy && !isLaunching &&
@@ -4632,6 +4633,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         AppendLog(L"WM_STARTUP_CHECK_DONE: clientPath='%s' clientType=%d g_wvReady=%d",
             g_clientPath.c_str(), (int)g_clientType, (int)g_wvReady);
+        g_startupCheckBusy = false;
         // Startup launcher-update check is done — proceed with normal startup flow.
         if (!g_clientPath.empty()) {
             AppendLog(L"WM_STARTUP_CHECK_DONE: has path, starting Worker");
