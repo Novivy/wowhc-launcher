@@ -4873,6 +4873,118 @@ static void EnsureDesktopShortcut(bool onlyIfAlreadyExists)
         WritePrivateProfileStringW(L"Launcher", L"ShortcutCreated", L"1", ConfigPath().c_str());
 }
 
+// Extracts the top-level 'ui' folder from zipPath into destDir via Shell.Application COM.
+// Used as a fallback when PowerShell/.NET is unavailable (e.g., Wine/Proton on Linux).
+// Returns true if destDir\ui\index.html exists after extraction.
+static bool ExtractUiFromZipShellCom(const std::wstring& zipPath,
+                                      const std::wstring& destDir,
+                                      const std::function<void()>& pump)
+{
+    wchar_t absZip[MAX_PATH] = {}, absDst[MAX_PATH] = {};
+    if (!GetFullPathNameW(zipPath.c_str(), MAX_PATH, absZip, nullptr)) return false;
+    if (!GetFullPathNameW(destDir.c_str(), MAX_PATH, absDst, nullptr)) return false;
+    CreateDirectoryW(absDst, nullptr);
+
+    // IDispatch late-binding helper — no shldisp.h needed
+    auto Invoke = [](IDispatch* p, const wchar_t* name,
+                     VARIANT* args, UINT argc, VARIANT* out) -> bool {
+        OLECHAR* n = (OLECHAR*)name;
+        DISPID id = 0;
+        if (FAILED(p->GetIDsOfNames(IID_NULL, &n, 1, LOCALE_USER_DEFAULT, &id)))
+            return false;
+        DISPPARAMS dp = {args, nullptr, argc, 0};
+        if (out) VariantInit(out);
+        return SUCCEEDED(p->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT,
+            DISPATCH_METHOD | DISPATCH_PROPERTYGET, &dp, out, nullptr, nullptr));
+    };
+
+    CLSID clsid = {};
+    IDispatch* pShell = nullptr;
+    if (FAILED(CLSIDFromProgID(L"Shell.Application", &clsid))) return false;
+    if (FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_IDispatch, (void**)&pShell)))
+        return false;
+
+    auto BstrVar = [](const wchar_t* s) -> VARIANT {
+        VARIANT v = {}; v.vt = VT_BSTR; v.bstrVal = SysAllocString(s); return v;
+    };
+
+    VARIANT vZip = BstrVar(absZip), vZipFld = {};
+    Invoke(pShell, L"NameSpace", &vZip, 1, &vZipFld);
+    VariantClear(&vZip);
+
+    VARIANT vDst = BstrVar(absDst), vDstFld = {};
+    Invoke(pShell, L"NameSpace", &vDst, 1, &vDstFld);
+    VariantClear(&vDst);
+
+    pShell->Release();
+
+    IDispatch* pZipFld = (vZipFld.vt == VT_DISPATCH) ? vZipFld.pdispVal : nullptr;
+    IDispatch* pDstFld = (vDstFld.vt == VT_DISPATCH) ? vDstFld.pdispVal : nullptr;
+    if (pZipFld) pZipFld->AddRef();
+    if (pDstFld) pDstFld->AddRef();
+    VariantClear(&vZipFld);
+    VariantClear(&vDstFld);
+
+    if (!pZipFld || !pDstFld) {
+        if (pZipFld) pZipFld->Release();
+        if (pDstFld) pDstFld->Release();
+        return false;
+    }
+
+    // Find the 'ui' folder item inside the zip's top-level entries
+    IDispatch* pUiItem = nullptr;
+    VARIANT vItems = {};
+    if (Invoke(pZipFld, L"Items", nullptr, 0, &vItems) && vItems.vt == VT_DISPATCH) {
+        IDispatch* pItems = vItems.pdispVal;
+        VARIANT vCnt = {};
+        long count = 0;
+        if (Invoke(pItems, L"Count", nullptr, 0, &vCnt) && vCnt.vt == VT_I4)
+            count = vCnt.lVal;
+        VariantClear(&vCnt);
+
+        for (long i = 0; i < count && !pUiItem; i++) {
+            VARIANT vIdx = {}; vIdx.vt = VT_I4; vIdx.lVal = i;
+            VARIANT vItem = {};
+            if (Invoke(pItems, L"Item", &vIdx, 1, &vItem) && vItem.vt == VT_DISPATCH) {
+                VARIANT vName = {};
+                Invoke(vItem.pdispVal, L"Name", nullptr, 0, &vName);
+                if (vName.vt == VT_BSTR && vName.bstrVal &&
+                    _wcsicmp(vName.bstrVal, L"ui") == 0) {
+                    pUiItem = vItem.pdispVal;
+                    pUiItem->AddRef();
+                }
+                VariantClear(&vName);
+            }
+            VariantClear(&vItem);
+        }
+    }
+    VariantClear(&vItems);
+    pZipFld->Release();
+
+    if (!pUiItem) {
+        pDstFld->Release();
+        return false;
+    }
+
+    // IDispatch args are reversed: [vOptions, vItem] for CopyHere(vItem, vOptions)
+    VARIANT copyArgs[2] = {};
+    copyArgs[1].vt = VT_DISPATCH; copyArgs[1].pdispVal = pUiItem;
+    copyArgs[0].vt = VT_I4;       copyArgs[0].lVal = 4 | 16 | 256; // FOF_SILENT|FOF_NOCONFIRMATION|FOF_NOERRORUI
+    Invoke(pDstFld, L"CopyHere", copyArgs, 2, nullptr);
+    pUiItem->Release();
+    pDstFld->Release();
+
+    // CopyHere is async — poll up to 60 seconds for the sentinel file
+    std::wstring sentinel = std::wstring(absDst) + L"\\ui\\index.html";
+    for (int i = 0; i < 600; i++) {
+        pump();
+        Sleep(100);
+        if (GetFileAttributesW(sentinel.c_str()) != INVALID_FILE_ATTRIBUTES)
+            return true;
+    }
+    return false;
+}
+
 // ── UI files bootstrap ─────────────────────────────────────────────────────────
 // Downloads the Full ZIP from GitHub and extracts ui/ to AppData if missing.
 // Called before WebView2 init; runs synchronously on the main thread.
@@ -5023,9 +5135,13 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
         return r;
     };
+    // Method 1: System.IO.Compression.FileSystem (needs .NET Framework)
+    // Method 2: Shell.Application COM fallback (no .NET; works on Wine/Proton)
     std::wstring script =
-        L"Add-Type -AN System.IO.Compression.FileSystem\r\n"
-        L"try {\r\n"
+        L"$ok=$false\r\n"
+        L"$z=$null\r\n"
+        L"try{\r\n"
+        L"  Add-Type -AN System.IO.Compression.FileSystem -ErrorAction Stop\r\n"
         L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(tmpZip) + L"')\r\n"
         L"  foreach($e in $z.Entries){\r\n"
         L"    if($e.FullName -like 'ui/*' -and $e.Name -ne ''){\r\n"
@@ -5037,7 +5153,27 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         L"    }\r\n"
         L"  }\r\n"
         L"  $z.Dispose()\r\n"
-        L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
+        L"  $ok=$true\r\n"
+        L"}catch{\r\n"
+        L"  if($z){try{$z.Dispose()}catch{}}\r\n"
+        L"}\r\n"
+        L"if(-not $ok){\r\n"
+        L"  try{\r\n"
+        L"    $sh=New-Object -ComObject Shell.Application -ErrorAction Stop\r\n"
+        L"    $zf=$sh.NameSpace('" + escPS(tmpZip) + L"')\r\n"
+        L"    $df=$sh.NameSpace('" + escPS(g_configDir) + L"')\r\n"
+        L"    $ui=$null\r\n"
+        L"    foreach($it in $zf.Items()){if($it.Name -eq 'ui'){$ui=$it;break}}\r\n"
+        L"    if($ui){\r\n"
+        L"      $df.CopyHere($ui,4+16+256)\r\n"
+        L"      $snt='" + escPS(g_configDir) + L"\\ui\\index.html'\r\n"
+        L"      $w=0\r\n"
+        L"      while(-not(Test-Path $snt)-and $w -lt 300){Start-Sleep -Milliseconds 100;$w++}\r\n"
+        L"      $ok=Test-Path $snt\r\n"
+        L"    }\r\n"
+        L"  }catch{}\r\n"
+        L"}\r\n"
+        L"if(-not $ok){exit 1}\r\n";
 
     std::wstring scriptPath = TempFile(L"launcher_ui_install.ps1");
     bool psOk = false;
@@ -5061,11 +5197,20 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         }
         DeleteFileW(scriptPath.c_str());
     }
+
+    // C++ fallback: Shell.Application COM directly, for when powershell.exe is absent
+    bool extractOk = psOk;
+    if (!extractOk) {
+        if (hLabel) SetWindowTextW(hLabel, L"Installing launcher UI...");
+        Pump();
+        extractOk = ExtractUiFromZipShellCom(tmpZip, g_configDir, Pump);
+    }
+
     DeleteFileW(tmpZip.c_str());
 
     if (hDlg) DestroyWindow(hDlg);
 
-    return psOk && GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES;
+    return extractOk && GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────
