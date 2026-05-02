@@ -688,7 +688,61 @@ static void CaptureThread(int adapterIdx, int outputIdx)
         }
     }
     dxgiOutput1->Release();
-    if (FAILED(hr)) {
+
+    if (!dupl) {
+        // Optimus fallback: on Intel+Nvidia laptops the target monitor sometimes only
+        // supports DDA via the Nvidia adapter even though DXGI lists it under Intel.
+        // Retry every other adapter, matching by HMONITOR.
+        HMONITOR targetMon = outDesc.Monitor;
+        IDXGIFactory1* fac2 = nullptr;
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&fac2))) {
+            for (UINT ai = 0; !dupl; ai++) {
+                IDXGIAdapter* adp2 = nullptr;
+                if (fac2->EnumAdapters(ai, &adp2) == DXGI_ERROR_NOT_FOUND) break;
+                if (ai == (UINT)adapterIdx) { adp2->Release(); continue; }
+                ID3D11Device* dev2 = nullptr; ID3D11DeviceContext* ctx2 = nullptr;
+                if (FAILED(D3D11CreateDevice(adp2, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                        0, featureLevels, 3, D3D11_SDK_VERSION, &dev2, nullptr, &ctx2))) {
+                    adp2->Release(); continue;
+                }
+                for (UINT oi = 0; !dupl; oi++) {
+                    IDXGIOutput* o2 = nullptr;
+                    if (adp2->EnumOutputs(oi, &o2) == DXGI_ERROR_NOT_FOUND) break;
+                    DXGI_OUTPUT_DESC od2 = {}; o2->GetDesc(&od2);
+                    if (od2.Monitor == targetMon) {
+                        IDXGIOutput1* o1 = nullptr;
+                        o2->QueryInterface(__uuidof(IDXGIOutput1), (void**)&o1);
+                        o2->Release();
+                        if (o1) {
+                            IDXGIOutput6* o6 = nullptr;
+                            o1->QueryInterface(__uuidof(IDXGIOutput6), (void**)&o6);
+                            if (o6) {
+                                DXGI_FORMAT fmts[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
+                                hr = o6->DuplicateOutput1(dev2, 0, 2, fmts, &dupl);
+                                o6->Release();
+                            }
+                            if (!dupl) hr = o1->DuplicateOutput(dev2, &dupl);
+                            o1->Release();
+                        }
+                    } else {
+                        o2->Release();
+                    }
+                }
+                if (dupl) {
+                    RbLog(L"CaptureThread: Optimus retry ok adapter=%u hr=0x%08X", ai, (unsigned)hr);
+                    d3dDevice->Release(); d3dContext->Release();
+                    d3dDevice = dev2; d3dContext = ctx2;
+                } else {
+                    RbLog(L"CaptureThread: Optimus retry adapter=%u failed hr=0x%08X", ai, (unsigned)hr);
+                    dev2->Release(); ctx2->Release();
+                }
+                adp2->Release();
+            }
+            fac2->Release();
+        }
+    }
+
+    if (!dupl) {
         d3dDevice->Release(); d3dContext->Release();
         RbLog(L"CaptureThread: screen capture failed hr=0x%08X", (unsigned)hr);
         wchar_t errMsg[128];
