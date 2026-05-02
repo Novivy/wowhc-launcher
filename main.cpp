@@ -5198,8 +5198,11 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
             DWORD code = 1;
             GetExitCodeProcess(pi.hProcess, &code);
             psOk = (code == 0);
+            AppendLog(L"UI bootstrap: PowerShell exit code %lu (%s)", code, code == 0 ? L"ok" : L"failed");
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
+        } else {
+            AppendLog(L"UI bootstrap: PowerShell launch failed (GetLastError=%lu)", GetLastError());
         }
         DeleteFileW(scriptPath.c_str());
     }
@@ -5207,16 +5210,20 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
     // C++ fallback: Shell.Application COM directly, for when powershell.exe is absent
     bool extractOk = psOk;
     if (!extractOk) {
+        AppendLog(L"UI bootstrap: trying Shell.Application COM fallback");
         if (hLabel) SetWindowTextW(hLabel, L"Installing launcher UI...");
         Pump();
         extractOk = ExtractUiFromZipShellCom(tmpZip, g_configDir, Pump);
+        AppendLog(L"UI bootstrap: Shell.Application COM result: %s", extractOk ? L"ok" : L"failed");
     }
 
     DeleteFileW(tmpZip.c_str());
 
     if (hDlg) DestroyWindow(hDlg);
 
-    return extractOk && GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES;
+    bool uiPresent = GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES;
+    AppendLog(L"UI bootstrap: extractOk=%d uiPresent=%d", (int)extractOk, (int)uiPresent);
+    return extractOk && uiPresent;
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────────
@@ -5343,8 +5350,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
     }
 
     // Ensure ui/ is in AppData. Downloads from GitHub if missing (standalone EXE install).
-    if (!CheckAndBootstrapUiFiles(hInst))
+    if (!CheckAndBootstrapUiFiles(hInst)) {
+        MessageBoxW(nullptr,
+            L"Failed to install the launcher UI files.\n\n"
+            L"Workaround: download 'WOW-HC-Launcher-Full.zip' from:\n"
+            L"https://github.com/Novivy/wowhc-launcher/releases/latest\n\n"
+            L"Extract it and place the 'ui' folder next to this EXE.\n\n"
+            L"Wine users: also run 'winetricks webview2' to install the required runtime.",
+            L"WoW HC Launcher", MB_OK | MB_ICONERROR);
         return 1;
+    }
 
     g_hbrBg  = CreateSolidBrush(CLR_BG);
     g_hbrBg2 = CreateSolidBrush(CLR_BG2);
