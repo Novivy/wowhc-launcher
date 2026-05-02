@@ -3,7 +3,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <shlobj.h>
-#include <dxgi1_2.h>
+#include <dxgi1_6.h>
 #include <d3d11.h>
 #include <gdiplus.h>
 
@@ -651,11 +651,23 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     int encW = ((int)((int64_t)frameW * encH / frameH)) & ~1;
 
     IDXGIOutputDuplication* dupl = nullptr;
-    hr = dxgiOutput1->DuplicateOutput(d3dDevice, &dupl);
+    {
+        IDXGIOutput6* out6 = nullptr;
+        dxgiOutput1->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6);
+        if (out6) {
+            DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
+            hr = out6->DuplicateOutput1(d3dDevice, 0, 1, &fmt, &dupl);
+            out6->Release();
+        }
+        if (!dupl)
+            hr = dxgiOutput1->DuplicateOutput(d3dDevice, &dupl);
+    }
     dxgiOutput1->Release();
     if (FAILED(hr)) {
         d3dDevice->Release(); d3dContext->Release();
-        RB_ShowOsd(L"Failed to start screen capture.", OSD_RED);
+        wchar_t errMsg[128];
+        swprintf_s(errMsg, L"Failed to start screen capture (0x%08X).", (unsigned)hr);
+        RB_ShowOsd(errMsg, OSD_RED);
         g_rbRunning = false;
         return;
     }
@@ -750,7 +762,15 @@ static void CaptureThread(int adapterIdx, int outputIdx)
                 out2->QueryInterface(__uuidof(IDXGIOutput1), (void**)&out1);
                 out2->Release();
                 if (out1) {
-                    out1->DuplicateOutput(d3dDevice, &dupl);
+                    IDXGIOutput6* out6 = nullptr;
+                    out1->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6);
+                    if (out6) {
+                        DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
+                        out6->DuplicateOutput1(d3dDevice, 0, 1, &fmt, &dupl);
+                        out6->Release();
+                    }
+                    if (!dupl)
+                        out1->DuplicateOutput(d3dDevice, &dupl);
                     out1->Release();
                 }
             }
