@@ -742,16 +742,6 @@ static void CaptureThread(int adapterIdx, int outputIdx)
         }
     }
 
-    if (!dupl) {
-        d3dDevice->Release(); d3dContext->Release();
-        RbLog(L"CaptureThread: screen capture failed hr=0x%08X", (unsigned)hr);
-        wchar_t errMsg[128];
-        swprintf_s(errMsg, L"Failed to start screen capture (0x%08X).", (unsigned)hr);
-        RB_ShowOsd(errMsg, OSD_RED);
-        g_rbRunning = false;
-        return;
-    }
-
     // ── GDI fallback when DDA is unavailable ─────────────────────────────────
     bool    useGdi     = !dupl;
     HDC     gdiScrDC   = nullptr;
