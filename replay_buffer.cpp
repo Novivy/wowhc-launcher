@@ -752,26 +752,69 @@ static void CaptureThread(int adapterIdx, int outputIdx)
         return;
     }
 
-    DXGI_OUTDUPL_DESC duplDesc = {};
-    dupl->GetDesc(&duplDesc);
-    bool isHdr = (duplDesc.ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
-    RbLog(L"CaptureThread: capture started hdr=%d encRes=%dx%d", (int)isHdr, encW, encH);
+    // ── GDI fallback when DDA is unavailable ─────────────────────────────────
+    bool    useGdi     = !dupl;
+    HDC     gdiScrDC   = nullptr;
+    HDC     gdiMemDC   = nullptr;
+    HBITMAP gdiBmp     = nullptr;
+    HBITMAP gdiOldBmp  = nullptr;
+    void*   gdiBits    = nullptr;
+    int     gdiLeft    = 0;
+    int     gdiTop     = 0;
 
-    // Staging texture for CPU readback
-    D3D11_TEXTURE2D_DESC stagingDesc = {};
-    stagingDesc.Width          = (UINT)frameW;
-    stagingDesc.Height         = (UINT)frameH;
-    stagingDesc.MipLevels      = 1;
-    stagingDesc.ArraySize      = 1;
-    stagingDesc.Format         = isHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
-    stagingDesc.SampleDesc     = { 1, 0 };
-    stagingDesc.Usage          = D3D11_USAGE_STAGING;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (useGdi) {
+        RbLog(L"CaptureThread: DDA unavailable on all adapters, falling back to GDI");
+        d3dDevice->Release(); d3dDevice = nullptr;
+        d3dContext->Release(); d3dContext = nullptr;
+
+        gdiLeft  = outDesc.DesktopCoordinates.left;
+        gdiTop   = outDesc.DesktopCoordinates.top;
+        gdiScrDC = GetDC(nullptr);
+        gdiMemDC = CreateCompatibleDC(gdiScrDC);
+        BITMAPINFO bi = {};
+        bi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth       = frameW;
+        bi.bmiHeader.biHeight      = -frameH;
+        bi.bmiHeader.biPlanes      = 1;
+        bi.bmiHeader.biBitCount    = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        gdiBmp = CreateDIBSection(gdiMemDC, &bi, DIB_RGB_COLORS, &gdiBits, nullptr, 0);
+        if (!gdiBmp) {
+            RbLog(L"CaptureThread: GDI fallback setup failed");
+            DeleteDC(gdiMemDC); ReleaseDC(nullptr, gdiScrDC);
+            RB_ShowOsd(L"Failed to start screen capture (GDI init failed).", OSD_RED);
+            g_rbRunning = false;
+            return;
+        }
+        gdiOldBmp = (HBITMAP)SelectObject(gdiMemDC, gdiBmp);
+    }
+
+    // ── DDA staging texture (skipped in GDI mode) ────────────────────────────
+    bool isHdr = false;
     ID3D11Texture2D* stagingTex = nullptr;
-    d3dDevice->CreateTexture2D(&stagingDesc, nullptr, &stagingTex);
-
     std::vector<uint8_t> hdrBuf;
-    if (isHdr) hdrBuf.resize((size_t)frameW * frameH * 4);
+
+    if (!useGdi) {
+        DXGI_OUTDUPL_DESC duplDesc = {};
+        dupl->GetDesc(&duplDesc);
+        isHdr = (duplDesc.ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+        RbLog(L"CaptureThread: DDA started hdr=%d encRes=%dx%d", (int)isHdr, encW, encH);
+
+        D3D11_TEXTURE2D_DESC stagingDesc = {};
+        stagingDesc.Width          = (UINT)frameW;
+        stagingDesc.Height         = (UINT)frameH;
+        stagingDesc.MipLevels      = 1;
+        stagingDesc.ArraySize      = 1;
+        stagingDesc.Format         = isHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+        stagingDesc.SampleDesc     = { 1, 0 };
+        stagingDesc.Usage          = D3D11_USAGE_STAGING;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        d3dDevice->CreateTexture2D(&stagingDesc, nullptr, &stagingTex);
+
+        if (isHdr) hdrBuf.resize((size_t)frameW * frameH * 4);
+    } else {
+        RbLog(L"CaptureThread: GDI capture started encRes=%dx%d", encW, encH);
+    }
 
     int     fps             = std::max(20, std::min(60, g_rbSettings.fps));
     DWORD64 frameIntervalMs = 1000u / (DWORD64)fps;
@@ -779,8 +822,10 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     // Encoder
     AVCodecContext* encCtx = OpenBestEncoder(encW, encH, fps);
     if (!encCtx) {
-        stagingTex->Release(); dupl->Release();
-        d3dDevice->Release(); d3dContext->Release();
+        if (stagingTex) stagingTex->Release();
+        if (dupl) dupl->Release();
+        if (d3dDevice) { d3dDevice->Release(); d3dContext->Release(); }
+        if (gdiBmp) { SelectObject(gdiMemDC, gdiOldBmp); DeleteObject(gdiBmp); DeleteDC(gdiMemDC); ReleaseDC(nullptr, gdiScrDC); }
         RB_ShowOsd(L"No H.264 encoder found (install GPU drivers or Visual C++ Redist).", OSD_RED);
         g_rbRunning = false;
         return;
@@ -827,118 +872,136 @@ static void CaptureThread(int adapterIdx, int outputIdx)
             }).detach();
         }
 
-        IDXGIResource* desktopResource = nullptr;
-        DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
-        hr = dupl->AcquireNextFrame((DWORD)(frameIntervalMs + 5), &frameInfo, &desktopResource);
+        bool gotFrame = false;
 
-        if (hr == DXGI_ERROR_WAIT_TIMEOUT) continue;
-
-        if (hr == DXGI_ERROR_ACCESS_LOST) {
-            // Desktop change (resolution/DPI/sleep) — recreate duplication
-            dupl->Release(); dupl = nullptr;
-            dxgiOutput = nullptr;
-            IDXGIDevice*  dev2  = nullptr;
-            IDXGIAdapter* adp2  = nullptr;
-            d3dDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&dev2);
-            dev2->GetParent(__uuidof(IDXGIAdapter), (void**)&adp2);
-            dev2->Release();
-            IDXGIOutput* out2 = nullptr;
-            IDXGIOutput1* out1 = nullptr;
-            adp2->EnumOutputs((UINT)outputIdx, &out2);
-            adp2->Release();
-            if (out2) {
-                out2->QueryInterface(__uuidof(IDXGIOutput1), (void**)&out1);
-                out2->Release();
-                if (out1) {
-                    IDXGIOutput6* out6 = nullptr;
-                    out1->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6);
-                    if (out6) {
-                        DXGI_FORMAT fmts[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
-                        out6->DuplicateOutput1(d3dDevice, 0, 2, fmts, &dupl);
-                        out6->Release();
-                    }
-                    if (!dupl)
-                        out1->DuplicateOutput(d3dDevice, &dupl);
-                    out1->Release();
-                }
-            }
-            if (!dupl) break;
-            Sleep(200);
-            continue;
-        }
-
-        if (FAILED(hr)) break;
-
-        DWORD64 now = GetTickCount64();
-        if (now - lastFrameTick < frameIntervalMs) {
-            dupl->ReleaseFrame();
-            desktopResource->Release();
-            continue;
-        }
-        lastFrameTick = now;
-
-        ID3D11Texture2D* frameTex = nullptr;
-        desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&frameTex);
-        desktopResource->Release();
-
-        if (frameTex) {
-            d3dContext->CopyResource(stagingTex, frameTex);
-            frameTex->Release();
-        }
-        dupl->ReleaseFrame();
-
-        if (!frameTex) continue;
-
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (SUCCEEDED(d3dContext->Map(stagingTex, 0, D3D11_MAP_READ, 0, &mapped))) {
-            av_frame_make_writable(frame);
-            if (isHdr) {
-                uint8_t* dst = hdrBuf.data();
-                for (int y = 0; y < frameH; y++) {
-                    const uint16_t* src = (const uint16_t*)((const uint8_t*)mapped.pData + (size_t)y * mapped.RowPitch);
-                    uint8_t* dstRow = dst + (size_t)y * frameW * 4;
-                    for (int x = 0; x < frameW; x++) {
-                        dstRow[x*4+0] = LinearToSrgb(HalfToFloat(src[x*4+2]));
-                        dstRow[x*4+1] = LinearToSrgb(HalfToFloat(src[x*4+1]));
-                        dstRow[x*4+2] = LinearToSrgb(HalfToFloat(src[x*4+0]));
-                        dstRow[x*4+3] = 255;
-                    }
-                }
-                const uint8_t* srcData[1]   = { hdrBuf.data() };
+        if (useGdi) {
+            DWORD64 now = GetTickCount64();
+            if (now - lastFrameTick < frameIntervalMs) { Sleep(1); continue; }
+            lastFrameTick = now;
+            if (BitBlt(gdiMemDC, 0, 0, frameW, frameH, gdiScrDC, gdiLeft, gdiTop, SRCCOPY | CAPTUREBLT)) {
+                av_frame_make_writable(frame);
+                const uint8_t* srcData[1]   = { (uint8_t*)gdiBits };
                 int            srcStride[1] = { frameW * 4 };
                 sws_scale(sws, srcData, srcStride, 0, frameH, frame->data, frame->linesize);
-            } else {
-                const uint8_t* srcData[1]   = { (uint8_t*)mapped.pData };
-                int            srcStride[1] = { (int)mapped.RowPitch };
-                sws_scale(sws, srcData, srcStride, 0, frameH, frame->data, frame->linesize);
+                gotFrame = true;
             }
-            d3dContext->Unmap(stagingTex, 0);
+        } else {
+            IDXGIResource* desktopResource = nullptr;
+            DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
+            hr = dupl->AcquireNextFrame((DWORD)(frameIntervalMs + 5), &frameInfo, &desktopResource);
 
-            LARGE_INTEGER cur;
-            QueryPerformanceCounter(&cur);
-            double elapsedMs = (double)(cur.QuadPart - startCounter.QuadPart) * 1000.0
-                               / (double)freq.QuadPart;
-            // Use actual wall-clock time for pts so playback speed is correct
-            // regardless of timer jitter or high-refresh-rate monitors.
-            int64_t wallPts  = (int64_t)(elapsedMs * fps / 1000.0);
-            frame->pts = std::max(framePts, wallPts);
-            framePts   = frame->pts + 1;
-            avcodec_send_frame(encCtx, frame);
+            if (hr == DXGI_ERROR_WAIT_TIMEOUT) continue;
 
-            AVPacket* pkt = av_packet_alloc();
-            while (avcodec_receive_packet(encCtx, pkt) == 0) {
-                StoredPacket sp;
-                sp.data.assign(pkt->data, pkt->data + pkt->size);
-                sp.pts         = pkt->pts;
-                sp.dts         = pkt->dts;
-                sp.duration    = pkt->duration;
-                sp.is_keyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
-                sp.wall_ms     = elapsedMs;
-                PushPacket(std::move(sp));
-                av_packet_unref(pkt);
+            if (hr == DXGI_ERROR_ACCESS_LOST) {
+                // Desktop change (resolution/DPI/sleep) — recreate duplication
+                dupl->Release(); dupl = nullptr;
+                dxgiOutput = nullptr;
+                IDXGIDevice*  dev2  = nullptr;
+                IDXGIAdapter* adp2  = nullptr;
+                d3dDevice->QueryInterface(__uuidof(IDXGIDevice), (void**)&dev2);
+                dev2->GetParent(__uuidof(IDXGIAdapter), (void**)&adp2);
+                dev2->Release();
+                IDXGIOutput* out2 = nullptr;
+                IDXGIOutput1* out1 = nullptr;
+                adp2->EnumOutputs((UINT)outputIdx, &out2);
+                adp2->Release();
+                if (out2) {
+                    out2->QueryInterface(__uuidof(IDXGIOutput1), (void**)&out1);
+                    out2->Release();
+                    if (out1) {
+                        IDXGIOutput6* out6 = nullptr;
+                        out1->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6);
+                        if (out6) {
+                            DXGI_FORMAT fmts[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
+                            out6->DuplicateOutput1(d3dDevice, 0, 2, fmts, &dupl);
+                            out6->Release();
+                        }
+                        if (!dupl)
+                            out1->DuplicateOutput(d3dDevice, &dupl);
+                        out1->Release();
+                    }
+                }
+                if (!dupl) break;
+                Sleep(200);
+                continue;
             }
-            av_packet_free(&pkt);
+
+            if (FAILED(hr)) break;
+
+            DWORD64 now = GetTickCount64();
+            if (now - lastFrameTick < frameIntervalMs) {
+                dupl->ReleaseFrame();
+                desktopResource->Release();
+                continue;
+            }
+            lastFrameTick = now;
+
+            ID3D11Texture2D* frameTex = nullptr;
+            desktopResource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&frameTex);
+            desktopResource->Release();
+
+            if (frameTex) {
+                d3dContext->CopyResource(stagingTex, frameTex);
+                frameTex->Release();
+            }
+            dupl->ReleaseFrame();
+
+            if (!frameTex) continue;
+
+            D3D11_MAPPED_SUBRESOURCE mapped = {};
+            if (SUCCEEDED(d3dContext->Map(stagingTex, 0, D3D11_MAP_READ, 0, &mapped))) {
+                av_frame_make_writable(frame);
+                if (isHdr) {
+                    uint8_t* dst = hdrBuf.data();
+                    for (int y = 0; y < frameH; y++) {
+                        const uint16_t* src = (const uint16_t*)((const uint8_t*)mapped.pData + (size_t)y * mapped.RowPitch);
+                        uint8_t* dstRow = dst + (size_t)y * frameW * 4;
+                        for (int x = 0; x < frameW; x++) {
+                            dstRow[x*4+0] = LinearToSrgb(HalfToFloat(src[x*4+2]));
+                            dstRow[x*4+1] = LinearToSrgb(HalfToFloat(src[x*4+1]));
+                            dstRow[x*4+2] = LinearToSrgb(HalfToFloat(src[x*4+0]));
+                            dstRow[x*4+3] = 255;
+                        }
+                    }
+                    const uint8_t* srcData[1]   = { hdrBuf.data() };
+                    int            srcStride[1] = { frameW * 4 };
+                    sws_scale(sws, srcData, srcStride, 0, frameH, frame->data, frame->linesize);
+                } else {
+                    const uint8_t* srcData[1]   = { (uint8_t*)mapped.pData };
+                    int            srcStride[1] = { (int)mapped.RowPitch };
+                    sws_scale(sws, srcData, srcStride, 0, frameH, frame->data, frame->linesize);
+                }
+                d3dContext->Unmap(stagingTex, 0);
+                gotFrame = true;
+            }
         }
+
+        if (!gotFrame) continue;
+
+        LARGE_INTEGER cur;
+        QueryPerformanceCounter(&cur);
+        double elapsedMs = (double)(cur.QuadPart - startCounter.QuadPart) * 1000.0
+                           / (double)freq.QuadPart;
+        // Use actual wall-clock time for pts so playback speed is correct
+        // regardless of timer jitter or high-refresh-rate monitors.
+        int64_t wallPts  = (int64_t)(elapsedMs * fps / 1000.0);
+        frame->pts = std::max(framePts, wallPts);
+        framePts   = frame->pts + 1;
+        avcodec_send_frame(encCtx, frame);
+
+        AVPacket* pkt = av_packet_alloc();
+        while (avcodec_receive_packet(encCtx, pkt) == 0) {
+            StoredPacket sp;
+            sp.data.assign(pkt->data, pkt->data + pkt->size);
+            sp.pts         = pkt->pts;
+            sp.dts         = pkt->dts;
+            sp.duration    = pkt->duration;
+            sp.is_keyframe = (pkt->flags & AV_PKT_FLAG_KEY) != 0;
+            sp.wall_ms     = elapsedMs;
+            PushPacket(std::move(sp));
+            av_packet_unref(pkt);
+        }
+        av_packet_free(&pkt);
     }
 
     // Flush encoder
@@ -951,10 +1014,11 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     av_frame_free(&frame);
     sws_freeContext(sws);
     avcodec_free_context(&encCtx);
-    stagingTex->Release();
+    if (stagingTex) stagingTex->Release();
     if (dupl) dupl->Release();
-    d3dContext->Release();
-    d3dDevice->Release();
+    if (d3dContext) d3dContext->Release();
+    if (d3dDevice) d3dDevice->Release();
+    if (gdiBmp) { SelectObject(gdiMemDC, gdiOldBmp); DeleteObject(gdiBmp); DeleteDC(gdiMemDC); ReleaseDC(nullptr, gdiScrDC); }
 
     PostMessageW(g_rbHwnd, WM_RB_STATUS, 0, 0);
     if (g_showNotifications) RB_ShowOsd(L"Recording Stopped", OSD_ORANGE);
