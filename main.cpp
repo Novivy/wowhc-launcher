@@ -1797,6 +1797,17 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
 
     if (hDlg) DestroyWindow(hDlg);
 
+    // Verify the runtime is actually available now (silent failures on Wine).
+    if (!CheckWebView2Runtime()) {
+        MessageBoxW(hwnd,
+            L"WebView2 installation did not complete successfully.\n\n"
+            L"Wine users: run 'winetricks webview2' in your Wine prefix instead.\n\n"
+            L"Other users: install WebView2 manually from:\n"
+            L"https://developer.microsoft.com/microsoft-edge/webview2/",
+            L"WebView2 Install Failed", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
     // Relaunch the launcher so it picks up the newly installed WebView2 runtime.
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
