@@ -591,6 +591,22 @@ static AVCodecContext* OpenBestEncoder(int width, int height, int fps)
     return nullptr;
 }
 
+static inline float HalfToFloat(uint16_t h) {
+    uint32_t s = (uint32_t)(h >> 15) << 31;
+    uint32_t e = (h >> 10) & 0x1F;
+    uint32_t m = (uint32_t)(h & 0x3FF) << 13;
+    if (e != 0 && e != 31) e += 112;
+    else if (e == 31) { uint32_t v = s | 0x7F800000u | m; float f; memcpy(&f, &v, 4); return f; }
+    uint32_t v = s | (e << 23) | m; float f; memcpy(&f, &v, 4); return f;
+}
+
+static inline uint8_t LinearToSrgb(float x) {
+    if (x <= 0.0f) return 0;
+    if (x >= 1.0f) return 255;
+    float s = x < 0.0031308f ? x * 12.92f : 1.055f * powf(x, 1.0f / 2.4f) - 0.055f;
+    return (uint8_t)(s * 255.0f + 0.5f);
+}
+
 // ── Capture + encode thread ───────────────────────────────────────────────────
 static void CaptureThread(int adapterIdx, int outputIdx)
 {
@@ -655,8 +671,9 @@ static void CaptureThread(int adapterIdx, int outputIdx)
         IDXGIOutput6* out6 = nullptr;
         dxgiOutput1->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6);
         if (out6) {
-            DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
-            hr = out6->DuplicateOutput1(d3dDevice, 0, 1, &fmt, &dupl);
+            // Request FP16 first so HDR displays work; OS picks BGRA8 on SDR, FP16 on HDR
+            DXGI_FORMAT fmts[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
+            hr = out6->DuplicateOutput1(d3dDevice, 0, 2, fmts, &dupl);
             out6->Release();
         }
         if (!dupl)
@@ -672,18 +689,25 @@ static void CaptureThread(int adapterIdx, int outputIdx)
         return;
     }
 
+    DXGI_OUTDUPL_DESC duplDesc = {};
+    dupl->GetDesc(&duplDesc);
+    bool isHdr = (duplDesc.ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+
     // Staging texture for CPU readback
     D3D11_TEXTURE2D_DESC stagingDesc = {};
     stagingDesc.Width          = (UINT)frameW;
     stagingDesc.Height         = (UINT)frameH;
     stagingDesc.MipLevels      = 1;
     stagingDesc.ArraySize      = 1;
-    stagingDesc.Format         = DXGI_FORMAT_B8G8R8A8_UNORM;
+    stagingDesc.Format         = isHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
     stagingDesc.SampleDesc     = { 1, 0 };
     stagingDesc.Usage          = D3D11_USAGE_STAGING;
     stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     ID3D11Texture2D* stagingTex = nullptr;
     d3dDevice->CreateTexture2D(&stagingDesc, nullptr, &stagingTex);
+
+    std::vector<uint8_t> hdrBuf;
+    if (isHdr) hdrBuf.resize((size_t)frameW * frameH * 4);
 
     int     fps             = std::max(20, std::min(60, g_rbSettings.fps));
     DWORD64 frameIntervalMs = 1000u / (DWORD64)fps;
@@ -765,8 +789,8 @@ static void CaptureThread(int adapterIdx, int outputIdx)
                     IDXGIOutput6* out6 = nullptr;
                     out1->QueryInterface(__uuidof(IDXGIOutput6), (void**)&out6);
                     if (out6) {
-                        DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
-                        out6->DuplicateOutput1(d3dDevice, 0, 1, &fmt, &dupl);
+                        DXGI_FORMAT fmts[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
+                        out6->DuplicateOutput1(d3dDevice, 0, 2, fmts, &dupl);
                         out6->Release();
                     }
                     if (!dupl)
@@ -804,9 +828,26 @@ static void CaptureThread(int adapterIdx, int outputIdx)
         D3D11_MAPPED_SUBRESOURCE mapped = {};
         if (SUCCEEDED(d3dContext->Map(stagingTex, 0, D3D11_MAP_READ, 0, &mapped))) {
             av_frame_make_writable(frame);
-            const uint8_t* srcData[1]   = { (uint8_t*)mapped.pData };
-            int            srcStride[1] = { (int)mapped.RowPitch };
-            sws_scale(sws, srcData, srcStride, 0, frameH, frame->data, frame->linesize);
+            if (isHdr) {
+                uint8_t* dst = hdrBuf.data();
+                for (int y = 0; y < frameH; y++) {
+                    const uint16_t* src = (const uint16_t*)((const uint8_t*)mapped.pData + (size_t)y * mapped.RowPitch);
+                    uint8_t* dstRow = dst + (size_t)y * frameW * 4;
+                    for (int x = 0; x < frameW; x++) {
+                        dstRow[x*4+0] = LinearToSrgb(HalfToFloat(src[x*4+2]));
+                        dstRow[x*4+1] = LinearToSrgb(HalfToFloat(src[x*4+1]));
+                        dstRow[x*4+2] = LinearToSrgb(HalfToFloat(src[x*4+0]));
+                        dstRow[x*4+3] = 255;
+                    }
+                }
+                const uint8_t* srcData[1]   = { hdrBuf.data() };
+                int            srcStride[1] = { frameW * 4 };
+                sws_scale(sws, srcData, srcStride, 0, frameH, frame->data, frame->linesize);
+            } else {
+                const uint8_t* srcData[1]   = { (uint8_t*)mapped.pData };
+                int            srcStride[1] = { (int)mapped.RowPitch };
+                sws_scale(sws, srcData, srcStride, 0, frameH, frame->data, frame->linesize);
+            }
             d3dContext->Unmap(stagingTex, 0);
 
             LARGE_INTEGER cur;
