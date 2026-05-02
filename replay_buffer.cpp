@@ -662,6 +662,9 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     int frameW = (outDesc.DesktopCoordinates.right  - outDesc.DesktopCoordinates.left) & ~1;
     int frameH = (outDesc.DesktopCoordinates.bottom - outDesc.DesktopCoordinates.top)  & ~1;
 
+    RbLog(L"CaptureThread: adapter=%d output=%d monitor='%ls' res=%dx%d",
+          adapterIdx, outputIdx, outDesc.DeviceName, frameW, frameH);
+
     // Clamp encoder output: 720p min, 1080p max; preserve aspect ratio
     int encH = std::max(720, std::min(1080, frameH)) & ~1;
     int encW = ((int)((int64_t)frameW * encH / frameH)) & ~1;
@@ -674,14 +677,20 @@ static void CaptureThread(int adapterIdx, int outputIdx)
             // Request FP16 first so HDR displays work; OS picks BGRA8 on SDR, FP16 on HDR
             DXGI_FORMAT fmts[] = { DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM };
             hr = out6->DuplicateOutput1(d3dDevice, 0, 2, fmts, &dupl);
+            RbLog(L"CaptureThread: DuplicateOutput1 hr=0x%08X dupl=%s", (unsigned)hr, dupl ? L"ok" : L"null");
             out6->Release();
+        } else {
+            RbLog(L"CaptureThread: IDXGIOutput6 not available, using DuplicateOutput");
         }
-        if (!dupl)
+        if (!dupl) {
             hr = dxgiOutput1->DuplicateOutput(d3dDevice, &dupl);
+            RbLog(L"CaptureThread: DuplicateOutput fallback hr=0x%08X dupl=%s", (unsigned)hr, dupl ? L"ok" : L"null");
+        }
     }
     dxgiOutput1->Release();
     if (FAILED(hr)) {
         d3dDevice->Release(); d3dContext->Release();
+        RbLog(L"CaptureThread: screen capture failed hr=0x%08X", (unsigned)hr);
         wchar_t errMsg[128];
         swprintf_s(errMsg, L"Failed to start screen capture (0x%08X).", (unsigned)hr);
         RB_ShowOsd(errMsg, OSD_RED);
@@ -692,6 +701,7 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     DXGI_OUTDUPL_DESC duplDesc = {};
     dupl->GetDesc(&duplDesc);
     bool isHdr = (duplDesc.ModeDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+    RbLog(L"CaptureThread: capture started hdr=%d encRes=%dx%d", (int)isHdr, encW, encH);
 
     // Staging texture for CPU readback
     D3D11_TEXTURE2D_DESC stagingDesc = {};
