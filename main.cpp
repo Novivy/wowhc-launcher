@@ -227,6 +227,9 @@ static ClientType g_pendingInstallType    = CT_UNKNOWN;
 static bool       g_pendingExistingInstall = false;
 static int        g_realmIndex            = 0;
 static bool       g_showRecordingNotifications = true;
+static int        g_hermesServerSpellDelay = -1; // -1 = UNSET (not passed to HermesProxy)
+static int        g_hermesClientSpellDelay = -1; // -1 = UNSET
+static int        g_hermesSpellQueueWindow = 300;
 
 // HermesProxy pipe
 static HANDLE g_hermesProcess  = nullptr;
@@ -318,6 +321,15 @@ static void SaveConfig()
     wchar_t riBuf[8]; swprintf_s(riBuf, L"%d", g_realmIndex);
     WritePrivateProfileStringW(L"Launcher", L"RealmIndex", riBuf, ini);
     WritePrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", g_showRecordingNotifications ? L"1" : L"0", ini);
+    {
+        wchar_t sb[16];
+        swprintf_s(sb, L"%d", g_hermesServerSpellDelay);
+        WritePrivateProfileStringW(L"Launcher", L"HermesServerSpellDelay", sb, ini);
+        swprintf_s(sb, L"%d", g_hermesClientSpellDelay);
+        WritePrivateProfileStringW(L"Launcher", L"HermesClientSpellDelay", sb, ini);
+        swprintf_s(sb, L"%d", g_hermesSpellQueueWindow);
+        WritePrivateProfileStringW(L"Launcher", L"HermesSpellQueueWindow", sb, ini);
+    }
 }
 
 static void LoadConfig()
@@ -361,6 +373,50 @@ static void LoadConfig()
         GetPrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", L"1", rn, 8, ini);
         g_showRecordingNotifications = (_wtoi(rn) != 0);
         RB_SetShowNotifications(g_showRecordingNotifications);
+    }
+    {
+        wchar_t sb[16] = {};
+        GetPrivateProfileStringW(L"Launcher", L"HermesServerSpellDelay", L"", sb, 16, ini);
+        g_hermesServerSpellDelay = (sb[0] == 0) ? -1 : _wtoi(sb);
+        GetPrivateProfileStringW(L"Launcher", L"HermesClientSpellDelay", L"", sb, 16, ini);
+        g_hermesClientSpellDelay = (sb[0] == 0) ? -1 : _wtoi(sb);
+        GetPrivateProfileStringW(L"Launcher", L"HermesSpellQueueWindow", L"300", sb, 16, ini);
+        g_hermesSpellQueueWindow = _wtoi(sb);
+        if (g_hermesSpellQueueWindow < 0) g_hermesSpellQueueWindow = 300;
+    }
+    // On first launch (UNSET), sync spell delay values from HermesProxy.config
+    if (g_clientType == CT_114 && !g_hermesExePath.empty() &&
+        (g_hermesServerSpellDelay < 0 || g_hermesClientSpellDelay < 0))
+    {
+        size_t sep2 = g_hermesExePath.rfind(L'\\');
+        std::wstring hermesDir = (sep2 != std::wstring::npos) ? g_hermesExePath.substr(0, sep2) : L"";
+        if (!hermesDir.empty()) {
+            std::wstring cfgPath = hermesDir + L"\\HermesProxy.config";
+            HANDLE hf = CreateFileW(cfgPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hf != INVALID_HANDLE_VALUE) {
+                DWORD sz = GetFileSize(hf, nullptr);
+                std::string cfg(sz, '\0');
+                DWORD rd = 0;
+                ReadFile(hf, cfg.data(), sz, &rd, nullptr);
+                CloseHandle(hf);
+                cfg.resize(rd);
+                auto readCfgInt = [&](const char* key) -> int {
+                    std::string search = std::string("key=\"") + key + "\"";
+                    size_t p = cfg.find(search);
+                    if (p == std::string::npos) return -1;
+                    size_t vp = cfg.find("value=\"", p);
+                    if (vp == std::string::npos) return -1;
+                    vp += 7;
+                    size_t ve = cfg.find('"', vp);
+                    if (ve == std::string::npos) return -1;
+                    try { return std::stoi(cfg.substr(vp, ve - vp)); } catch(...) { return -1; }
+                };
+                if (g_hermesServerSpellDelay < 0) g_hermesServerSpellDelay = readCfgInt("ServerSpellDelay");
+                if (g_hermesClientSpellDelay < 0) g_hermesClientSpellDelay = readCfgInt("ClientSpellDelay");
+                SaveConfig();
+            }
+        }
     }
 }
 
@@ -1200,9 +1256,24 @@ static void LaunchExe(const std::wstring& exe, const std::wstring& args)
     if (h) CloseHandle(h);
 }
 
+static std::wstring BuildHermesArgs()
+{
+    std::wstring args;
+    auto add = [&](const wchar_t* name, int val) {
+        if (val < 0) return;
+        if (!args.empty()) args += L' ';
+        wchar_t buf[64]; swprintf_s(buf, L"--set %s=%d", name, val);
+        args += buf;
+    };
+    add(L"ServerSpellDelay", g_hermesServerSpellDelay);
+    add(L"ClientSpellDelay", g_hermesClientSpellDelay);
+    add(L"SpellQueueWindow", g_hermesSpellQueueWindow);
+    return args;
+}
+
 static void LaunchHermes(const std::wstring& exe)
 {
-    LaunchExe(exe, L"");
+    LaunchExe(exe, BuildHermesArgs());
 }
 
 static COLORREF Ansi256ToColor(int idx)
@@ -1327,7 +1398,9 @@ static void LaunchHermesWithPipe(const std::wstring& exe)
     si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
 
     PROCESS_INFORMATION pi = {};
+    std::wstring hermesArgs = BuildHermesArgs();
     std::wstring cmd = L"\"" + exe + L"\"";
+    if (!hermesArgs.empty()) cmd += L' ' + hermesArgs;
     std::wstring dir = exe.substr(0, exe.rfind(L'\\'));
     BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr,
                              TRUE, CREATE_NO_WINDOW, nullptr,
@@ -1574,11 +1647,23 @@ static void PostRecordSettingsStateToWebView()
 static void PostGeneralSettingsStateToWebView()
 {
     if (!g_webview || !g_wvReady) return;
-    wchar_t json[256];
-    swprintf_s(json,
+    wchar_t ssd[16], csd[16];
+    if (g_hermesServerSpellDelay < 0) wcscpy_s(ssd, L"null");
+    else swprintf_s(ssd, L"%d", g_hermesServerSpellDelay);
+    if (g_hermesClientSpellDelay < 0) wcscpy_s(csd, L"null");
+    else swprintf_s(csd, L"%d", g_hermesClientSpellDelay);
+    wchar_t json[512];
+    swprintf_s(json, 512,
         L"{\"type\":\"generalSettingsState\","
-        L"\"showRecordingNotifications\":%s}",
-        g_showRecordingNotifications ? L"true" : L"false");
+        L"\"showRecordingNotifications\":%s,"
+        L"\"clientType\":%d,"
+        L"\"hermesServerSpellDelay\":%s,"
+        L"\"hermesClientSpellDelay\":%s,"
+        L"\"hermesSpellQueueWindow\":%d}",
+        g_showRecordingNotifications ? L"true" : L"false",
+        (int)g_clientType,
+        ssd, csd,
+        g_hermesSpellQueueWindow);
     g_webview->PostWebMessageAsJson(json);
 }
 
@@ -4512,6 +4597,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_showRecordingNotifications = JsonBool(body, "showRecordingNotifications", g_showRecordingNotifications);
         RB_SetShowNotifications(g_showRecordingNotifications);
+        g_hermesServerSpellDelay = JsonInt(body, "hermesServerSpellDelay", -1);
+        g_hermesClientSpellDelay = JsonInt(body, "hermesClientSpellDelay", -1);
+        g_hermesSpellQueueWindow = JsonInt(body, "hermesSpellQueueWindow", g_hermesSpellQueueWindow);
+        if (g_hermesSpellQueueWindow < 0) g_hermesSpellQueueWindow = 300;
         SaveConfig();
         if (g_webview && g_wvReady)
             g_webview->PostWebMessageAsJson(L"{\"type\":\"hideModal\"}");
@@ -5288,7 +5377,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
     AppendLog(L"=== Launcher started (version %hs)%s%s ===", LAUNCHER_VERSION_STR,
         g_testMode ? " [--test]" : "", g_devMode ? " [--dev]" : "");
     RB_SetLogPath(g_logPath);
-    if (IsDevBuild() || g_testMode)
+    if (/*IsDevBuild() || */g_testMode)
         ShellExecuteW(nullptr, L"open", g_logPath.c_str(), nullptr, nullptr, SW_SHOW);
 
     LoadConfig();

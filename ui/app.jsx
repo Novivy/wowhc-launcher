@@ -530,15 +530,43 @@ const GeneralSettingsModal = ({ settings, onAction }) => {
   const [showRecordingNotifications, setShowRecordingNotifications] = React.useState(
     ini.showRecordingNotifications !== undefined ? ini.showRecordingNotifications : false
   );
+  const [serverSpellDelay, setServerSpellDelay] = React.useState(
+    (ini.hermesServerSpellDelay !== null && ini.hermesServerSpellDelay !== undefined)
+      ? String(ini.hermesServerSpellDelay) : ''
+  );
+  const [clientSpellDelay, setClientSpellDelay] = React.useState(
+    (ini.hermesClientSpellDelay !== null && ini.hermesClientSpellDelay !== undefined)
+      ? String(ini.hermesClientSpellDelay) : ''
+  );
+  const [spellQueueWindow, setSpellQueueWindow] = React.useState(
+    String(ini.hermesSpellQueueWindow !== undefined ? ini.hermesSpellQueueWindow : 300)
+  );
 
+  const isHermes = ini.clientType === 1;
   const sep = { height: 1, background: T.line, margin: '14px 0', opacity: 0.5 };
+  const lbl = { fontSize: 10, color: T.textFaint, marginBottom: 4, letterSpacing: '0.08em', textTransform: 'uppercase' };
+  const inp = {
+    background: T.bg2, border: '1px solid ' + T.line, color: T.text,
+    height: 28, padding: '0 8px', fontSize: 12, fontFamily: 'inherit',
+    outline: 'none', boxSizing: 'border-box', width: '100%',
+  };
+  const inpHalf = {
+    background: T.bg2, border: '1px solid ' + T.line, color: T.text,
+    height: 28, padding: '0 8px', fontSize: 12, fontFamily: 'inherit',
+    outline: 'none', boxSizing: 'border-box', width: '50%',
+  };
 
   function payload() {
-    return { showRecordingNotifications };
+    return {
+      showRecordingNotifications,
+      hermesServerSpellDelay: serverSpellDelay === '' ? null : (parseInt(serverSpellDelay) || 0),
+      hermesClientSpellDelay: clientSpellDelay === '' ? null : (parseInt(clientSpellDelay) || 0),
+      hermesSpellQueueWindow: Math.max(0, parseInt(spellQueueWindow) || 300),
+    };
   }
 
   return (
-    <ModalOverlay width={400}>
+    <ModalOverlay width={420}>
       <ModalTitle text="General Settings" />
 
       <div style={{ marginBottom: 4, fontSize: 10, color: T.textFaint, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
@@ -551,6 +579,46 @@ const GeneralSettingsModal = ({ settings, onAction }) => {
           label="Show WOW-HC notifications (top right toasts)"
         />
       </div>
+
+      {isHermes && <>
+        <div style={sep} />
+        <div style={{ marginBottom: 10, fontSize: 10, color: T.textFaint, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+          HermesProxy Settings
+        </div>
+
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={{marginBottom: 4, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }} >Spell Queue Window (ms)</div>
+          <input type="number" min={0} value={spellQueueWindow}
+                 onChange={e => setSpellQueueWindow(e.target.value)}
+                 style={inpHalf} />
+          <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
+              Time window in ms to queue your next spell before the current cast finishes (default = 300, 0 = disabled)
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={{marginBottom: 4, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Server Spell Delay (ms)</div>
+          <input type="number" min={0} value={serverSpellDelay}
+            onChange={e => setServerSpellDelay(e.target.value)}
+            placeholder="UNSET (default)"
+            style={inpHalf} />
+          <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
+              Delays outgoing casts to fix visual glowing hands when spamming spells (default = 15, 0 = disabled)
+          </div>
+        </div>
+
+        <div style={{ marginBottom: 10 }}>
+          <div style={{marginBottom: 4, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }} >Client Spell Delay (ms)</div>
+          <input type="number" min={0} value={clientSpellDelay}
+            onChange={e => setClientSpellDelay(e.target.value)}
+            placeholder="UNSET (default)"
+            style={inpHalf} />
+          <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
+              Delays incoming spell responses to fix lingering glow effects on instant casts (default = 15, 0 = disabled)
+          </div>
+        </div>
+      </>}
 
       <div style={sep} />
 
