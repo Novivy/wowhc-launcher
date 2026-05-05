@@ -276,6 +276,14 @@ function parseAnsi(text) {
 
 // ── HermesProxy console overlay ────────────────────────────────────────────────
 const ConsoleOverlay = React.forwardRef(function ConsoleOverlay({ lines }, ref) {
+  var [copied, setCopied] = React.useState(false);
+  function handleCopy() {
+    var text = lines.map(function(l) { return l.replace(/\x1b\[[0-9;]*m/g, ''); }).join('\n');
+    navigator.clipboard.writeText(text).then(function() {
+      setCopied(true);
+      setTimeout(function() { setCopied(false); }, 1500);
+    });
+  }
   return (
     <div style={{
       position: 'absolute', bottom: 0, left: 0, right: 0,
@@ -284,8 +292,11 @@ const ConsoleOverlay = React.forwardRef(function ConsoleOverlay({ lines }, ref) 
       display: 'flex', flexDirection: 'column', overflow: 'hidden',
       fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 10, zIndex: 10,
     }}>
-      <div style={{ padding: '4px 10px', borderBottom: '1px solid rgba(180,130,60,0.1)', color: T.textFaint, fontSize: 11, letterSpacing: '0.1em', flexShrink: 0 }}>
-        HERMESPROXY OUTPUT
+      <div style={{ padding: '4px 10px', borderBottom: '1px solid rgba(180,130,60,0.1)', color: T.textFaint, fontSize: 11, letterSpacing: '0.1em', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span>HERMESPROXY OUTPUT</span>
+        <button onClick={handleCopy} title="Copy all output" style={{ background: 'none', border: '1px solid rgba(180,130,60,0.25)', color: copied ? '#7dbb5a' : T.textFaint, fontFamily: 'inherit', fontSize: 10, letterSpacing: '0.05em', padding: '1px 7px', cursor: 'pointer', lineHeight: 1.6 }}>
+          {copied ? 'COPIED' : 'COPY OUTPUT'}
+        </button>
       </div>
       <div ref={ref} style={{ flex: 1, overflowY: 'auto', padding: '5px 10px' }}>
         {lines.map(function(l, i) {
