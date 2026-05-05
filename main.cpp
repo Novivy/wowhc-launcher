@@ -233,6 +233,7 @@ static int        g_hermesServerSpellDelay = -1; // -1 = UNSET (not passed to He
 static int        g_hermesClientSpellDelay = -1; // -1 = UNSET
 static int        g_hermesSpellQueueWindow = 300;
 static std::wstring g_customLaunchExe;            // empty = use default for current client type
+static bool         g_promptOnKillProcess = false; // ask before killing existing game processes
 
 // HermesProxy pipe
 static HANDLE g_hermesProcess  = nullptr;
@@ -324,6 +325,7 @@ static void SaveConfig()
     wchar_t riBuf[8]; swprintf_s(riBuf, L"%d", g_realmIndex);
     WritePrivateProfileStringW(L"Launcher", L"RealmIndex", riBuf, ini);
     WritePrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", g_showRecordingNotifications ? L"1" : L"0", ini);
+    WritePrivateProfileStringW(L"Launcher", L"PromptOnKillProcess", g_promptOnKillProcess ? L"1" : L"0", ini);
     {
         wchar_t sb[16];
         swprintf_s(sb, L"%d", g_hermesServerSpellDelay);
@@ -378,6 +380,11 @@ static void LoadConfig()
         GetPrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", L"1", rn, 8, ini);
         g_showRecordingNotifications = (_wtoi(rn) != 0);
         RB_SetShowNotifications(g_showRecordingNotifications);
+    }
+    {
+        wchar_t rn[8] = {};
+        GetPrivateProfileStringW(L"Launcher", L"PromptOnKillProcess", L"0", rn, 8, ini);
+        g_promptOnKillProcess = (_wtoi(rn) != 0);
     }
     {
         wchar_t sb[16] = {};
@@ -1681,7 +1688,8 @@ static void PostGeneralSettingsStateToWebView()
         L",\"hermesClientSpellDelay\":" + csd +
         L",\"hermesSpellQueueWindow\":" + std::to_wstring(g_hermesSpellQueueWindow) +
         L",\"defaultLaunchExe\":\"" + JsonEscW(defaultExe) + L"\"" +
-        L",\"customLaunchExe\":\"" + JsonEscW(g_customLaunchExe) + L"\"}";
+        L",\"customLaunchExe\":\"" + JsonEscW(g_customLaunchExe) + L"\"" +
+        L",\"promptOnKillProcess\":" + (g_promptOnKillProcess ? L"true" : L"false") + L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
@@ -4268,13 +4276,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     std::wstring hermesExe  = g_hermesExePath;
                     std::wstring arctiumExe = g_customLaunchExe.empty() ? g_arctiumExePath : g_customLaunchExe;
                     std::wstring clientPath = g_clientPath;
-                    std::thread([hermesExe, arctiumExe, clientPath]() {
+                    bool promptOnKill = g_promptOnKillProcess;
+                    std::thread([hermesExe, arctiumExe, clientPath, promptOnKill]() {
 
-                        if (IsProcessRunning(L"WowClassic.exe")) {
+                        bool wowRunning    = IsProcessRunning(L"WowClassic.exe");
+                        bool hermesRunning = IsProcessRunning(L"HermesProxy.exe");
+                        if ((wowRunning || hermesRunning) && promptOnKill) {
+                            int ans = MessageBoxW(g_hwnd,
+                                L"A game session is already running.\r\n\r\n"
+                                L"Do you want to close it and start a new one?",
+                                L"Game Already Running", MB_YESNO | MB_ICONQUESTION);
+                            if (ans != IDYES) {
+                                PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                                return;
+                            }
+                        }
+                        if (wowRunning) {
                             KillProcess(L"WowClassic.exe");
                             Sleep(500);
                         }
-                        if (IsProcessRunning(L"HermesProxy.exe")) {
+                        if (hermesRunning) {
                             KillProcess(L"HermesProxy.exe");
                             Sleep(500);
                         }
@@ -4621,6 +4642,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_showRecordingNotifications = JsonBool(body, "showRecordingNotifications", g_showRecordingNotifications);
         RB_SetShowNotifications(g_showRecordingNotifications);
+        g_promptOnKillProcess = JsonBool(body, "promptOnKillProcess", g_promptOnKillProcess);
         g_hermesServerSpellDelay = JsonInt(body, "hermesServerSpellDelay", -1);
         g_hermesClientSpellDelay = JsonInt(body, "hermesClientSpellDelay", -1);
         g_hermesSpellQueueWindow = JsonInt(body, "hermesSpellQueueWindow", g_hermesSpellQueueWindow);

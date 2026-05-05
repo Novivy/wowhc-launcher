@@ -544,6 +544,9 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
     String(ini.hermesSpellQueueWindow !== undefined ? ini.hermesSpellQueueWindow : 300)
   );
   const [exePath, setExePath] = React.useState(ini.customLaunchExe || ini.defaultLaunchExe || '');
+  const [promptOnKillProcess, setPromptOnKillProcess] = React.useState(
+    ini.promptOnKillProcess !== undefined ? ini.promptOnKillProcess : false
+  );
 
   React.useEffect(() => {
     if (pendingExe) { setExePath(pendingExe); onClearPendingExe && onClearPendingExe(); }
@@ -556,6 +559,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
     setClientSpellDelay('15');
     setSpellQueueWindow('300');
     setExePath(ini.defaultLaunchExe || '');
+    setPromptOnKillProcess(false);
     onClearResetConfirmed && onClearResetConfirmed();
   }, [resetConfirmed]);
 
@@ -576,6 +580,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
   function payload() {
     return {
       showRecordingNotifications,
+      promptOnKillProcess,
       hermesServerSpellDelay: serverSpellDelay === '' ? null : (parseInt(serverSpellDelay) || 0),
       hermesClientSpellDelay: clientSpellDelay === '' ? null : (parseInt(clientSpellDelay) || 0),
       hermesSpellQueueWindow: Math.max(0, parseInt(spellQueueWindow) || 300),
@@ -595,6 +600,18 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
           checked={showRecordingNotifications}
           onChange={e => setShowRecordingNotifications(e.target.checked)}
           label="Show WOW-HC notifications (top right toasts)"
+        />
+      </div>
+
+      <div style={sep} />
+      <div style={{ marginBottom: 4, fontSize: 10, color: T.textFaint, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+        Game Launch
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 6 }}>
+        <Checkbox
+          checked={promptOnKillProcess}
+          onChange={e => setPromptOnKillProcess(e.target.checked)}
+          label="Ask before closing a running game session"
         />
       </div>
 
@@ -1045,7 +1062,7 @@ const App = ({ isNative }) => {
             }});
           }); })}
 
-          <div style={{ display: 'flex', justifyContent: 'center', padding: '9px 0px 1px' }}>
+          <div style={{ display: 'flex', justifyContent: 'center', padding: '9px 0px 2px' }}>
             <img src="assets/logo.png" alt="WoW Hardcore"
               style={{ width: 150, height: 'auto', filter: 'drop-shadow(0 2px 6px rgba(0,0,0,0.8))', imageRendering: 'auto' }}/>
           </div>
