@@ -16,6 +16,7 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <functional>
 #include <fstream>
 #include <sstream>
@@ -235,6 +236,12 @@ static int        g_hermesSpellQueueWindow = 300;
 static std::wstring g_customLaunchExe;            // empty = use default for current client type
 static bool         g_promptOnKillProcess = false; // ask before killing existing game processes
 
+// Server-stats cache — fetched by FetchLiveData (10-min timer), reused by RunThirdPartyAddonUpdates
+static std::string            g_cachedStatsJson;
+static std::mutex             g_statsJsonMtx;
+static std::atomic<long long> g_serverCacheClearTime{0}; // launcher_cache_clear from server-stats
+static long long              g_lastCacheClearTime = 0;  // persisted in ini
+
 // HermesProxy pipe
 static HANDLE g_hermesProcess  = nullptr;
 static HANDLE g_hermesPipeRead = nullptr;
@@ -336,6 +343,10 @@ static void SaveConfig()
         WritePrivateProfileStringW(L"Launcher", L"HermesSpellQueueWindow", sb, ini);
     }
     WritePrivateProfileStringW(L"Launcher", L"CustomLaunchExe", g_customLaunchExe.c_str(), ini);
+    {
+        wchar_t tb[32]; swprintf_s(tb, L"%I64d", g_lastCacheClearTime);
+        WritePrivateProfileStringW(L"Launcher", L"LastCacheClearTime", tb, ini);
+    }
 }
 
 static void LoadConfig()
@@ -354,6 +365,11 @@ static void LoadConfig()
     g_arctiumExePath = Rd(L"ArticulumExePath");
     g_wowTweakedExePath = Rd(L"WowTweakedExePath");
     g_customLaunchExe   = Rd(L"CustomLaunchExe");
+    {
+        wchar_t tb[32] = {};
+        GetPrivateProfileStringW(L"Launcher", L"LastCacheClearTime", L"0", tb, 32, ini);
+        g_lastCacheClearTime = _wtoi64(tb);
+    }
     {
         wchar_t ctBuf[8] = {};
         GetPrivateProfileStringW(L"Launcher", L"ClientType", L"0", ctBuf, 8, ini);
@@ -548,6 +564,21 @@ static int JsonInt(const std::string& json, const std::string& key, int def = 0)
     while (pos < json.size() && isdigit((unsigned char)json[pos])) pos++;
     if (pos == start) return def;
     try { return std::stoi(json.substr(start, pos - start)); } catch (...) { return def; }
+}
+
+static long long JsonInt64(const std::string& json, const std::string& key, long long def = 0)
+{
+    auto pos = json.find("\"" + key + "\"");
+    if (pos == std::string::npos) return def;
+    pos = json.find(':', pos);
+    if (pos == std::string::npos) return def;
+    while (++pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) {}
+    if (pos >= json.size()) return def;
+    size_t start = pos;
+    if (json[start] == '-') pos++;
+    while (pos < json.size() && isdigit((unsigned char)json[pos])) pos++;
+    if (pos == start) return def;
+    try { return std::stoll(json.substr(start, pos - start)); } catch (...) { return def; }
 }
 
 static std::string JsonString(const std::string& json, const std::string& key)
@@ -802,14 +833,34 @@ static void PostLiveDataMsg(const wchar_t* type, const std::string& rawJsonUtf8)
     PostMessageW(g_hwnd, WM_LIVE_DATA_JSON, 0, (LPARAM)msg);
 }
 
+static std::string FetchAndCacheStatsJson()
+{
+    const std::wstring ts  = std::to_wstring((long long)time(nullptr));
+    const std::wstring url = L"https://wow-hc.com/json/server-stats.json?api_version=126&front_realm=1&_=" + ts;
+    std::string json = HttpGetSimple(url);
+    if (!json.empty()) {
+        long long cacheClearTs = JsonInt64(json, "launcher_cache_clear");
+        if (cacheClearTs > 0) g_serverCacheClearTime.store(cacheClearTs);
+        std::lock_guard<std::mutex> lk(g_statsJsonMtx);
+        g_cachedStatsJson = json;
+    }
+    return json;
+}
+
+static std::string GetCachedStatsJson()
+{
+    std::lock_guard<std::mutex> lk(g_statsJsonMtx);
+    return g_cachedStatsJson;
+}
+
 static void FetchLiveData()
 {
     const std::wstring ts = std::to_wstring((long long)time(nullptr));
     const std::wstring base = L"https://wow-hc.com/json/";
     const std::wstring qs   = L"?api_version=126&front_realm=1&_=" + ts;
-    PostLiveDataMsg(L"serverStats", HttpGetSimple(base + L"server-stats.json" + qs));
-    PostLiveDataMsg(L"areasData",   HttpGetSimple(base + L"areas.json"        + qs));
-    PostLiveDataMsg(L"newsData",    HttpGetSimple(base + L"last-news.json"     + qs));
+    PostLiveDataMsg(L"serverStats", FetchAndCacheStatsJson());
+    PostLiveDataMsg(L"areasData",   HttpGetSimple(base + L"areas.json"    + qs));
+    PostLiveDataMsg(L"newsData",    HttpGetSimple(base + L"last-news.json" + qs));
 }
 
 static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
@@ -2366,7 +2417,8 @@ static void RunThirdPartyAddonUpdates()
     //if (IsDevBuild()) return;
     if (g_clientPath.empty()) return;
 
-    std::string statsJson = HttpGetSimple(L"https://wow-hc.com/json/server-stats.json");
+    std::string statsJson = GetCachedStatsJson();
+    if (statsJson.empty()) statsJson = FetchAndCacheStatsJson();
     if (statsJson.empty()) return;
 
     std::string updatesBlock = JsonExtractBlock(statsJson, "addons_updates");
@@ -3859,6 +3911,31 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
     }
 }
 
+static void ClearWowCacheIfNeeded()
+{
+    long long serverTs = g_serverCacheClearTime.load();
+    if (serverTs == 0 || serverTs <= g_lastCacheClearTime) return;
+    if (g_clientPath.empty()) return;
+
+    // Derive exe directory: use actual exe path for CT_112, fall back to _classic_era_
+    std::wstring exeDir;
+    if (g_clientType == CT_112 && !g_wowTweakedExePath.empty()) {
+        size_t sep = g_wowTweakedExePath.rfind(L'\\');
+        if (sep != std::wstring::npos) exeDir = g_wowTweakedExePath.substr(0, sep);
+    }
+    if (exeDir.empty()) exeDir = g_clientPath + L"\\_classic_era_";
+
+    const wchar_t* folder = (g_clientType == CT_112) ? L"WDB" : L"Cache";
+    std::wstring cachePath = exeDir + L"\\" + folder;
+
+    if (GetFileAttributesW(cachePath.c_str()) != INVALID_FILE_ATTRIBUTES)
+        DeleteDirRecursive(cachePath);
+
+    g_lastCacheClearTime = serverTs;
+    wchar_t tb[32]; swprintf_s(tb, L"%I64d", g_lastCacheClearTime);
+    WritePrivateProfileStringW(L"Launcher", L"LastCacheClearTime", tb, ConfigPath().c_str());
+}
+
 // ── Window procedure ───────────────────────────────────────────────────────────
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -4101,15 +4178,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                             MessageBoxW(hwnd, mbMsg.c_str(), L"Missing Files", MB_OK | MB_ICONWARNING);
                                         } else {
                                             bool pathChanged    = (g_clientPath != info.clientDir);
+                                            bool typeChanged    = (g_clientType != CT_114);
                                             g_clientPath        = info.clientDir;
                                             g_installPath       = info.clientDir;
                                             g_hermesExePath     = foundHermes;
                                             g_arctiumExePath    = foundArctium;
                                             g_clientType        = CT_114;
                                             g_wowTweakedExePath.clear();
+                                            if (pathChanged || typeChanged) g_customLaunchExe.clear();
                                             PostStateToWebView();
-                                            if (pathChanged) {
-                                                ResetLastCheckTime();
+                                            if (pathChanged || typeChanged) {
+                                                if (pathChanged) ResetLastCheckTime();
                                                 SaveConfig();
                                             }
                                             if (!g_workerBusy.load() && (pathChanged || !g_playReady.load())) {
@@ -4136,15 +4215,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
                                     if (versionOk) {
                                         bool pathChanged    = (g_clientPath != info.clientDir);
+                                        bool typeChanged    = (g_clientType != CT_112);
                                         g_clientPath        = info.clientDir;
                                         g_installPath       = info.clientDir;
                                         g_clientType        = CT_112;
                                         g_hermesExePath.clear();
                                         g_arctiumExePath.clear();
                                         g_wowTweakedExePath = info.wowExePath;
+                                        if (pathChanged || typeChanged) g_customLaunchExe.clear();
                                         PostStateToWebView();
-                                        if (pathChanged) {
-                                            ResetLastCheckTime();
+                                        if (pathChanged || typeChanged) {
+                                            if (pathChanged) ResetLastCheckTime();
                                             SaveConfig();
                                         }
                                         if (!g_workerBusy.load() && (pathChanged || !g_playReady.load())) {
@@ -4237,6 +4318,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     RB_Start();
                 }
                 PostStatus(WS_LAUNCHING);
+                ClearWowCacheIfNeeded();
 
                 if (g_clientType == CT_112) {
                     // ── 1.12.1: launch Wow_tweaked.exe directly ─────────────
