@@ -855,6 +855,8 @@ const App = ({ isNative }) => {
   const [booting, setBooting] = React.useState(isNative);
   const [heroHov, setHeroHov] = React.useState(false);
   const [statsCountdown, setStatsCountdown] = React.useState('10:00');
+  const [deathsAtBottom, setDeathsAtBottom] = React.useState(false);
+  const [newsAtBottom,   setNewsAtBottom]   = React.useState(false);
 
   React.useEffect(function() {
     var s = document.createElement('style');
@@ -1193,7 +1195,7 @@ const App = ({ isNative }) => {
           <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', minHeight: 0 }}>
 
             {/* Recent Deaths */}
-            <div style={{ borderRight: '1px solid ' + T.line, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+            <div style={{ borderRight: '1px solid ' + T.line, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', position: 'relative' }}>
               <div style={{ padding: '5px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid ' + T.line2, background: 'rgba(154,52,34,0.08)', flexShrink: 0 }}>
                 <span style={{ fontSize: 11, letterSpacing: '0.14em', color: T.blood, fontWeight: 700 }}>RECENT DEATHS</span>
                 <div style={{ textAlign: 'right', fontFamily: 'Inter, system-ui, sans-serif', lineHeight: 1.3 }} title="Recent deaths, Online players, and latest news are fetched from the server every 10 minutes">
@@ -1201,7 +1203,7 @@ const App = ({ isNative }) => {
                   <div style={{ fontSize: 10, color: '#bdd1bb', letterSpacing: '0.04em' }}>{statsCountdown}</div>
                 </div>
               </div>
-              <div style={{ flex: 1, overflowY: 'auto' }}>
+              <div style={{ flex: 1, overflowY: 'auto' }} onScroll={function(e) { var el = e.currentTarget; setDeathsAtBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 2); }}>
                 {fallen.map(function(f, i) {
                   return React.createElement('div', { key: i, style: {
                     padding: '6px 12px',
@@ -1228,6 +1230,7 @@ const App = ({ isNative }) => {
                   onMouseLeave: function(e) { e.currentTarget.style.color = T.textFaint; },
                 }, 'View Leaderboard')}
               </div>
+              <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 160, background: 'linear-gradient(to bottom, transparent, ' + T.bg0 + ')', pointerEvents: 'none', zIndex: 1, opacity: deathsAtBottom ? 0 : 1, transition: 'opacity 250ms' }} />
             </div>
 
             {/* Last News + optional HermesProxy console overlay */}
@@ -1247,7 +1250,7 @@ const App = ({ isNative }) => {
                   <img src="assets/icon.png" alt="" style={{ width: 14, height: 14, flexShrink: 0, objectFit: 'contain' }}/>
                 </div>
               </div>
-              <div style={{ flex: 1, overflowY: 'auto', padding: '0px 0' }}>
+              <div style={{ flex: 1, overflowY: 'auto', padding: '0px 0' }} onScroll={function(e) { var el = e.currentTarget; setNewsAtBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 2); }}>
                 {olderNews.map(function(n, i) {
                   return React.createElement('a', { key: i,
                     onClick: function() { if (n.slug) onAction('openUrl', { url: 'https://wow-hc.com/forums/' + n.slug }); },
@@ -1282,6 +1285,7 @@ const App = ({ isNative }) => {
                 }, 'Read More News')}
               </div>
 
+              <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 48, background: 'linear-gradient(to bottom, transparent, ' + T.bg0 + ')', pointerEvents: 'none', zIndex: 1, opacity: newsAtBottom ? 0 : 1, transition: 'opacity 250ms' }} />
               {showConsole && React.createElement(ConsoleOverlay, { lines: hermesLines, ref: consoleScrollRef })}
             </div>
           </div>
