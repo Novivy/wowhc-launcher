@@ -4,7 +4,7 @@
 const T = {
   bg0: "#0a0806", bg1: "#14100a", bg2: "#1d1810", bg3: "#0a0e1a", plate: "#221a12", chrome: "#070504",
   line: "rgba(180,130,60,0.20)", line2: "rgba(180,130,60,0.10)",
-  text: "#ecdab0", textDim: "#a08868", textFaint: "#6a5638", textFaint2: "#a58555",
+  text: "#ecdab0", textDim: "#a08868", textFaint: "#856d49", textFaint2: "#a58555",
   amber: "#e0a04a",  amber2: "#c3a173", lightBlue: "#498dbf", amberGlow: "rgba(224,160,74,0.5)", ember: "#c84a1a", blood: "#9a3422", fluid: "#228e9a",
 };
 
@@ -90,10 +90,12 @@ const PathIconBtn = ({ title, onClick, icon, disabled }) => {
       onMouseLeave={() => setHov(false)}
       style={{
         flexShrink: 0, width: 25, height: 25, padding: 0,
-        background: 'transparent', border: '1px solid ' + (!disabled && hov ? T.amber : T.line),
-        color: !disabled && hov ? T.amber : T.textDim, cursor: disabled ? 'not-allowed' : 'pointer',
+        background: !disabled && hov ? 'rgba(180,130,60,0.10)' : 'transparent',
+        border: '1px solid ' + (disabled ? T.line : (hov ? 'rgba(180,130,60,0.65)' : T.amber)),
+        color: disabled ? T.textDim : (hov ? T.amber : T.amber2),
+        cursor: disabled ? 'not-allowed' : 'pointer',
         display: 'grid', placeItems: 'center',
-        transition: 'color 140ms, border-color 140ms',
+        transition: 'color 140ms, border-color 140ms, background 140ms',
         opacity: disabled ? 0.35 : 1,
       }}>
       {React.createElement(Icon, { k: icon, size: 12 })}
@@ -124,7 +126,7 @@ const BottomBar = ({ state, onAction, booting }) => {
           {React.createElement(ActionBtn, { icon: 'save',   iconColor: T.amber, label: 'Save Replay',    title: 'Save the current replay buffer to a video file', onClick: () => onAction('saveReplay'),         active: false, disabled: !canSaveReplay })}
           {React.createElement(ActionBtn, { icon: 'upload', iconColor: T.amber, label: 'Upload Replays', title: 'Upload recorded replays to Google Drive',         onClick: () => onAction('uploadReplays'),      active: false, disabled: ctrlDisabled })}
           <span style={{ flex: 1 }}/>
-          {React.createElement(ActionBtn, { icon: 'cog',    iconColor: T.amber, label: '',               title: 'Video recording settings',                       onClick: () => onAction('openRecordSettings'), active: false, disabled: ctrlDisabled })}
+          {React.createElement(ActionBtn, { icon: 'cog',    iconColor: T.amber, label: '',               title: 'Video Recorder Settings',                       onClick: () => onAction('openRecordSettings'), active: false, disabled: ctrlDisabled })}
           {React.createElement(ActionBtn, { icon: 'rec',    iconColor: T.blood,
             label: isRecording ? 'Stop Recording' : 'Start Recording',
             title: isRecording ? 'Stop the replay buffer recording' : 'Start recording your recent gameplay for replays',
@@ -133,7 +135,7 @@ const BottomBar = ({ state, onAction, booting }) => {
         </div>
 
         {/* Path row */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop:7, minWidth: 0, justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop:9, minWidth: 0, justifyContent: 'flex-end' }}>
           <span style={{
             color: T.textFaint, fontFamily: 'ui-monospace, monospace', fontSize: 12,
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 6,
@@ -322,14 +324,14 @@ const ModalTitle = ({ text }) => (
     React.createElement('span', { style: { fontFamily: '"Cinzel", Georgia, serif', fontSize: 13, fontWeight: 600, color: T.text, letterSpacing: '0.06em', textTransform: 'uppercase' } }, text))
 );
 
-const ModalBtn = ({ label, onClick, secondary, disabled }) => {
+const ModalBtn = ({ label, onClick, secondary, disabled, style: styleOverride }) => {
   var [hov, setHov] = React.useState(false);
   return React.createElement('button', {
     onClick: onClick,
     disabled: !!disabled,
     onMouseEnter: function() { setHov(true); },
     onMouseLeave: function() { setHov(false); },
-    style: {
+    style: Object.assign({
       height: 32, padding: '0 16px', fontFamily: 'inherit', cursor: disabled ? 'not-allowed' : 'pointer',
       background: secondary ? (hov ? T.bg2 : T.bg1) : (hov ? T.plate : T.bg2),
       border: '1px solid ' + (secondary
@@ -339,7 +341,7 @@ const ModalBtn = ({ label, onClick, secondary, disabled }) => {
       fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600,
       transition: 'background 120ms, border-color 120ms, color 120ms',
       opacity: disabled ? 0.4 : 1,
-    }
+    }, styleOverride)
   }, label);
 };
 
@@ -525,7 +527,7 @@ const ToastNotification = ({ text, onDone }) => (
 );
 
 // ── General Settings Modal ─────────────────────────────────────────────────────
-const GeneralSettingsModal = ({ settings, onAction }) => {
+const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingExe, resetConfirmed, onClearResetConfirmed }) => {
   const ini = settings || {};
   const [showRecordingNotifications, setShowRecordingNotifications] = React.useState(
     ini.showRecordingNotifications !== undefined ? ini.showRecordingNotifications : false
@@ -541,6 +543,21 @@ const GeneralSettingsModal = ({ settings, onAction }) => {
   const [spellQueueWindow, setSpellQueueWindow] = React.useState(
     String(ini.hermesSpellQueueWindow !== undefined ? ini.hermesSpellQueueWindow : 300)
   );
+  const [exePath, setExePath] = React.useState(ini.customLaunchExe || ini.defaultLaunchExe || '');
+
+  React.useEffect(() => {
+    if (pendingExe) { setExePath(pendingExe); onClearPendingExe && onClearPendingExe(); }
+  }, [pendingExe]);
+
+  React.useEffect(() => {
+    if (!resetConfirmed) return;
+    setShowRecordingNotifications(true);
+    setServerSpellDelay('15');
+    setClientSpellDelay('15');
+    setSpellQueueWindow('300');
+    setExePath(ini.defaultLaunchExe || '');
+    onClearResetConfirmed && onClearResetConfirmed();
+  }, [resetConfirmed]);
 
   const isHermes = ini.clientType === 1;
   const sep = { height: 1, background: T.line, margin: '14px 0', opacity: 0.5 };
@@ -562,11 +579,12 @@ const GeneralSettingsModal = ({ settings, onAction }) => {
       hermesServerSpellDelay: serverSpellDelay === '' ? null : (parseInt(serverSpellDelay) || 0),
       hermesClientSpellDelay: clientSpellDelay === '' ? null : (parseInt(clientSpellDelay) || 0),
       hermesSpellQueueWindow: Math.max(0, parseInt(spellQueueWindow) || 300),
+      customLaunchExe: exePath,
     };
   }
 
   return (
-    <ModalOverlay width={420}>
+    <ModalOverlay width={500}>
       <ModalTitle text="General Settings" />
 
       <div style={{ marginBottom: 4, fontSize: 10, color: T.textFaint, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
@@ -586,50 +604,74 @@ const GeneralSettingsModal = ({ settings, onAction }) => {
           HermesProxy Settings
         </div>
 
-
         <div style={{ marginBottom: 10 }}>
-          <div style={{marginBottom: 4, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }} >Spell Queue Window (ms)</div>
+          <div style={{marginBottom: 4, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Spell Queue Window (ms)</div>
           <input type="number" min={0} value={spellQueueWindow}
                  onChange={e => setSpellQueueWindow(e.target.value)}
                  style={inpHalf} />
           <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
-              Time window in ms to queue your next spell before the current cast finishes (default = 300, 0 = disabled)
+            Time window to queue your next spell before the current cast finishes (0 = disabled)
           </div>
         </div>
 
         <div style={{ marginBottom: 10 }}>
-          <div style={{marginBottom: 4, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Server Spell Delay (ms)</div>
-          <input type="number" min={0} value={serverSpellDelay}
-            onChange={e => setServerSpellDelay(e.target.value)}
-            placeholder="UNSET (default)"
-            style={inpHalf} />
-          <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
-              Delays outgoing casts to fix visual glowing hands when spamming spells (default = 15, 0 = disabled)
-          </div>
-        </div>
-
-        <div style={{ marginBottom: 10 }}>
-          <div style={{marginBottom: 4, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }} >Client Spell Delay (ms)</div>
-          <input type="number" min={0} value={clientSpellDelay}
-            onChange={e => setClientSpellDelay(e.target.value)}
-            placeholder="UNSET (default)"
-            style={inpHalf} />
-          <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
-              Delays incoming spell responses to fix lingering glow effects on instant casts (default = 15, 0 = disabled)
+          <div style={{ display: 'flex', gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ marginBottom: 4, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Server Spell Delay (ms)</div>
+              <input type="number" min={0} value={serverSpellDelay}
+                onChange={e => setServerSpellDelay(e.target.value)}
+                placeholder="UNSET (default)"
+                style={inp} />
+              <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
+                Delays outgoing casts to fix glowing hands you may experience (0 = disabled)
+              </div>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ marginBottom: 4, fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Client Spell Delay (ms)</div>
+              <input type="number" min={0} value={clientSpellDelay}
+                onChange={e => setClientSpellDelay(e.target.value)}
+                placeholder="UNSET (default)"
+                style={inp} />
+              <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
+                Delays incoming spell responses to fix lingering glow (0 = disabled)
+              </div>
+            </div>
           </div>
         </div>
       </>}
 
       <div style={sep} />
+      <div style={{ marginBottom: 10, fontSize: 10, color: T.textFaint, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+        Executable
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input
+            type="text"
+            value={exePath}
+            readOnly
+            style={{ ...inp, flex: 1, cursor: 'default', fontSize: 11 }}
+          />
+          <ModalBtn label="Browse" onClick={() => onAction('generalSettingsExeBrowse')} style={{ height: 28 }} />
+        </div>
+        <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
+          Executable launched when clicking Start Game
+        </div>
+      </div>
 
-      <a
-        onClick={() => { onAction('generalSettingsClose', payload()); onAction('openRecordSettings'); }}
-        style={{ display: 'block', marginBottom: 10, fontSize: 11, color: T.textFaint2, textDecoration: 'underline', cursor: 'pointer', transition: 'color 0.15s' }}
-        onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
-        onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
-      >Video Recording Settings</a>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
-        <ModalBtn label="Close" onClick={() => onAction('generalSettingsClose', payload())} />
+      <div style={sep} />
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <ModalBtn label="Reset to Default" secondary onClick={() => onAction('generalSettingsResetConfirm')} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+          <a
+            onClick={() => { onAction('generalSettingsClose', payload()); onAction('openRecordSettings'); }}
+            style={{ fontSize: 11, color: T.textFaint2, textDecoration: 'underline', cursor: 'pointer', transition: 'color 0.15s' }}
+            onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
+            onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
+          >Video Recorder Settings</a>
+          <ModalBtn label="Close" onClick={() => onAction('generalSettingsClose', payload())} />
+        </div>
       </div>
     </ModalOverlay>
   );
@@ -725,7 +767,7 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
             color: folder ? T.text : T.textFaint,
             overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
           }}>{folder || 'Not set'}</div>
-          <ModalBtn label="Browse..." onClick={() => onAction('recordSettingsBrowse')} />
+          <ModalBtn label="Browse..." onClick={() => onAction('recordSettingsBrowse')} style={{ height: 28 }} />
         </div>
       </div>
 
@@ -813,6 +855,8 @@ const App = ({ isNative }) => {
   const [rsOpenCount,     setRsOpenCount]      = React.useState(0);
   const [gsSettings,      setGsSettings]      = React.useState(null);
   const [gsOpenCount,     setGsOpenCount]      = React.useState(0);
+  const [gsPendingExe,    setGsPendingExe]     = React.useState(null);
+  const [gsResetConfirmed, setGsResetConfirmed] = React.useState(false);
   const [toasts,          setToasts]           = React.useState([]);
   const toastIdRef       = React.useRef(0);
   const prevRecordRef    = React.useRef(null); // null = not yet initialised
@@ -829,10 +873,12 @@ const App = ({ isNative }) => {
         console.log('[bridge] msg.type=' + msg.type + ' installPath=' + msg.installPath + ' isInstalled=' + msg.isInstalled);
         if (msg.type === 'state')       { setAppState(function(s) { return Object.assign({}, s, msg); }); setBooting(false); }
         if (msg.type === 'showModal')   setModal(msg.modal);
-        if (msg.type === 'hideModal')   { setModal(null); setRsConflict(null); setRsPendingFolder(null); }
+        if (msg.type === 'hideModal')   { setModal(null); setRsConflict(null); setRsPendingFolder(null); setGsPendingExe(null); setGsResetConfirmed(false); }
         if (msg.type === 'hermesLine')  setHermesLines(function(prev) { return prev.slice(-500).concat([msg.text]); });
         if (msg.type === 'recordSettingsState')      { setRsSettings(msg); setRsOpenCount(function(c) { return c + 1; }); }
-        if (msg.type === 'generalSettingsState')     { setGsSettings(msg); setGsOpenCount(function(c) { return c + 1; }); }
+        if (msg.type === 'generalSettingsState')     { setGsSettings(msg); setGsOpenCount(function(c) { return c + 1; }); setGsPendingExe(null); }
+        if (msg.type === 'generalSettingsExeChosen')    setGsPendingExe(msg.path);
+        if (msg.type === 'generalSettingsResetConfirmed') setGsResetConfirmed(true);
         if (msg.type === 'notification' && msg.text && showNotifRef.current) {
           var nid = ++toastIdRef.current;
           setToasts(function(prev) { return prev.concat([{ id: nid, text: msg.text }]); });
@@ -932,14 +978,15 @@ const App = ({ isNative }) => {
     { name: 'Addon',       ver: versions.addon    || '—'     },
     { name: 'Client',      ver: versions.client   || '—'     },
     { name: 'HermesProxy', ver: versions.hermes   || '—'     },
+    { name: 'Exe',  ver: appState.launchExe || '—'    },
   ];
 
   var latestNews = news[0];
-  var olderNews  = news.slice(1);
+  var olderNews  = news;
 
   return (
     <div style={{
-      width: 875, height: 530, display: 'flex', flexDirection: 'column',
+      width: 875, height: 570, display: 'flex', flexDirection: 'column',
       background: T.bg0, color: T.text, fontFamily: '"Inter", system-ui, sans-serif',
       border: '1px solid ' + T.line, position: 'relative', overflow: 'hidden',
     }}>
@@ -1050,13 +1097,13 @@ const App = ({ isNative }) => {
                   style={{
                     flexShrink: 0, padding: '0 9px',
                     background: T.plate, border: '1px solid ' + T.line,
-                    color: T.textDim, cursor: (!appState.installPath || appState.workerBusy) ? 'not-allowed' : 'pointer',
+                    color: T.amber, cursor: (!appState.installPath || appState.workerBusy) ? 'not-allowed' : 'pointer',
                     display: 'grid', placeItems: 'center',
-                    transition: 'color 140ms, border-color 140ms, background 140ms',
+                    transition: 'background 0.15s, border-color 0.15s',
                     opacity: (!appState.installPath || appState.workerBusy) ? 0.35 : 1,
                   }}
-                  onMouseEnter={function(e) { if (!appState.installPath || appState.workerBusy) return; e.currentTarget.style.background = 'rgba(180,130,60,0.10)'; e.currentTarget.style.borderColor = 'rgba(180,130,60,0.45)'; e.currentTarget.style.color = T.amber; }}
-                  onMouseLeave={function(e) { e.currentTarget.style.background = T.plate; e.currentTarget.style.borderColor = T.line; e.currentTarget.style.color = T.textDim; }}
+                  onMouseEnter={function(e) { if (!appState.installPath || appState.workerBusy) return; e.currentTarget.style.background = 'rgba(180,130,60,0.10)'; e.currentTarget.style.borderColor = 'rgba(180,130,60,0.45)'; }}
+                  onMouseLeave={function(e) { e.currentTarget.style.background = T.plate; e.currentTarget.style.borderColor = T.line; }}
                 >{React.createElement(Icon, { k: 'folder', size: 12 })}</button>
               </div>
             </div>
@@ -1129,7 +1176,7 @@ const App = ({ isNative }) => {
               <div style={{ flex: 1, overflowY: 'auto' }}>
                 {fallen.map(function(f, i) {
                   return React.createElement('div', { key: i, style: {
-                    padding: '5px 12px',
+                    padding: '6px 12px',
                     borderBottom: '1px solid ' + T.line2,
                     display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 7, alignItems: 'baseline', fontSize: 12,
                   }},
@@ -1252,6 +1299,10 @@ const App = ({ isNative }) => {
           key: gsOpenCount,
           settings: gsSettings,
           onAction: onAction,
+          pendingExe: gsPendingExe,
+          onClearPendingExe: () => setGsPendingExe(null),
+          resetConfirmed: gsResetConfirmed,
+          onClearResetConfirmed: () => setGsResetConfirmed(false),
         })}
     </div>
   );

@@ -530,7 +530,7 @@ static LRESULT CALLBACK ReplayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (RB_IsRunning()) {
                 if (RB_GetSettings().promptSaveOnStop) {
                     int r = MessageBoxW(hwnd,
-                    L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
+                    L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recorder Settings)",
                         L"Save Replay",
                         MB_YESNOCANCEL | MB_ICONQUESTION);
                     if (r == IDCANCEL) break;

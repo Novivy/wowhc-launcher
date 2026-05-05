@@ -123,7 +123,9 @@ enum : UINT {
 #define WM_REC_SETTINGS_BROWSE (WM_APP + 32) // open save-folder picker, result posted back to WebView
 #define WM_REC_SETTINGS_TOGGLE (WM_APP + 33) // lParam = new std::string* (JSON), toggle recording
 #define WM_REC_SETTINGS_CLOSE  (WM_APP + 34) // lParam = new std::string* (JSON), save & close modal
-#define WM_GEN_SETTINGS_CLOSE  (WM_APP + 35) // lParam = new std::string* (JSON), save & close general settings
+#define WM_GEN_SETTINGS_CLOSE       (WM_APP + 35) // lParam = new std::string* (JSON), save & close general settings
+#define WM_GEN_SETTINGS_EXE_BROWSE   (WM_APP + 36) // open exe picker for custom launch exe, result posted to WebView
+#define WM_GEN_SETTINGS_RESET_CONFIRM (WM_APP + 37) // show Yes/No MessageBox; posts generalSettingsResetConfirmed on Yes
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
@@ -230,6 +232,7 @@ static bool       g_showRecordingNotifications = true;
 static int        g_hermesServerSpellDelay = -1; // -1 = UNSET (not passed to HermesProxy)
 static int        g_hermesClientSpellDelay = -1; // -1 = UNSET
 static int        g_hermesSpellQueueWindow = 300;
+static std::wstring g_customLaunchExe;            // empty = use default for current client type
 
 // HermesProxy pipe
 static HANDLE g_hermesProcess  = nullptr;
@@ -239,7 +242,7 @@ static std::atomic<DWORD> g_wowPid{0};
 static HMODULE g_hRichEdit     = nullptr; // still loaded for existing RichEdit code paths
 
 static constexpr int WND_CLIENT_W = 875;
-static constexpr int WND_CLIENT_H = 530;
+static constexpr int WND_CLIENT_H = 570;
 
 // ── Shared fonts for modal dialogs (lazily created, never deleted — process lifetime) ──
 static HFONT DlgFont()
@@ -330,6 +333,7 @@ static void SaveConfig()
         swprintf_s(sb, L"%d", g_hermesSpellQueueWindow);
         WritePrivateProfileStringW(L"Launcher", L"HermesSpellQueueWindow", sb, ini);
     }
+    WritePrivateProfileStringW(L"Launcher", L"CustomLaunchExe", g_customLaunchExe.c_str(), ini);
 }
 
 static void LoadConfig()
@@ -347,6 +351,7 @@ static void LoadConfig()
     g_hermesExePath  = Rd(L"HermesExePath");
     g_arctiumExePath = Rd(L"ArticulumExePath");
     g_wowTweakedExePath = Rd(L"WowTweakedExePath");
+    g_customLaunchExe   = Rd(L"CustomLaunchExe");
     {
         wchar_t ctBuf[8] = {};
         GetPrivateProfileStringW(L"Launcher", L"ClientType", L"0", ctBuf, 8, ini);
@@ -1545,6 +1550,15 @@ static void PostStateToWebView()
     std::wstring verClient = (g_clientType == CT_114) ? L"v1.14.2"
                            : (g_clientType == CT_112) ? L"v1.12.1" : L"";
 
+    // Determine the active launch exe basename
+    std::wstring activeLaunchExe = g_customLaunchExe.empty()
+        ? (g_clientType == CT_114 ? g_arctiumExePath : g_wowTweakedExePath)
+        : g_customLaunchExe;
+    {
+        size_t sl = activeLaunchExe.rfind(L'\\');
+        if (sl != std::wstring::npos) activeLaunchExe = activeLaunchExe.substr(sl + 1);
+    }
+
     wchar_t json[4096];
     swprintf_s(json,
         L"{\"type\":\"state\","
@@ -1562,6 +1576,7 @@ static void PostStateToWebView()
         L"\"clientType\":%d,"
         L"\"showConsole\":%s,"
         L"\"showRecordingNotifications\":%s,"
+        L"\"launchExe\":\"%s\","
         L"\"versions\":{"
           L"\"launcher\":\"%s\","
           L"\"hermes\":\"%s\","
@@ -1582,6 +1597,7 @@ static void PostStateToWebView()
         (int)g_clientType,
         g_showConsole ? L"true" : L"false",
         g_showRecordingNotifications ? L"true" : L"false",
+        JsonEscW(activeLaunchExe).c_str(),
         JsonEscW(verLauncher).c_str(),
         JsonEscW(verHermes).c_str(),
         JsonEscW(verAddon).c_str(),
@@ -1652,19 +1668,21 @@ static void PostGeneralSettingsStateToWebView()
     else swprintf_s(ssd, L"%d", g_hermesServerSpellDelay);
     if (g_hermesClientSpellDelay < 0) wcscpy_s(csd, L"null");
     else swprintf_s(csd, L"%d", g_hermesClientSpellDelay);
-    wchar_t json[512];
-    swprintf_s(json, 512,
-        L"{\"type\":\"generalSettingsState\","
-        L"\"showRecordingNotifications\":%s,"
-        L"\"clientType\":%d,"
-        L"\"hermesServerSpellDelay\":%s,"
-        L"\"hermesClientSpellDelay\":%s,"
-        L"\"hermesSpellQueueWindow\":%d}",
-        g_showRecordingNotifications ? L"true" : L"false",
-        (int)g_clientType,
-        ssd, csd,
-        g_hermesSpellQueueWindow);
-    g_webview->PostWebMessageAsJson(json);
+
+    std::wstring defaultExe;
+    if (g_clientType == CT_114)      defaultExe = g_arctiumExePath;
+    else if (g_clientType == CT_112) defaultExe = g_wowTweakedExePath;
+
+    std::wstring json =
+        std::wstring(L"{\"type\":\"generalSettingsState\"") +
+        L",\"showRecordingNotifications\":" + (g_showRecordingNotifications ? L"true" : L"false") +
+        L",\"clientType\":" + std::to_wstring((int)g_clientType) +
+        L",\"hermesServerSpellDelay\":" + ssd +
+        L",\"hermesClientSpellDelay\":" + csd +
+        L",\"hermesSpellQueueWindow\":" + std::to_wstring(g_hermesSpellQueueWindow) +
+        L",\"defaultLaunchExe\":\"" + JsonEscW(defaultExe) + L"\"" +
+        L",\"customLaunchExe\":\"" + JsonEscW(g_customLaunchExe) + L"\"}";
+    g_webview->PostWebMessageAsJson(json.c_str());
 }
 
 // Runs a nested Win32 message pump (same pattern as native modal dialogs) until
@@ -1944,7 +1962,7 @@ static void InitWebView2(HWND hwnd)
                         // WebView2 auto-detects monitor DPI via GetDpiForWindow, which can
                         // differ from GetDpiForSystem used in window creation, causing a
                         // mismatch where the CSS viewport is smaller than the window width
-                        // and the fixed 875x530 content gets cropped.
+                        // and the fixed 875x570 content gets cropped.
                         {
                             Microsoft::WRL::ComPtr<ICoreWebView2Controller3> ctrl3;
                             if (SUCCEEDED(g_wvCtrl.As(&ctrl3))) {
@@ -3780,6 +3798,12 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
         auto* ps = new std::string(j);
         PostMessageW(hwnd, WM_GEN_SETTINGS_CLOSE, 0, (LPARAM)ps);
     }
+    else if (action == "generalSettingsExeBrowse") {
+        PostMessageW(hwnd, WM_GEN_SETTINGS_EXE_BROWSE, 0, 0);
+    }
+    else if (action == "generalSettingsResetConfirm") {
+        PostMessageW(hwnd, WM_GEN_SETTINGS_RESET_CONFIRM, 0, 0);
+    }
     else if (action == "setRealm") {
         int idx = JsonInt(j, "index");
         PostMessageW(hwnd, WM_SET_REALM, (WPARAM)idx, 0);
@@ -4208,7 +4232,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
                 if (g_clientType == CT_112) {
                     // ── 1.12.1: launch Wow_tweaked.exe directly ─────────────
-                    std::wstring wowExe = g_wowTweakedExePath;
+                    std::wstring wowExe = g_customLaunchExe.empty() ? g_wowTweakedExePath : g_customLaunchExe;
                     if (wowExe.empty()) {
                         std::wstring def = g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe";
                         if (GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES)
@@ -4242,7 +4266,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 } else {
                     // ── 1.14.2: start HermesProxy + Arctium ─────────────────
                     std::wstring hermesExe  = g_hermesExePath;
-                    std::wstring arctiumExe = g_arctiumExePath;
+                    std::wstring arctiumExe = g_customLaunchExe.empty() ? g_arctiumExePath : g_customLaunchExe;
                     std::wstring clientPath = g_clientPath;
                     std::thread([hermesExe, arctiumExe, clientPath]() {
 
@@ -4303,7 +4327,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (id == ID_BTN_RECORD) {
             if (RB_IsRunning()) {
                 if (RB_GetSettings().promptSaveOnStop) {
-                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
+                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recorder Settings)",
                         L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                     if (r == IDCANCEL) break;
                     if (r == IDYES) { RB_SaveNow(); Sleep(100); }
@@ -4416,7 +4440,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (RB_GetSettings().promptSaveOnStop) {
                     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
                     SetForegroundWindow(hwnd);
-                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
+                    int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recorder Settings)",
                         L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                     if (r == IDCANCEL) return 0;
                     if (r == IDYES) { RB_SaveNow(); Sleep(100); }
@@ -4527,7 +4551,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         if (RB_IsRunning()) {
             if (RB_GetSettings().promptSaveOnStop) {
-                int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
+                int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recorder Settings)",
                     L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                 if (r == IDCANCEL) { PostStateToWebView(); return 0; }
                 if (r == IDYES) { RB_SaveNow(); Sleep(100); }
@@ -4601,10 +4625,70 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hermesClientSpellDelay = JsonInt(body, "hermesClientSpellDelay", -1);
         g_hermesSpellQueueWindow = JsonInt(body, "hermesSpellQueueWindow", g_hermesSpellQueueWindow);
         if (g_hermesSpellQueueWindow < 0) g_hermesSpellQueueWindow = 300;
+        g_customLaunchExe = JsonStringW(body, "customLaunchExe");
         SaveConfig();
         if (g_webview && g_wvReady)
             g_webview->PostWebMessageAsJson(L"{\"type\":\"hideModal\"}");
         PostStateToWebView();
+        return 0;
+    }
+
+    case WM_GEN_SETTINGS_EXE_BROWSE:
+    {
+        IFileOpenDialog* pDlg = nullptr;
+        std::wstring chosen;
+        if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg)))) {
+            DWORD opts = 0;
+            pDlg->GetOptions(&opts);
+            pDlg->SetOptions(opts | FOS_FORCEFILESYSTEM);
+            pDlg->SetTitle(L"Choose executable to launch");
+            COMDLG_FILTERSPEC filter[] = {
+                { L"Executable Files", L"*.exe" },
+                { L"All Files",        L"*.*"   }
+            };
+            pDlg->SetFileTypes(2, filter);
+            pDlg->SetFileTypeIndex(1);
+            pDlg->SetDefaultExtension(L"exe");
+            std::wstring curExe = g_customLaunchExe.empty()
+                ? (g_clientType == CT_114 ? g_arctiumExePath : g_wowTweakedExePath)
+                : g_customLaunchExe;
+            if (!curExe.empty()) {
+                size_t lastSep = curExe.rfind(L'\\');
+                std::wstring folder = (lastSep != std::wstring::npos) ? curExe.substr(0, lastSep) : curExe;
+                IShellItem* pInit = nullptr;
+                if (SUCCEEDED(SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&pInit)))) {
+                    pDlg->SetFolder(pInit);
+                    pInit->Release();
+                }
+            }
+            if (SUCCEEDED(pDlg->Show(hwnd))) {
+                IShellItem* pItem = nullptr;
+                if (SUCCEEDED(pDlg->GetResult(&pItem))) {
+                    wchar_t* path = nullptr;
+                    pItem->GetDisplayName(SIGDN_FILESYSPATH, &path);
+                    if (path) { chosen = path; CoTaskMemFree(path); }
+                    pItem->Release();
+                }
+            }
+            pDlg->Release();
+        }
+        if (!chosen.empty() && g_webview && g_wvReady) {
+            std::wstring j2 = L"{\"type\":\"generalSettingsExeChosen\",\"path\":\""
+                            + JsonEscW(chosen) + L"\"}";
+            g_webview->PostWebMessageAsJson(j2.c_str());
+        }
+        return 0;
+    }
+
+    case WM_GEN_SETTINGS_RESET_CONFIRM:
+    {
+        int res = MessageBoxW(hwnd,
+            L"Reset all settings to their defaults?",
+            L"Reset Settings",
+            MB_YESNO | MB_ICONQUESTION);
+        if (res == IDYES && g_webview && g_wvReady)
+            g_webview->PostWebMessageAsJson(L"{\"type\":\"generalSettingsResetConfirmed\"}");
         return 0;
     }
 
@@ -4789,7 +4873,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (RB_IsRunning() && RB_GetSettings().stopOnWowExit) {
             AppendLog(L"[Rec] WoW closed — auto-stopping recording");
             if (RB_GetSettings().promptSaveOnStop) {
-                int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recording Settings)",
+                int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recorder Settings)",
                     L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                 if (r == IDCANCEL) break;
                 if (r == IDYES) { RB_SaveNow(); Sleep(100); }
