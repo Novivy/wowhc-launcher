@@ -239,8 +239,6 @@ static bool         g_promptOnKillProcess = false; // ask before killing existin
 // Server-stats cache — fetched by FetchLiveData (10-min timer), reused by RunThirdPartyAddonUpdates
 static std::string            g_cachedStatsJson;
 static std::mutex             g_statsJsonMtx;
-static std::atomic<long long> g_serverCacheClearTime{0}; // launcher_cache_clear from server-stats
-static long long              g_lastCacheClearTime = 0;  // persisted in ini
 
 // HermesProxy pipe
 static HANDLE g_hermesProcess  = nullptr;
@@ -343,10 +341,6 @@ static void SaveConfig()
         WritePrivateProfileStringW(L"Launcher", L"HermesSpellQueueWindow", sb, ini);
     }
     WritePrivateProfileStringW(L"Launcher", L"CustomLaunchExe", g_customLaunchExe.c_str(), ini);
-    {
-        wchar_t tb[32]; swprintf_s(tb, L"%I64d", g_lastCacheClearTime);
-        WritePrivateProfileStringW(L"Launcher", L"LastCacheClearTime", tb, ini);
-    }
 }
 
 static void LoadConfig()
@@ -365,11 +359,6 @@ static void LoadConfig()
     g_arctiumExePath = Rd(L"ArticulumExePath");
     g_wowTweakedExePath = Rd(L"WowTweakedExePath");
     g_customLaunchExe   = Rd(L"CustomLaunchExe");
-    {
-        wchar_t tb[32] = {};
-        GetPrivateProfileStringW(L"Launcher", L"LastCacheClearTime", L"0", tb, 32, ini);
-        g_lastCacheClearTime = _wtoi64(tb);
-    }
     {
         wchar_t ctBuf[8] = {};
         GetPrivateProfileStringW(L"Launcher", L"ClientType", L"0", ctBuf, 8, ini);
@@ -839,8 +828,6 @@ static std::string FetchAndCacheStatsJson()
     const std::wstring url = L"https://wow-hc.com/json/server-stats.json?api_version=126&front_realm=1&_=" + ts;
     std::string json = HttpGetSimple(url);
     if (!json.empty()) {
-        long long cacheClearTs = JsonInt64(json, "launcher_cache_clear");
-        if (cacheClearTs > 0) g_serverCacheClearTime.store(cacheClearTs);
         std::lock_guard<std::mutex> lk(g_statsJsonMtx);
         g_cachedStatsJson = json;
     }
@@ -1737,6 +1724,7 @@ static void PostGeneralSettingsStateToWebView()
     std::wstring defaultExe;
     if (g_clientType == CT_114)      defaultExe = g_arctiumExePath;
     else if (g_clientType == CT_112) defaultExe = g_wowTweakedExePath;
+
 
     std::wstring json =
         std::wstring(L"{\"type\":\"generalSettingsState\"") +
@@ -3941,30 +3929,6 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
     }
 }
 
-static void ClearWowCacheIfNeeded()
-{
-    long long serverTs = g_serverCacheClearTime.load();
-    if (serverTs == 0 || serverTs <= g_lastCacheClearTime) return;
-    if (g_clientPath.empty()) return;
-
-    // Derive exe directory: use actual exe path for CT_112, fall back to _classic_era_
-    std::wstring exeDir;
-    if (g_clientType == CT_112 && !g_wowTweakedExePath.empty()) {
-        size_t sep = g_wowTweakedExePath.rfind(L'\\');
-        if (sep != std::wstring::npos) exeDir = g_wowTweakedExePath.substr(0, sep);
-    }
-    if (exeDir.empty()) exeDir = g_clientPath + L"\\_classic_era_";
-
-    const wchar_t* folder = (g_clientType == CT_112) ? L"WDB" : L"Cache";
-    std::wstring cachePath = exeDir + L"\\" + folder;
-
-    if (GetFileAttributesW(cachePath.c_str()) != INVALID_FILE_ATTRIBUTES)
-        DeleteDirRecursive(cachePath);
-
-    g_lastCacheClearTime = serverTs;
-    wchar_t tb[32]; swprintf_s(tb, L"%I64d", g_lastCacheClearTime);
-    WritePrivateProfileStringW(L"Launcher", L"LastCacheClearTime", tb, ConfigPath().c_str());
-}
 
 // ── Window procedure ───────────────────────────────────────────────────────────
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -4348,7 +4312,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     RB_Start();
                 }
                 PostStatus(WS_LAUNCHING);
-                ClearWowCacheIfNeeded();
 
                 if (g_clientType == CT_112) {
                     // ── 1.12.1: launch Wow_tweaked.exe directly ─────────────
