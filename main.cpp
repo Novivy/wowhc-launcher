@@ -1739,6 +1739,7 @@ static void PostGeneralSettingsStateToWebView()
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
+
 // Runs a nested Win32 message pump (same pattern as native modal dialogs) until
 // JS sends a modal response action that sets g_reactModalDone.
 // Waits for the page to be ready first if called before JS fires "ready".
