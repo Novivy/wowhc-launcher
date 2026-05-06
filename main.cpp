@@ -867,10 +867,10 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
     const std::function<void(DWORD64, DWORD64)>& progress = nullptr)
 {
     HINTERNET hSess = OpenSession();
-    if (!hSess) return false;
+    if (!hSess) { AppendLog(L"HttpDownload: OpenSession failed (0x%08lX) url='%s'", GetLastError(), url.c_str()); return false; }
     HINTERNET hConn = nullptr;
     HINTERNET hReq  = MakeRequest(hSess, url, hConn);
-    if (!hReq) { WinHttpCloseHandle(hSess); return false; }
+    if (!hReq) { AppendLog(L"HttpDownload: MakeRequest failed (0x%08lX) url='%s'", GetLastError(), url.c_str()); WinHttpCloseHandle(hSess); return false; }
     WinHttpAddRequestHeaders(hReq,
         L"Cache-Control: no-cache\r\nPragma: no-cache",
         (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
@@ -880,6 +880,7 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
     bool recvd = sent && WinHttpReceiveResponse(hReq, nullptr);
     if (!sent || !recvd) {
         DWORD err = GetLastError();
+        AppendLog(L"HttpDownload: WinHTTP send/recv failed (0x%08lX) url='%s'", err, url.c_str());
         wchar_t msg[128];
         swprintf_s(msg, L"Network error (WinHTTP 0x%08lX).\nCheck your internet connection and try again.", err);
         MessageBoxW(g_hwnd, msg, L"Download Failed", MB_OK | MB_ICONERROR);
@@ -897,6 +898,7 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                 WinHttpReadData(hReq, eb.data(), avail, &rd);
                 errBody.append(eb.data(), rd);
             }
+            AppendLog(L"HttpDownload: HTTP %lu url='%s'", statusCode, url.c_str());
             wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
             std::wstring logPath = std::wstring(tmp) + L"wowhc_debug.log";
             if (FILE* f = _wfopen(logPath.c_str(), L"a")) {
@@ -922,7 +924,7 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
             std::vector<char> buf(65536);
             while (WinHttpReadData(hReq, buf.data(), (DWORD)buf.size(), &read) && read > 0) {
                 DWORD written;
-                if (!WriteFile(hFile, buf.data(), read, &written, nullptr)) { ok = false; break; }
+                if (!WriteFile(hFile, buf.data(), read, &written, nullptr)) { AppendLog(L"HttpDownload: WriteFile failed (0x%08lX) dest='%s'", GetLastError(), dest.c_str()); ok = false; break; }
                 downloaded += read;
                 if (progress) progress(downloaded, total);
             }
@@ -1010,7 +1012,7 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
         L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
 
     std::wstring scriptPath = TempFile(L"launcher_extract.ps1");
-    if (!WritePsScript(scriptPath, script)) return false;
+    if (!WritePsScript(scriptPath, script)) { AppendLog(L"ExtractZipSmart: WritePsScript failed zip='%s'", zip.c_str()); return false; }
 
     std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \""
         + scriptPath + L"\"";
@@ -1019,6 +1021,7 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
     HANDLE hRead, hWrite;
     SECURITY_ATTRIBUTES sa = {}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
     if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
+        AppendLog(L"ExtractZipSmart: CreatePipe failed (0x%08lX) zip='%s'", GetLastError(), zip.c_str());
         DeleteFileW(scriptPath.c_str());
         return false;
     }
@@ -1036,6 +1039,7 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
     CloseHandle(hWrite);
 
     if (!started) {
+        AppendLog(L"ExtractZipSmart: CreateProcessW(powershell) failed (0x%08lX) zip='%s'", GetLastError(), zip.c_str());
         CloseHandle(hRead);
         DeleteFileW(scriptPath.c_str());
         return false;
@@ -1051,8 +1055,10 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
         while ((pos = lineBuf.find('\n')) != std::string::npos) {
             std::string line = lineBuf.substr(0, pos);
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (!line.empty() && onProgress) {
-                try { onProgress(std::stoi(line)); } catch (...) {}
+            if (!line.empty()) {
+                bool parsed = false;
+                if (onProgress) { try { onProgress(std::stoi(line)); parsed = true; } catch (...) {} }
+                if (!parsed) AppendLog(L"ExtractZipSmart PS: %S", line.c_str());
             }
             lineBuf = lineBuf.substr(pos + 1);
         }
@@ -1064,6 +1070,7 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
     GetExitCodeProcess(pi.hProcess, &exitCode);
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
     DeleteFileW(scriptPath.c_str());
+    AppendLog(L"ExtractZipSmart: exit=%lu zip='%s'", exitCode, zip.c_str());
     return exitCode == 0;
 }
 
@@ -2250,11 +2257,12 @@ static void RunHermesUpdateCheck()
     std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
         + HERMES_GH_OWNER + L"/" + HERMES_GH_REPO + L"/releases/latest";
     std::string json = HttpGet(apiUrl);
-    if (json.empty()) return;
+    if (json.empty()) { AppendLog(L"RunHermesUpdateCheck: API returned empty response"); return; }
 
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
     std::wstring localVer = GetLocalHermesVersion();
+    AppendLog(L"RunHermesUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
     std::wstring payload = remoteVer + L"\n" + localVer;
@@ -2263,7 +2271,7 @@ static void RunHermesUpdateCheck()
     if (r != IDYES) return;
 
     std::string assetUrl = FindAssetUrl(json);
-    if (assetUrl.empty()) return;
+    if (assetUrl.empty()) { AppendLog(L"RunHermesUpdateCheck: no asset URL in release JSON"); return; }
 
     std::wstring assetW(assetUrl.begin(), assetUrl.end());
     std::wstring tmpZip = InstallTempFile(L"hermes_update.zip");
@@ -2312,8 +2320,11 @@ static void RunHermesUpdateCheck()
             if (GetFileAttributesW(newExe.c_str()) != INVALID_FILE_ATTRIBUTES)
                 g_hermesExePath = newExe;
             PostPct(100);
+        } else {
+            AppendLog(L"RunHermesUpdateCheck: extraction failed");
         }
     } else {
+        AppendLog(L"RunHermesUpdateCheck: download failed");
         DeleteFileW(tmpZip.c_str());
     }
 }
@@ -2324,11 +2335,12 @@ static void RunAddonUpdateCheck()
     std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
         + ADDON_GH_OWNER + L"/" + ADDON_GH_REPO + L"/releases/latest";
     std::string json = HttpGet(apiUrl);
-    if (json.empty()) return;
+    if (json.empty()) { AppendLog(L"RunAddonUpdateCheck: API returned empty response"); return; }
 
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
     std::wstring localVer = ReadAddonTocVersion();
+    AppendLog(L"RunAddonUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
     std::wstring payload = remoteVer + L"\n" + localVer;
@@ -2338,7 +2350,7 @@ static void RunAddonUpdateCheck()
 
     std::string assetUrl = FindAssetUrl(json);
     if (assetUrl.empty()) assetUrl = JsonString(json, "zipball_url");
-    if (assetUrl.empty()) return;
+    if (assetUrl.empty()) { AppendLog(L"RunAddonUpdateCheck: no asset URL in release JSON"); return; }
 
     std::wstring assetW(assetUrl.begin(), assetUrl.end());
     std::wstring tmpZip = InstallTempFile(L"addon_update.zip");
@@ -2364,8 +2376,9 @@ static void RunAddonUpdateCheck()
             PostPct(70 + pct * 30 / 100);
         });
         DeleteFileW(tmpZip.c_str());
-        if (ok) { PostPct(100); }
+        if (ok) { PostPct(100); } else { AppendLog(L"RunAddonUpdateCheck: extraction failed"); }
     } else {
+        AppendLog(L"RunAddonUpdateCheck: download failed");
         DeleteFileW(tmpZip.c_str());
     }
 }
@@ -2506,11 +2519,12 @@ static void RunLauncherUpdateCheck(bool forced = false)
         + LAUNCHER_GH_OWNER + L"/" + LAUNCHER_GH_REPO
         + (g_testMode ? L"/releases" : L"/releases/latest");
     std::string json = HttpGet(apiUrl);
-    if (json.empty()) return;
+    if (json.empty()) { AppendLog(L"RunLauncherUpdateCheck: API returned empty response"); return; }
 
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
     std::wstring localVer = GetLauncherVersion();
+    AppendLog(L"RunLauncherUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
     if (forced) {
@@ -2533,8 +2547,10 @@ static void RunLauncherUpdateCheck(bool forced = false)
 
     std::wstring zipUrlW(zipUrl.begin(), zipUrl.end());
     std::wstring tmpZip = TempFile(L"wowhc_launcher_update.zip");
+    AppendLog(L"RunLauncherUpdateCheck: downloading update url='%s'", zipUrlW.c_str());
     PostText(L"Downloading launcher update...");
     if (!HttpDownload(zipUrlW, tmpZip)) {
+        AppendLog(L"RunLauncherUpdateCheck: download failed");
         DeleteFileW(tmpZip.c_str());
         MessageBoxW(g_hwnd, L"Failed to download the launcher update.\nCheck your internet connection and try again.", L"Update Failed", MB_OK | MB_ICONERROR);
         return;
@@ -2591,6 +2607,7 @@ static void RunLauncherUpdateCheck(bool forced = false)
     DeleteFileW(tmpZip.c_str());
 
     if (!psOk || GetFileAttributesW(tmpExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        AppendLog(L"RunLauncherUpdateCheck: extraction failed psOk=%d", (int)psOk);
         DeleteFileW(tmpExe.c_str());
         MessageBoxW(g_hwnd, L"Failed to extract the launcher update.\nThe previous version is still active.", L"Update Failed", MB_OK | MB_ICONERROR);
         return;
@@ -2957,10 +2974,12 @@ static void Worker()
         std::wstring tmpZip = InstallTempFile(L"wowclient_dl.zip");
         DlProgress dlClient{L"Downloading WoW client...", 65};
         const wchar_t* dlUrl = (g_clientType == CT_112) ? CLIENT_112_DOWNLOAD_URL : CLIENT_DOWNLOAD_URL;
+        AppendLog(L"Worker: downloading client url='%s' dest='%s'", dlUrl, tmpZip.c_str());
         bool ok = HttpDownload(dlUrl, tmpZip,
             [&dlClient](DWORD64 dl, DWORD64 tot) { dlClient(dl, tot); });
 
         if (!ok) {
+            AppendLog(L"Worker: client download failed");
             DeleteFileW(tmpZip.c_str());
             PostStatus(WS_ERROR);
             g_workerBusy = false;
@@ -2971,12 +2990,20 @@ static void Worker()
         PostStatus(WS_EX_CLIENT);
         CreateDirectoryW(g_installPath.c_str(), nullptr);
 
+        {
+            WIN32_FILE_ATTRIBUTE_DATA fa = {};
+            DWORD64 zipBytes = 0;
+            if (GetFileAttributesExW(tmpZip.c_str(), GetFileExInfoStandard, &fa))
+                zipBytes = ((DWORD64)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+            AppendLog(L"Worker: extracting client zip size=%llu bytes dest='%s'", zipBytes, g_installPath.c_str());
+        }
         ok = ExtractZipSmart(tmpZip, g_installPath, true, [](int pct) {
             PostPct(65 + pct * 35 / 100);
         });
         DeleteFileW(tmpZip.c_str());
 
         if (!ok) {
+            AppendLog(L"Worker: client extraction failed (see ExtractZipSmart PS lines above)");
             PostStatus(WS_ERROR);
             g_workerBusy = false;
             PostMessageW(g_hwnd, WM_WORKER_DONE, 0, 0);
