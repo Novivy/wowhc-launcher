@@ -3907,6 +3907,9 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
     else if (action == "close") {
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
     }
+    else if (action == "openLogs") {
+        ShellExecuteW(nullptr, L"open", g_logPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
     else if (action == "openGetHelp") {
         ShellExecuteW(nullptr, L"open", L"https://wow-hc.com/support/appeal", nullptr, nullptr, SW_SHOWNORMAL);
     }

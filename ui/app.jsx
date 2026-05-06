@@ -1095,7 +1095,7 @@ const App = ({ isNative }) => {
           <div style={{ flex: 1 }}/>
 
           <div style={{ display: 'flex', justifyContent: 'center' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', width: 135, gap:8 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', width: 155, gap:6 }}>
               <a title="Cosmetics, Teleport, Bags and Services" onClick={() => onAction('openUrl', { url: 'https://wow-hc.com/shop' })} style={{
                 fontSize: 10, color: T.amber, textDecoration: 'none',
                 letterSpacing: '0.14em', textTransform: 'uppercase', fontWeight: 700,
@@ -1150,45 +1150,54 @@ const App = ({ isNative }) => {
         {/* Center */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative' }}>
 
-          {/* Get Help — top right */}
-          <a onClick={() => onAction('openGetHelp')} style={{
-            position: 'absolute', top: 10, right: 12,
-            fontSize: 11, color: T.textFaint2, fontFamily: 'ui-monospace, monospace',
-            letterSpacing: '0.1em', textDecoration: 'underline', zIndex: 2, cursor: 'pointer', transition: 'color 0.15s',
-          }}
-            onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
-            onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
-          >Get Help</a>
+          {/* Open Logs + Get Help — top right */}
+          <div style={{ position: 'absolute', top: 10, right: 12, display: 'flex', gap: 14, zIndex: 2 }}>
+            <a onClick={() => onAction('openLogs')} style={{
+              fontSize: 12, color: T.textFaint2, fontFamily: 'Inter, system-ui, sans-serif',
+              textDecoration: 'underline', cursor: 'pointer', transition: 'color 0.15s',
+            }}
+              onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
+              onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
+            >Open Logs</a>
+            <a onClick={() => onAction('openGetHelp')} style={{
+              fontSize: 12, color: T.textFaint2, fontFamily: 'Inter, system-ui, sans-serif',
+              textDecoration: 'underline', cursor: 'pointer', transition: 'color 0.15s',
+            }}
+              onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
+              onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
+            >Get Help</a>
+          </div>
 
           {/* Hero news strip */}
           {latestNews && (
-            <a onClick={() => latestNews.slug && onAction('openUrl', { url: 'https://wow-hc.com/forums/' + latestNews.slug })}
-              onMouseEnter={() => setHeroHov(true)}
-              onMouseLeave={() => setHeroHov(false)}
-              style={{
-                display: 'block', textDecoration: 'none',
-                cursor: latestNews.slug ? 'pointer' : 'default',
-                padding: '26px 30px', borderBottom: '1px solid ' + T.line,
+            <div style={{
+                display: 'block',
+                padding: '27px 30px', borderBottom: '1px solid ' + T.line,
                 background: 'radial-gradient(ellipse at 80% 50%, rgba(224,160,74,0.10) 0%, transparent 60%), ' + T.bg1,
                 flexShrink: 0,
               }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 5 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
                 <span style={{ width: 22, height: 1, background: T.amber, display: 'inline-block' }}/>
                 {SUB_CATEGORIES[latestNews.sub_category_id] &&
-                  <span style={{ fontSize: 11, letterSpacing: '0.3em', color: T.amber, fontWeight: 700, textTransform: 'uppercase' }}>
+                  <span style={{ fontSize: 9, letterSpacing: '0.3em', color: T.amber, fontWeight: 700, textTransform: 'uppercase' }}>
                     {SUB_CATEGORIES[latestNews.sub_category_id].name}
                   </span>}
                 <span style={{ fontSize:10, color: T.textFaint, fontFamily: 'Inter, system-ui, sans-serif', letterSpacing: '0.04em' }}>
                   {new Date(latestNews.created_at * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 </span>
               </div>
-              <h1 style={{ margin: 0, fontFamily: '"Cinzel", Georgia, serif', fontSize: 16, fontWeight: 600, paddingTop: 2, color: heroHov ? T.amber : T.text, letterSpacing: '0.01em', lineHeight: 1.2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', transition: 'color 0.2s' }}>
-                {latestNews.title}
+              <h1 style={{ margin: 0, padding: 0, lineHeight: 1.2 }}>
+                <a onClick={() => latestNews.slug && onAction('openUrl', { url: 'https://wow-hc.com/forums/' + latestNews.slug })}
+                  onMouseEnter={() => setHeroHov(true)}
+                  onMouseLeave={() => setHeroHov(false)}
+                  style={{ fontFamily: '"Cinzel", Georgia, serif', fontSize: 18, fontWeight: 600, color: heroHov ? T.amber : T.text, letterSpacing: '0.01em', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', textDecoration: 'none', transition: 'color 0.2s', cursor: latestNews.slug ? 'pointer' : 'default' }}>
+                  {latestNews.title}
+                </a>
               </h1>
-              <p style={{ margin: '2px 0 0', fontSize: 11, color: heroHov ? T.amber2 : T.textDim, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical', transition: 'color 0.2s' }}>
+              <p style={{ margin: '3px 0 0', fontSize: 11, color: T.textDim, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {stripHtml(latestNews.content_preview)}
               </p>
-            </a>
+            </div>
           )}
 
           {/* Two-panel body */}
