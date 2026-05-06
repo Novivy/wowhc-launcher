@@ -1153,14 +1153,14 @@ const App = ({ isNative }) => {
           {/* Open Logs + Get Help — top right */}
           <div style={{ position: 'absolute', top: 10, right: 12, display: 'flex', gap: 14, zIndex: 2 }}>
             <a onClick={() => onAction('openLogs')} style={{
-              fontSize: 12, color: T.textFaint2, fontFamily: 'Inter, system-ui, sans-serif',
+              fontSize: 11, color: T.textFaint2, fontFamily: 'Inter, system-ui, sans-serif',
               textDecoration: 'underline', cursor: 'pointer', transition: 'color 0.15s',
             }}
               onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
               onMouseLeave={function(e) { e.currentTarget.style.color = T.textFaint2; }}
             >Open Logs</a>
             <a onClick={() => onAction('openGetHelp')} style={{
-              fontSize: 12, color: T.textFaint2, fontFamily: 'Inter, system-ui, sans-serif',
+              fontSize: 11, color: T.textFaint2, fontFamily: 'Inter, system-ui, sans-serif',
               textDecoration: 'underline', cursor: 'pointer', transition: 'color 0.15s',
             }}
               onMouseEnter={function(e) { e.currentTarget.style.color = T.amber; }}
