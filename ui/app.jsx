@@ -1148,7 +1148,7 @@ const App = ({ isNative }) => {
         </div>
 
         {/* Center */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative' }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, position: 'relative'}}>
 
           {/* Open Logs + Get Help — top right */}
           <div style={{ position: 'absolute', top: 10, right: 12, display: 'flex', gap: 14, zIndex: 2 }}>
