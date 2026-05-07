@@ -1663,7 +1663,7 @@ static std::wstring JsonEscW(const std::wstring& s)
     return r;
 }
 
-static void PostStateToWebView()
+static void PostStateToWebView(bool force)
 {
     if (!g_webview || !g_wvReady) return;
 
@@ -1737,7 +1737,7 @@ static void PostStateToWebView()
         JsonEscW(verClient).c_str());
 
     static std::wstring s_lastJson;
-    if (json == s_lastJson) return;
+    if (!force && json == s_lastJson) return;
     s_lastJson = json;
 
     static std::wstring s_lastLoggedStatus;
@@ -2184,7 +2184,7 @@ static void PostText(std::wstring text)
     PostMessageW(g_hwnd, WM_WORKER_TEXT, 0, (LPARAM)(new std::wstring(std::move(text))));
 }
 
-static void PostStateToWebView(); // forward declaration
+static void PostStateToWebView(bool force = false); // forward declaration
 
 static void RefreshTransferButton() { /* no Win32 button — state pushed via PostStateToWebView */ }
 
@@ -3930,7 +3930,7 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
 
     if (action == "ready") {
         g_wvPageReady = true;
-        PostStateToWebView();
+        PostStateToWebView(true); // force: JS just attached its listener, always send current state
         std::thread(FetchLiveData).detach();
         if (IsDevBuild() || g_testMode) g_webview->OpenDevToolsWindow();
     }
