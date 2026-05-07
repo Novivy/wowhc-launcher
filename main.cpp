@@ -1655,13 +1655,19 @@ static void PostStateToWebView()
         JsonEscW(verAddon).c_str(),
         JsonEscW(verClient).c_str());
 
-    static int s_postCount = 0;
-    AppendLog(L"PostStateToWebView #%d: installPath='%s' clientType=%d playReady=%s json=%s",
-        ++s_postCount,
-        (g_installPath.empty() ? g_clientPath : g_installPath).c_str(),
-        (int)g_clientType,
-        g_playReady.load() ? L"true" : L"false",
-        json);
+    static std::wstring s_lastJson;
+    if (json == s_lastJson) return;
+    s_lastJson = json;
+
+    static std::wstring s_lastLoggedStatus;
+    if (g_currentStatus != s_lastLoggedStatus) {
+        s_lastLoggedStatus = g_currentStatus;
+        AppendLog(L"PostStateToWebView: status='%s' playReady=%s playEnabled=%s workerBusy=%s",
+            g_currentStatus.c_str(),
+            isInstalled ? L"true" : L"false",
+            playEnabled ? L"true" : L"false",
+            workerBusy  ? L"true" : L"false");
+    }
     g_webview->PostWebMessageAsJson(json);
 }
 
