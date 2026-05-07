@@ -2257,6 +2257,8 @@ static void RunHermesUpdateCheck()
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
     std::wstring localVer = GetLocalHermesVersion();
+    if (localVer.empty())
+        AppendLog(L"RunHermesUpdateCheck: could not read local version from HermesProxy.exe PE header (path='%s')", g_hermesExePath.c_str());
     AppendLog(L"RunHermesUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
@@ -2266,7 +2268,11 @@ static void RunHermesUpdateCheck()
     if (r != IDYES) return;
 
     std::string assetUrl = FindAssetUrl(json);
-    if (assetUrl.empty()) { AppendLog(L"RunHermesUpdateCheck: no asset URL in release JSON"); return; }
+    if (assetUrl.empty()) {
+        AppendLog(L"RunHermesUpdateCheck: no asset URL in release JSON");
+        PostText(L"HermesProxy update failed: no download URL found in the GitHub release. Check launcher.log for details.");
+        return;
+    }
 
     std::wstring assetW(assetUrl.begin(), assetUrl.end());
     std::wstring tmpZip = InstallTempFile(L"hermes_update.zip");
@@ -2316,11 +2322,13 @@ static void RunHermesUpdateCheck()
                 g_hermesExePath = newExe;
             PostPct(100);
         } else {
-            AppendLog(L"RunHermesUpdateCheck: extraction failed");
+            AppendLog(L"RunHermesUpdateCheck: extraction failed (zip='%s', dest='%s')", tmpZip.c_str(), hermesDir.c_str());
+            PostText(L"HermesProxy update failed: could not extract the downloaded archive. Check launcher.log for details.");
         }
     } else {
-        AppendLog(L"RunHermesUpdateCheck: download failed");
+        AppendLog(L"RunHermesUpdateCheck: download failed (url='%s')", assetW.c_str());
         DeleteFileW(tmpZip.c_str());
+        PostText(L"HermesProxy update failed: download error. Check launcher.log for details.");
     }
 }
 
@@ -2335,6 +2343,9 @@ static void RunAddonUpdateCheck()
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
     std::wstring localVer = ReadAddonTocVersion();
+    if (localVer.empty())
+        AppendLog(L"RunAddonUpdateCheck: could not read ## Version from WOW_HC.toc (path='%s')",
+            (GetAddonsDir() + L"\\WOW_HC\\WOW_HC.toc").c_str());
     AppendLog(L"RunAddonUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
@@ -2345,7 +2356,11 @@ static void RunAddonUpdateCheck()
 
     std::string assetUrl = FindAssetUrl(json);
     if (assetUrl.empty()) assetUrl = JsonString(json, "zipball_url");
-    if (assetUrl.empty()) { AppendLog(L"RunAddonUpdateCheck: no asset URL in release JSON"); return; }
+    if (assetUrl.empty()) {
+        AppendLog(L"RunAddonUpdateCheck: no asset URL in release JSON");
+        PostText(L"WOW_HC addon update failed: no download URL found in the GitHub release. Check launcher.log for details.");
+        return;
+    }
 
     std::wstring assetW(assetUrl.begin(), assetUrl.end());
     std::wstring tmpZip = InstallTempFile(L"addon_update.zip");
@@ -2366,15 +2381,27 @@ static void RunAddonUpdateCheck()
         CreateDirectoryW(addonsDir.c_str(), nullptr);
         std::wstring addonDest = addonsDir + L"\\WOW_HC";
         DeleteDirRecursive(addonDest);
-        CreateDirectoryW(addonDest.c_str(), nullptr);
-        ok = ExtractZipSmart(tmpZip, addonDest, true, [](int pct) {
-            PostPct(70 + pct * 30 / 100);
-        });
-        DeleteFileW(tmpZip.c_str());
-        if (ok) { PostPct(100); } else { AppendLog(L"RunAddonUpdateCheck: extraction failed"); }
+        BOOL dirOk = CreateDirectoryW(addonDest.c_str(), nullptr);
+        if (!dirOk && GetLastError() != ERROR_ALREADY_EXISTS) {
+            AppendLog(L"RunAddonUpdateCheck: failed to create destination directory '%s' (err=%lu)", addonDest.c_str(), GetLastError());
+            PostText(L"WOW_HC addon update failed: could not create destination directory. Check launcher.log for details.");
+            DeleteFileW(tmpZip.c_str());
+        } else {
+            ok = ExtractZipSmart(tmpZip, addonDest, true, [](int pct) {
+                PostPct(70 + pct * 30 / 100);
+            });
+            DeleteFileW(tmpZip.c_str());
+            if (ok) {
+                PostPct(100);
+            } else {
+                AppendLog(L"RunAddonUpdateCheck: extraction failed (zip='%s', dest='%s')", tmpZip.c_str(), addonDest.c_str());
+                PostText(L"WOW_HC addon update failed: could not extract the downloaded archive. Check launcher.log for details.");
+            }
+        }
     } else {
-        AppendLog(L"RunAddonUpdateCheck: download failed");
+        AppendLog(L"RunAddonUpdateCheck: download failed (url='%s')", assetW.c_str());
         DeleteFileW(tmpZip.c_str());
+        PostText(L"WOW_HC addon update failed: download error. Check launcher.log for details.");
     }
 }
 
@@ -2450,6 +2477,9 @@ static void RunThirdPartyAddonUpdates()
             continue;
 
         std::wstring localVer = ReadTocVersion(addonNameW, tocFileW);
+        if (localVer.empty())
+            AppendLog(L"RunThirdPartyAddonUpdates: could not read version for '%s' (toc='%s')", addonNameW.c_str(), tocFileW.c_str());
+        AppendLog(L"RunThirdPartyAddonUpdates: '%s' local='%s' required='%s'", addonNameW.c_str(), localVer.c_str(), requiredVer.c_str());
         if (!IsNewer(localVer, requiredVer)) continue;
 
         // repo field contains "owner/repo" with JSON-escaped slashes (\/); unescape them
@@ -2484,13 +2514,23 @@ static void RunThirdPartyAddonUpdates()
             CreateDirectoryW(interfaceDir.c_str(), nullptr);
             CreateDirectoryW(addonsDir.c_str(), nullptr);
             DeleteDirRecursive(addonPath);
-            CreateDirectoryW(addonPath.c_str(), nullptr);
-            ok = ExtractZipSmart(tmpZip, addonPath, true, [](int pct) {
-                PostPct(70 + pct * 30 / 100);
-            });
-            DeleteFileW(tmpZip.c_str());
-            if (ok) PostPct(100);
+            BOOL dirOk = CreateDirectoryW(addonPath.c_str(), nullptr);
+            if (!dirOk && GetLastError() != ERROR_ALREADY_EXISTS) {
+                AppendLog(L"RunThirdPartyAddonUpdates: failed to create destination directory '%s' (err=%lu)", addonPath.c_str(), GetLastError());
+                DeleteFileW(tmpZip.c_str());
+            } else {
+                ok = ExtractZipSmart(tmpZip, addonPath, true, [](int pct) {
+                    PostPct(70 + pct * 30 / 100);
+                });
+                DeleteFileW(tmpZip.c_str());
+                if (ok) {
+                    PostPct(100);
+                } else {
+                    AppendLog(L"RunThirdPartyAddonUpdates: extraction failed for '%s'", addonNameW.c_str());
+                }
+            }
         } else {
+            AppendLog(L"RunThirdPartyAddonUpdates: download failed for '%s'", addonNameW.c_str());
             DeleteFileW(tmpZip.c_str());
         }
     }
