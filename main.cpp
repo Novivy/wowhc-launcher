@@ -11,6 +11,7 @@
 #include <dwmapi.h>
 #include <uxtheme.h>
 #include <richedit.h>
+#include <iphlpapi.h>
 
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@
 #include <sstream>
 #include <algorithm>
 #include <tuple>
+#include <map>
 #include <cwchar>
 #include <memory>
 #include <ctime>
@@ -36,6 +38,7 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "version.lib")
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
 #include <wrl/client.h>
 #include <wrl/event.h>
@@ -1190,6 +1193,84 @@ static bool IsPortInUse(int port)
     closesocket(s);
     WSACleanup();
     return inUse;
+}
+
+// Reads the four ports HermesProxy will bind from its .config file, falling back to defaults.
+static std::vector<int> GetHermesPorts(const std::wstring& hermesExe)
+{
+    std::vector<int> ports = { 8081, 1119, 8084, 8086 };
+
+    size_t sep = hermesExe.rfind(L'\\');
+    if (sep == std::wstring::npos) return ports;
+    std::wstring cfgPath = hermesExe.substr(0, sep) + L"\\HermesProxy.config";
+
+    HANDLE hf = CreateFileW(cfgPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return ports;
+
+    DWORD sz = GetFileSize(hf, nullptr);
+    std::string cfg(sz, '\0');
+    DWORD rd = 0;
+    ReadFile(hf, cfg.data(), sz, &rd, nullptr);
+    CloseHandle(hf);
+    cfg.resize(rd);
+
+    auto readPort = [&](const char* key, int def) -> int {
+        std::string search = std::string("key=\"") + key + "\"";
+        size_t p = cfg.find(search);
+        if (p == std::string::npos) return def;
+        size_t vp = cfg.find("value=\"", p);
+        if (vp == std::string::npos) return def;
+        vp += 7;
+        size_t ve = cfg.find('"', vp);
+        if (ve == std::string::npos) return def;
+        try { int v = std::stoi(cfg.substr(vp, ve - vp)); return v > 0 ? v : def; } catch (...) { return def; }
+    };
+
+    ports[0] = readPort("RestPort",     8081);
+    ports[1] = readPort("BNetPort",     1119);
+    ports[2] = readPort("RealmPort",    8084);
+    ports[3] = readPort("InstancePort", 8086);
+    return ports;
+}
+
+// Scans the TCP listener table once and returns {port -> "owner.exe"} for each port in the input
+// that is actively listening. Ports not found in the table are absent from the result.
+// More reliable than bind()-based checks because it detects listeners on 127.0.0.1, not just 0.0.0.0.
+static std::map<int, std::wstring> FindListeningPorts(const std::vector<int>& ports)
+{
+    ULONG bufSize = 0;
+    GetExtendedTcpTable(nullptr, &bufSize, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
+    std::vector<BYTE> buf(bufSize + 1024);
+    if (GetExtendedTcpTable(buf.data(), &bufSize, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0) != NO_ERROR)
+        return {};
+
+    auto* table = reinterpret_cast<MIB_TCPTABLE_OWNER_PID*>(buf.data());
+
+    // Build port -> PID map from the table
+    std::map<int, DWORD> portPid;
+    for (DWORD i = 0; i < table->dwNumEntries; ++i)
+        portPid[ntohs((u_short)table->table[i].dwLocalPort)] = table->table[i].dwOwningPid;
+
+    std::map<int, std::wstring> result;
+    for (int port : ports) {
+        auto it = portPid.find(port);
+        if (it == portPid.end()) continue;
+        std::wstring owner;
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, it->second);
+        if (hProc) {
+            wchar_t name[MAX_PATH] = {};
+            DWORD len = MAX_PATH;
+            if (QueryFullProcessImageNameW(hProc, 0, name, &len)) {
+                std::wstring full(name);
+                size_t slash = full.rfind(L'\\');
+                owner = slash != std::wstring::npos ? full.substr(slash + 1) : full;
+            }
+            CloseHandle(hProc);
+        }
+        result[port] = owner;
+    }
+    return result;
 }
 
 // Ensures SET portal "127.0.0.1" in _classic_era_\WTF\Config.wtf so HermesProxy intercepts traffic.
@@ -4421,14 +4502,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             KillProcess(L"HermesProxy.exe");
                             Sleep(500);
                         }
-                        if (IsPortInUse(8084)) {
-                            MessageBoxW(g_hwnd,
-                                L"Port 8084 is already in use by another application.\r\n"
-                                L"HermesProxy needs this port to run.\r\n\r\n"
-                                L"Please close the application using port 8084 and try again.",
-                                L"Port 8084 Unavailable", MB_OK | MB_ICONWARNING);
-                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
-                            return;
+                        {
+                            auto blocking = FindListeningPorts(GetHermesPorts(hermesExe));
+                            if (!blocking.empty()) {
+                                std::wstring lines;
+                                for (auto& [p, owner] : blocking) {
+                                    if (!lines.empty()) lines += L"\r\n";
+                                    lines += L"    " + std::to_wstring(p);
+                                    if (!owner.empty()) lines += L"  (" + owner + L")";
+                                }
+                                std::wstring msg =
+                                    L"The following port(s) needed by HermesProxy are already in use:\r\n\r\n" +
+                                    lines +
+                                    L"\r\n\r\nPlease close the application(s) using these ports and try again.";
+                                MessageBoxW(g_hwnd, msg.c_str(), L"Ports Unavailable", MB_OK | MB_ICONWARNING);
+                                PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                                return;
+                            }
                         }
                         PatchConfigWtfPortal(clientPath);
                         SetClientFilesReadOnly(clientPath, true);
