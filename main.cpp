@@ -3124,7 +3124,10 @@ static void Worker()
         CreateDirectoryW(g_installPath.c_str(), nullptr);
         std::wstring tmpZip = InstallTempFile(L"wowclient_dl.zip");
         DlProgress dlClient{L"Downloading WoW client...", 65};
-        const wchar_t* dlUrl = (g_clientType == CT_112) ? CLIENT_112_DOWNLOAD_URL : CLIENT_DOWNLOAD_URL;
+        static const std::wstring s_114TestUrl = std::wstring(CLIENT_DOWNLOAD_URL).insert(
+            std::wstring(CLIENT_DOWNLOAD_URL).rfind(L'.'), L"-new");
+        const wchar_t* dlUrl = (g_clientType == CT_112) ? CLIENT_112_DOWNLOAD_URL
+                             : (g_testMode ? s_114TestUrl.c_str() : CLIENT_DOWNLOAD_URL);
         AppendLog(L"Worker: downloading client url='%s' dest='%s'", dlUrl, tmpZip.c_str());
         bool ok = HttpDownload(dlUrl, tmpZip,
             [&dlClient](DWORD64 dl, DWORD64 tot) { dlClient(dl, tot); });
