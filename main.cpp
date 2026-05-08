@@ -69,6 +69,9 @@ static constexpr wchar_t LAUNCHER_GH_REPO[]    = L"wowhc-launcher";
 static constexpr char    LAUNCHER_EXE_ASSET[]      = "WOW-HC-Launcher.exe";
 static constexpr char    LAUNCHER_FULL_ZIP_ASSET[] = "WOW-HC-Launcher-Full.zip";
 
+static constexpr wchar_t NAMEPLATE_41Y_ZIP_URL[]  = L"http://client.wow-hc.com/1.14.2/WowClassic_41yNameplates.zip";
+static constexpr wchar_t NAMEPLATE_41Y_EXE_NAME[] = L"WowClassic_41yNameplates.exe";
+
 #ifndef LAUNCHER_VERSION_STR
 #define LAUNCHER_VERSION_STR "v0.0.0-dev"
 #endif
@@ -238,6 +241,7 @@ static int        g_hermesClientSpellDelay = -1; // -1 = UNSET
 static int        g_hermesSpellQueueWindow = 300;
 static std::wstring g_customLaunchExe;            // empty = use default for current client type
 static bool         g_promptOnKillProcess = false; // ask before killing existing game processes
+static bool         g_use41ydNameplates   = true;  // CT_114 only: launch 41-yard nameplate EXE
 
 // Server-stats cache — fetched by FetchLiveData (10-min timer), reused by RunThirdPartyAddonUpdates
 static std::string            g_cachedStatsJson;
@@ -334,6 +338,7 @@ static void SaveConfig()
     WritePrivateProfileStringW(L"Launcher", L"RealmIndex", riBuf, ini);
     WritePrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", g_showRecordingNotifications ? L"1" : L"0", ini);
     WritePrivateProfileStringW(L"Launcher", L"PromptOnKillProcess", g_promptOnKillProcess ? L"1" : L"0", ini);
+    WritePrivateProfileStringW(L"Launcher", L"Use41ydNameplates",   g_use41ydNameplates   ? L"1" : L"0", ini);
     {
         wchar_t sb[16];
         swprintf_s(sb, L"%d", g_hermesServerSpellDelay);
@@ -393,6 +398,11 @@ static void LoadConfig()
         wchar_t rn[8] = {};
         GetPrivateProfileStringW(L"Launcher", L"PromptOnKillProcess", L"0", rn, 8, ini);
         g_promptOnKillProcess = (_wtoi(rn) != 0);
+    }
+    {
+        wchar_t rn[8] = {};
+        GetPrivateProfileStringW(L"Launcher", L"Use41ydNameplates", L"1", rn, 8, ini);
+        g_use41ydNameplates = (_wtoi(rn) != 0);
     }
     {
         wchar_t sb[16] = {};
@@ -1519,6 +1529,30 @@ static std::wstring StripAnsiW(const std::wstring& in)
     return out;
 }
 
+// Downloads WowClassic_41yNameplates.zip if the EXE is missing, extracts it to classicEraDir.
+// Returns the full path to WowClassic_41yNameplates.exe, or empty string on failure.
+static std::wstring CheckAndEnsure41ydNameplatesExe(const std::wstring& classicEraDir)
+{
+    std::wstring exePath = classicEraDir + L"\\" + NAMEPLATE_41Y_EXE_NAME;
+    if (GetFileAttributesW(exePath.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return exePath;
+
+    AppendLog(L"%s not found in '%s', downloading...", NAMEPLATE_41Y_EXE_NAME, classicEraDir.c_str());
+    std::wstring tmpZip = TempFile(L"WowClassic_41yNameplates.zip");
+    if (!HttpDownload(NAMEPLATE_41Y_ZIP_URL, tmpZip)) {
+        AppendLog(L"Failed to download %s", NAMEPLATE_41Y_ZIP_URL);
+        return L"";
+    }
+    bool ok = ExtractZipSmart(tmpZip, classicEraDir, false, nullptr);
+    DeleteFileW(tmpZip.c_str());
+    if (!ok || GetFileAttributesW(exePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        AppendLog(L"Extraction failed or EXE not found after extracting nameplate zip");
+        return L"";
+    }
+    AppendLog(L"Downloaded and extracted %s", NAMEPLATE_41Y_EXE_NAME);
+    return exePath;
+}
+
 static void LaunchHermesWithPipe(const std::wstring& exe)
 {
     SECURITY_ATTRIBUTES sa = { sizeof(sa), nullptr, TRUE };
@@ -1822,7 +1856,8 @@ static void PostGeneralSettingsStateToWebView()
         L",\"hermesSpellQueueWindow\":" + std::to_wstring(g_hermesSpellQueueWindow) +
         L",\"defaultLaunchExe\":\"" + JsonEscW(defaultExe) + L"\"" +
         L",\"customLaunchExe\":\"" + JsonEscW(g_customLaunchExe) + L"\"" +
-        L",\"promptOnKillProcess\":" + (g_promptOnKillProcess ? L"true" : L"false") + L"}";
+        L",\"promptOnKillProcess\":" + (g_promptOnKillProcess ? L"true" : L"false") +
+        L",\"use41ydNameplates\":"   + (g_use41ydNameplates   ? L"true" : L"false") + L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
 
@@ -4475,14 +4510,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         }
                     }).detach();
                 } else {
-                    // ── 1.14.2: start HermesProxy + Arctium ─────────────────
+                    // ── 1.14.2: start HermesProxy + Arctium (or 41yd EXE) ───
+                    bool use41yd = g_use41ydNameplates;
                     std::wstring hermesExe  = g_hermesExePath;
                     std::wstring arctiumExe = g_customLaunchExe.empty() ? g_arctiumExePath : g_customLaunchExe;
                     std::wstring clientPath = g_clientPath;
                     bool promptOnKill = g_promptOnKillProcess;
-                    std::thread([hermesExe, arctiumExe, clientPath, promptOnKill]() {
+                    std::thread([hermesExe, arctiumExe, clientPath, promptOnKill, use41yd]() {
 
-                        bool wowRunning    = IsProcessRunning(L"WowClassic.exe");
+                        bool wowRunning    = IsProcessRunning(L"WowClassic.exe") ||
+                                             IsProcessRunning(NAMEPLATE_41Y_EXE_NAME);
                         bool hermesRunning = IsProcessRunning(L"HermesProxy.exe");
                         if ((wowRunning || hermesRunning) && promptOnKill) {
                             int ans = MessageBoxW(g_hwnd,
@@ -4494,14 +4531,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 return;
                             }
                         }
-                        if (wowRunning) {
-                            KillProcess(L"WowClassic.exe");
-                            Sleep(500);
-                        }
-                        if (hermesRunning) {
-                            KillProcess(L"HermesProxy.exe");
-                            Sleep(500);
-                        }
+                        if (IsProcessRunning(L"WowClassic.exe"))      { KillProcess(L"WowClassic.exe");      Sleep(500); }
+                        if (IsProcessRunning(NAMEPLATE_41Y_EXE_NAME)) { KillProcess(NAMEPLATE_41Y_EXE_NAME); Sleep(500); }
+                        if (hermesRunning)                             { KillProcess(L"HermesProxy.exe");     Sleep(500); }
                         {
                             auto blocking = FindListeningPorts(GetHermesPorts(hermesExe));
                             if (!blocking.empty()) {
@@ -4524,34 +4556,63 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         SetClientFilesReadOnly(clientPath, true);
                         LaunchHermesWithPipe(hermesExe);
                         Sleep(1500);
-                        // Keep Arctium's handle so we know exactly which process we started
-                        // and can find the WowClassic.exe it spawns by parent PID.
-                        HANDLE hArctium = LaunchExeGetHandle(arctiumExe, L"--staticseed --version=ClassicEra");
-                        Sleep(2000);
-                        PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
 
-                        if (hArctium) {
-                            DWORD arctiumPid = GetProcessId(hArctium);
-                            std::thread([hArctium, arctiumPid]() {
-                                // Wait up to 60s for the WowClassic.exe that OUR Arctium spawned.
-                                // Keeping hArctium open prevents PID reuse until we've found the child.
-                                DWORD wowPid = WaitForChildProcess(arctiumPid, L"WowClassic.exe", 60000);
-                                CloseHandle(hArctium);
-                                if (!wowPid) return;
+                        if (use41yd) {
+                            // 41yd path: download EXE if missing, launch directly (no Arctium)
+                            std::wstring classicEraDir = clientPath + L"\\_classic_era_";
+                            std::wstring wowExePath = CheckAndEnsure41ydNameplatesExe(classicEraDir);
+                            if (wowExePath.empty()) {
+                                MessageBoxW(g_hwnd,
+                                    L"Failed to download WowClassic_41yNameplates.exe.\r\n"
+                                    L"Check your internet connection and try again.",
+                                    L"Download Error", MB_OK | MB_ICONERROR);
+                                PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                                return;
+                            }
+                            HANDLE hWow = LaunchExeGetHandle(wowExePath, L"");
+                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
 
-                                HANDLE hWow = OpenProcess(SYNCHRONIZE, FALSE, wowPid);
-                                if (!hWow) return;
-                                g_wowPid.store(wowPid);
+                            if (hWow) {
+                                g_wowPid.store(GetProcessId(hWow));
                                 WaitForSingleObject(hWow, INFINITE);
                                 g_wowPid.store(0);
                                 CloseHandle(hWow);
-
                                 PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
-                                // The specific WowClassic.exe we tracked has closed — stop HermesProxy.
                                 HANDLE hH = g_hermesProcess;
                                 if (hH) TerminateProcess(hH, 0);
                                 PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
-                            }).detach();
+                            }
+                        } else {
+                            // Normal path: Arctium spawns WowClassic.exe
+                            // Keep Arctium's handle so we know exactly which process we started
+                            // and can find the WowClassic.exe it spawns by parent PID.
+                            HANDLE hArctium = LaunchExeGetHandle(arctiumExe, L"--staticseed --version=ClassicEra");
+                            Sleep(2000);
+                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+
+                            if (hArctium) {
+                                DWORD arctiumPid = GetProcessId(hArctium);
+                                std::thread([hArctium, arctiumPid]() {
+                                    // Wait up to 60s for the WowClassic.exe that OUR Arctium spawned.
+                                    // Keeping hArctium open prevents PID reuse until we've found the child.
+                                    DWORD wowPid = WaitForChildProcess(arctiumPid, L"WowClassic.exe", 60000);
+                                    CloseHandle(hArctium);
+                                    if (!wowPid) return;
+
+                                    HANDLE hWow = OpenProcess(SYNCHRONIZE, FALSE, wowPid);
+                                    if (!hWow) return;
+                                    g_wowPid.store(wowPid);
+                                    WaitForSingleObject(hWow, INFINITE);
+                                    g_wowPid.store(0);
+                                    CloseHandle(hWow);
+
+                                    PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
+                                    // The specific WowClassic.exe we tracked has closed — stop HermesProxy.
+                                    HANDLE hH = g_hermesProcess;
+                                    if (hH) TerminateProcess(hH, 0);
+                                    PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                                }).detach();
+                            }
                         }
                     }).detach();
                 }
@@ -4860,6 +4921,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hermesSpellQueueWindow = JsonInt(body, "hermesSpellQueueWindow", g_hermesSpellQueueWindow);
         if (g_hermesSpellQueueWindow < 0) g_hermesSpellQueueWindow = 300;
         g_customLaunchExe = JsonStringW(body, "customLaunchExe");
+        if (g_clientType == CT_114)
+            g_use41ydNameplates = JsonBool(body, "use41ydNameplates", g_use41ydNameplates);
         SaveConfig();
         if (g_webview && g_wvReady)
             g_webview->PostWebMessageAsJson(L"{\"type\":\"hideModal\"}");

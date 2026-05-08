@@ -558,6 +558,9 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
   const [promptOnKillProcess, setPromptOnKillProcess] = React.useState(
     ini.promptOnKillProcess !== undefined ? ini.promptOnKillProcess : false
   );
+  const [use41ydNameplates, setUse41ydNameplates] = React.useState(
+    ini.use41ydNameplates !== undefined ? ini.use41ydNameplates : true
+  );
 
   React.useEffect(() => {
     if (pendingExe) { setExePath(pendingExe); onClearPendingExe && onClearPendingExe(); }
@@ -571,6 +574,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
     setSpellQueueWindow('300');
     setExePath(ini.defaultLaunchExe || '');
     setPromptOnKillProcess(false);
+    setUse41ydNameplates(true);
     onClearResetConfirmed && onClearResetConfirmed();
   }, [resetConfirmed]);
 
@@ -592,6 +596,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
     return {
       showRecordingNotifications,
       promptOnKillProcess,
+      use41ydNameplates,
       hermesServerSpellDelay: serverSpellDelay === '' ? null : (parseInt(serverSpellDelay) || 0),
       hermesClientSpellDelay: clientSpellDelay === '' ? null : (parseInt(clientSpellDelay) || 0),
       hermesSpellQueueWindow: Math.max(0, parseInt(spellQueueWindow) || 300),
@@ -616,14 +621,19 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
 
       <div style={sep} />
       <div style={{ marginBottom: 4, fontSize: 10, color: T.textFaint, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-        Game Launch
+        Game Settings
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 6 }}>
         <Checkbox
           checked={promptOnKillProcess}
           onChange={e => setPromptOnKillProcess(e.target.checked)}
-          label="Ask before closing a running game session"
+          label="Ask before closing a running game session when clicking START GAME"
         />
+        {isHermes && <Checkbox
+          checked={use41ydNameplates}
+          onChange={e => setUse41ydNameplates(e.target.checked)}
+          label="Increase in-game Name Plates distance to 41yd (default 20yd)"
+        />}
       </div>
 
       {isHermes && <>
