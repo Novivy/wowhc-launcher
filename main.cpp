@@ -57,7 +57,9 @@ static constexpr wchar_t CLIENT_112_DOWNLOAD_URL[] =
 
 static constexpr wchar_t REALM_NORMAL_SERVER[] = L"logon-eu-0.wow-hc.com";
 static constexpr wchar_t REALM_PTR_SERVER[]    = L"ptr-logon-eu-2.wow-hc.com";
+#ifdef _DEBUG
 static constexpr wchar_t REALM_DEV_SERVER[]    = L"192.168.0.30";
+#endif
 
 static constexpr wchar_t APP_NAME[]        = L"WOW-HC Launcher";
 static constexpr wchar_t HERMES_GH_OWNER[] = L"Novivy";
@@ -954,24 +956,25 @@ static std::wstring InstallTempFile(const std::wstring& name)
 }
 
 // ── Write a PS script to disk (UTF-8 with BOM) ─────────────────────────────────
-static bool WritePsScript(const std::wstring& path, const std::wstring& script)
+static std::wstring Base64EncodeForPS(const std::wstring& script)
 {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    static const BYTE bom[] = {0xEF, 0xBB, 0xBF};
-    DWORD w;
-    WriteFile(h, bom, 3, &w, nullptr);
-    int len = WideCharToMultiByte(CP_UTF8, 0, script.c_str(), (int)script.size(),
-        nullptr, 0, nullptr, nullptr);
-    if (len > 0) {
-        std::vector<char> buf(len);
-        WideCharToMultiByte(CP_UTF8, 0, script.c_str(), (int)script.size(),
-            buf.data(), len, nullptr, nullptr);
-        WriteFile(h, buf.data(), len, &w, nullptr);
+    // PowerShell -EncodedCommand expects base64 of UTF-16 LE bytes (Windows wchar_t native)
+    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(script.data());
+    size_t len = script.size() * sizeof(wchar_t);
+    static const char kB64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::wstring out;
+    out.reserve(((len + 2) / 3) * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        unsigned int b = (unsigned int)bytes[i] << 16;
+        if (i + 1 < len) b |= (unsigned int)bytes[i + 1] << 8;
+        if (i + 2 < len) b |= bytes[i + 2];
+        out += (wchar_t)kB64[(b >> 18) & 63];
+        out += (wchar_t)kB64[(b >> 12) & 63];
+        out += (i + 1 < len) ? (wchar_t)kB64[(b >> 6) & 63] : L'=';
+        out += (i + 2 < len) ? (wchar_t)kB64[b & 63] : L'=';
     }
-    CloseHandle(h);
-    return true;
+    return out;
 }
 
 // ── ZIP extraction with progress via PowerShell ────────────────────────────────
@@ -1014,18 +1017,13 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
         L"  $z.Dispose()\r\n"
         L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
 
-    std::wstring scriptPath = TempFile(L"launcher_extract.ps1");
-    if (!WritePsScript(scriptPath, script)) { AppendLog(L"ExtractZipSmart: WritePsScript failed zip='%s'", zip.c_str()); return false; }
-
-    std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \""
-        + scriptPath + L"\"";
+    std::wstring cmd = L"powershell.exe -NonInteractive -EncodedCommand " + Base64EncodeForPS(script);
     std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
 
     HANDLE hRead, hWrite;
     SECURITY_ATTRIBUTES sa = {}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
     if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
         AppendLog(L"ExtractZipSmart: CreatePipe failed (0x%08lX) zip='%s'", GetLastError(), zip.c_str());
-        DeleteFileW(scriptPath.c_str());
         return false;
     }
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
@@ -1044,7 +1042,6 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
     if (!started) {
         AppendLog(L"ExtractZipSmart: CreateProcessW(powershell) failed (0x%08lX) zip='%s'", GetLastError(), zip.c_str());
         CloseHandle(hRead);
-        DeleteFileW(scriptPath.c_str());
         return false;
     }
 
@@ -1072,7 +1069,6 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
     DWORD exitCode = 1;
     GetExitCodeProcess(pi.hProcess, &exitCode);
     CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-    DeleteFileW(scriptPath.c_str());
     AppendLog(L"ExtractZipSmart: exit=%lu zip='%s'", exitCode, zip.c_str());
     return exitCode == 0;
 }
@@ -2788,11 +2784,9 @@ static void RunLauncherUpdateCheck(bool forced = false)
         L"  $z.Dispose()\r\n"
         L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
 
-    std::wstring scriptPath = TempFile(L"launcher_update_extract.ps1");
     bool psOk = false;
-    if (WritePsScript(scriptPath, script)) {
-        std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \""
-            + scriptPath + L"\"";
+    {
+        std::wstring cmd = L"powershell.exe -NonInteractive -EncodedCommand " + Base64EncodeForPS(script);
         std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
         STARTUPINFOW si = {}; si.cb = sizeof(si);
         si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
@@ -2806,7 +2800,6 @@ static void RunLauncherUpdateCheck(bool forced = false)
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
         }
-        DeleteFileW(scriptPath.c_str());
     }
     DeleteFileW(tmpZip.c_str());
 
@@ -2949,12 +2942,9 @@ static void CheckAndBootstrapFFmpegDlls()
         L"  $z.Dispose()\r\n"
         L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
 
-    std::wstring scriptPath = TempFile(L"launcher_ffmpeg_install.ps1");
-    if (WritePsScript(scriptPath, script)) {
-        std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \""
-            + scriptPath + L"\"";
+    {
+        std::wstring cmd = L"powershell.exe -NonInteractive -EncodedCommand " + Base64EncodeForPS(script);
         std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
-
         STARTUPINFOW si = {}; si.cb = sizeof(si);
         si.dwFlags     = STARTF_USESHOWWINDOW;
         si.wShowWindow = SW_HIDE;
@@ -2965,7 +2955,6 @@ static void CheckAndBootstrapFFmpegDlls()
             CloseHandle(pi.hProcess);
             CloseHandle(pi.hThread);
         }
-        DeleteFileW(scriptPath.c_str());
     }
 
     DeleteFileW(tmpZip.c_str());
@@ -3515,7 +3504,9 @@ static void DrawModalButton(DRAWITEMSTRUCT* dis, bool isSecondary, bool hovered)
 static void UpdateRealmConfig(int realmIndex)
 {
     const wchar_t* server = (realmIndex == 1) ? REALM_PTR_SERVER
+#ifdef _DEBUG
                           : (realmIndex == 2) ? REALM_DEV_SERVER
+#endif
                           : REALM_NORMAL_SERVER;
     g_realmIndex = realmIndex;
     wchar_t riBuf[8]; swprintf_s(riBuf, L"%d", realmIndex);
@@ -5063,7 +5054,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         int s = (int)wp;
         if (s >= 0 && s <= WS_NO_PATH) {
-            g_currentStatus = STATUS_TEXT[s];
+            if (s == WS_ERROR && IsDevBuild())
+                g_currentStatus = L"(Dev build - Github Downloads are skipped)";
+            else
+                g_currentStatus = STATUS_TEXT[s];
             PostStateToWebView();
         }
         break;
@@ -5732,11 +5726,9 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         L"}\r\n"
         L"if(-not $ok){exit 1}\r\n";
 
-    std::wstring scriptPath = TempFile(L"launcher_ui_install.ps1");
     bool psOk = false;
-    if (WritePsScript(scriptPath, script)) {
-        std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \""
-            + scriptPath + L"\"";
+    {
+        std::wstring cmd = L"powershell.exe -NonInteractive -EncodedCommand " + Base64EncodeForPS(script);
         std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
         STARTUPINFOW si = {}; si.cb = sizeof(si);
         si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
@@ -5755,7 +5747,6 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         } else {
             AppendLog(L"UI bootstrap: PowerShell launch failed (GetLastError=%lu)", GetLastError());
         }
-        DeleteFileW(scriptPath.c_str());
     }
 
     // C++ fallback: Shell.Application COM directly, for when powershell.exe is absent
