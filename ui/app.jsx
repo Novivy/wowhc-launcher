@@ -150,7 +150,7 @@ const BottomBar = ({ state, onAction, booting }) => {
             {booting
               ? '◌ INITIALISING'
               : (isInstalled
-                  ? ('● ' + (status || 'READY') + ' · ' + progressPct + '%')
+                  ? ('● ' + (status || 'READY') + (progressPct > 0 && progressPct < 100 ? ' · ' + progressPct + '%' : ''))
                   : ('○ ' + (status || 'NOT INSTALLED')))}
           </span>
           <div style={{ position: 'relative', height: 8, background: '#0a0604', border: '1px solid ' + T.line2 }}>
