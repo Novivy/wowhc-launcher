@@ -1362,6 +1362,11 @@ static void PatchConfigWtf(const std::wstring& clientPath, bool use41yd)
         out += nameplateTarget + "\r\n";
     }
 
+    {
+        DWORD attr = GetFileAttributesW(path.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_READONLY))
+            SetFileAttributesW(path.c_str(), attr & ~FILE_ATTRIBUTE_READONLY);
+    }
     hf = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hf != INVALID_HANDLE_VALUE) {
