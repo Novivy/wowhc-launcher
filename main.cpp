@@ -69,8 +69,8 @@ static constexpr wchar_t LAUNCHER_GH_REPO[]    = L"wowhc-launcher";
 static constexpr char    LAUNCHER_EXE_ASSET[]      = "WOW-HC-Launcher.exe";
 static constexpr char    LAUNCHER_FULL_ZIP_ASSET[] = "WOW-HC-Launcher-Full.zip";
 
-static constexpr wchar_t NAMEPLATE_41Y_ZIP_URL[]  = L"http://client.wow-hc.com/1.14.2/WowClassic_41yNameplates.zip";
-static constexpr wchar_t NAMEPLATE_41Y_EXE_NAME[] = L"WowClassic_41yNameplates.exe";
+static constexpr wchar_t NAMEPLATE_41Y_ZIP_URL[]  = L"http://client.wow-hc.com/1.14.2/WowClassic41yd.zip";
+static constexpr wchar_t NAMEPLATE_41Y_EXE_NAME[] = L"WowClassic41yd.exe";
 
 #ifndef LAUNCHER_VERSION_STR
 #define LAUNCHER_VERSION_STR "v0.0.0-dev"
@@ -1532,8 +1532,8 @@ static std::wstring StripAnsiW(const std::wstring& in)
     return out;
 }
 
-// Downloads WowClassic_41yNameplates.zip if the EXE is missing, extracts it to classicEraDir.
-// Returns the full path to WowClassic_41yNameplates.exe, or empty string on failure.
+// Downloads WowClassic41yd.zip if the EXE is missing, extracts it to classicEraDir.
+// Returns the full path to WowClassic41yd.exe, or empty string on failure.
 static std::wstring CheckAndEnsure41ydNameplatesExe(const std::wstring& classicEraDir)
 {
     std::wstring exePath = classicEraDir + L"\\" + NAMEPLATE_41Y_EXE_NAME;
@@ -1542,7 +1542,7 @@ static std::wstring CheckAndEnsure41ydNameplatesExe(const std::wstring& classicE
 
     AppendLog(L"%s not found in '%s', downloading...", NAMEPLATE_41Y_EXE_NAME, classicEraDir.c_str());
     PostText(L"Downloading 41yd nameplate client patch..."); PostPct(0);
-    std::wstring tmpZip = TempFile(L"WowClassic_41yNameplates.zip");
+    std::wstring tmpZip = TempFile(L"WowClassic41yd.zip");
     if (!HttpDownload(NAMEPLATE_41Y_ZIP_URL, tmpZip, [](DWORD64 dl, DWORD64 tot) {
             if (tot > 0) PostPct((int)(dl * 80 / tot));
         })) {
@@ -4520,7 +4520,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             else if (installed && g_playReady.load()) {
                 g_isLaunching = true;
-                if (RB_GetSettings().autoStartOnPlay && !RB_IsRunning()) {
+                if (RB_GetSettings().autoStartOnPlay && !RB_IsRunning() && g_realmIndex != 2) {
                     EnsureRecordingSaveFolder(hwnd);
                     RB_Start();
                 }
@@ -4614,7 +4614,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             std::wstring wowExePath = CheckAndEnsure41ydNameplatesExe(classicEraDir);
                             if (wowExePath.empty()) {
                                 MessageBoxW(g_hwnd,
-                                    L"Failed to download WowClassic_41yNameplates.exe.\r\n"
+                                    L"Failed to download WowClassic41yd.exe.\r\n"
                                     L"Check your internet connection and try again.",
                                     L"Download Error", MB_OK | MB_ICONERROR);
                                 PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
