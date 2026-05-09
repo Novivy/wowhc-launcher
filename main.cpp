@@ -2101,8 +2101,15 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
 
     if (hDlg) DestroyWindow(hDlg);
 
-    // Verify the runtime is actually available now (silent failures on Wine).
-    if (!CheckWebView2Runtime()) {
+    // The bootstrapper exits before its child installer finishes COM registration.
+    // Poll up to 30 seconds so the relaunched process finds the runtime truly ready.
+    bool runtimeReady = false;
+    for (int i = 0; i < 60 && !runtimeReady; ++i) {
+        Sleep(500);
+        runtimeReady = CheckWebView2Runtime();
+    }
+
+    if (!runtimeReady) {
         MessageBoxW(hwnd,
             L"WebView2 installation did not complete successfully.\n\n"
             L"Wine users: run 'winetricks webview2' in your Wine prefix instead.\n\n"
