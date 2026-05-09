@@ -1854,6 +1854,9 @@ static void PostGeneralSettingsStateToWebView()
     if (g_clientType == CT_114)      defaultExe = g_arctiumExePath;
     else if (g_clientType == CT_112) defaultExe = g_wowTweakedExePath;
 
+    std::wstring nameplate41ydExe;
+    if (g_clientType == CT_114 && !g_clientPath.empty())
+        nameplate41ydExe = g_clientPath + L"\\_classic_era_\\" + NAMEPLATE_41Y_EXE_NAME;
 
     std::wstring json =
         std::wstring(L"{\"type\":\"generalSettingsState\"") +
@@ -1863,6 +1866,7 @@ static void PostGeneralSettingsStateToWebView()
         L",\"hermesClientSpellDelay\":" + csd +
         L",\"hermesSpellQueueWindow\":" + std::to_wstring(g_hermesSpellQueueWindow) +
         L",\"defaultLaunchExe\":\"" + JsonEscW(defaultExe) + L"\"" +
+        L",\"nameplate41ydExe\":\"" + JsonEscW(nameplate41ydExe) + L"\"" +
         L",\"customLaunchExe\":\"" + JsonEscW(g_customLaunchExe) + L"\"" +
         L",\"promptOnKillProcess\":" + (g_promptOnKillProcess ? L"true" : L"false") +
         L",\"use41ydNameplates\":"   + (g_use41ydNameplates   ? L"true" : L"false") + L"}";

@@ -554,7 +554,11 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
   const [spellQueueWindow, setSpellQueueWindow] = React.useState(
     String(ini.hermesSpellQueueWindow !== undefined ? ini.hermesSpellQueueWindow : 300)
   );
-  const [exePath, setExePath] = React.useState(ini.customLaunchExe || ini.defaultLaunchExe || '');
+  const [exePath, setExePath] = React.useState(
+    (ini.use41ydNameplates !== false)
+      ? (ini.nameplate41ydExe || ini.defaultLaunchExe || '')
+      : (ini.customLaunchExe || ini.defaultLaunchExe || '')
+  );
   const [promptOnKillProcess, setPromptOnKillProcess] = React.useState(
     ini.promptOnKillProcess !== undefined ? ini.promptOnKillProcess : false
   );
@@ -572,7 +576,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
     setServerSpellDelay('15');
     setClientSpellDelay('15');
     setSpellQueueWindow('300');
-    setExePath(ini.defaultLaunchExe || '');
+    setExePath(ini.nameplate41ydExe || ini.defaultLaunchExe || '');
     setPromptOnKillProcess(false);
     setUse41ydNameplates(true);
     onClearResetConfirmed && onClearResetConfirmed();
@@ -600,7 +604,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
       hermesServerSpellDelay: serverSpellDelay === '' ? null : (parseInt(serverSpellDelay) || 0),
       hermesClientSpellDelay: clientSpellDelay === '' ? null : (parseInt(clientSpellDelay) || 0),
       hermesSpellQueueWindow: Math.max(0, parseInt(spellQueueWindow) || 300),
-      customLaunchExe: exePath,
+      customLaunchExe: use41ydNameplates ? '' : exePath,
     };
   }
 
@@ -631,7 +635,13 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
         />
         {isHermes && <Checkbox
           checked={use41ydNameplates}
-          onChange={e => setUse41ydNameplates(e.target.checked)}
+          onChange={e => {
+            const checked = e.target.checked;
+            setUse41ydNameplates(checked);
+            setExePath(checked
+              ? (ini.nameplate41ydExe || ini.defaultLaunchExe || '')
+              : (ini.customLaunchExe  || ini.defaultLaunchExe || ''));
+          }}
           label="Increase in-game Name Plates distance to 41yd (default 20yd)"
         />}
       </div>
@@ -690,7 +700,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
             readOnly
             style={{ ...inp, flex: 1, cursor: 'default', fontSize: 11 }}
           />
-          <ModalBtn label="Browse" onClick={() => onAction('generalSettingsExeBrowse')} style={{ height: 28 }} />
+          <ModalBtn label="Browse" onClick={() => onAction('generalSettingsExeBrowse')} style={{ height: 28 }} disabled={use41ydNameplates} />
         </div>
         <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
           Executable launched when clicking Start Game
