@@ -70,7 +70,7 @@ static constexpr char    LAUNCHER_EXE_ASSET[]      = "WOW-HC-Launcher.exe";
 static constexpr char    LAUNCHER_FULL_ZIP_ASSET[] = "WOW-HC-Launcher-Full.zip";
 
 static constexpr wchar_t NAMEPLATE_41Y_ZIP_URL[]  = L"http://client.wow-hc.com/1.14.2/WowClassic_41yNameplates.zip";
-static constexpr wchar_t NAMEPLATE_41Y_EXE_NAME[] = L"WowClassic_ForCustomServers.exe";
+static constexpr wchar_t NAMEPLATE_41Y_EXE_NAME[] = L"WowClassic_41yNameplates.exe";
 
 #ifndef LAUNCHER_VERSION_STR
 #define LAUNCHER_VERSION_STR "v0.0.0-dev"
@@ -2098,11 +2098,16 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
     // Relaunch the launcher so it picks up the newly installed WebView2 runtime.
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    HINSTANCE h = ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL);
-    if ((INT_PTR)h <= 32) {
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(exePath, nullptr, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
         MessageBoxW(hwnd,
-            L"WebView2 has been installed.\nPlease restart the launcher.",
+            L"WebView2 has been installed.\nPlease restart the launcher manually.",
             L"Restart Required", MB_OK | MB_ICONINFORMATION);
+    } else {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
     }
     return false;
 }
@@ -4942,6 +4947,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_GEN_SETTINGS_EXE_BROWSE:
     {
+        int warn = MessageBoxW(hwnd,
+            L"Changing the launch executable is an advanced option.\n\n"
+            L"Do not modify this unless you know what you are doing.\n\n"
+            L"Are you sure you want to continue?",
+            L"Change Executable", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+        if (warn != IDYES) return 0;
+
         IFileOpenDialog* pDlg = nullptr;
         std::wstring chosen;
         if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
