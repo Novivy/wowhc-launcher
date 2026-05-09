@@ -700,7 +700,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
             readOnly
             style={{ ...inp, flex: 1, cursor: 'default', fontSize: 11 }}
           />
-          <ModalBtn label="Browse" onClick={() => onAction('generalSettingsExeBrowse')} style={{ height: 28 }} disabled={use41ydNameplates} />
+          <ModalBtn label="Browse" onClick={() => onAction('generalSettingsExeBrowse')} style={{ height: 28 }} disabled={isHermes && use41ydNameplates} />
         </div>
         <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
           Executable launched when clicking Start Game
