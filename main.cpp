@@ -49,7 +49,7 @@
 
 // ── Build-time config ──────────────────────────────────────────────────────────
 static constexpr wchar_t CLIENT_DOWNLOAD_URL[] =
-    L"https://client.wow-hc.com/1.14.2/WOW-1.14.2.zip";
+    L"https://client.wow-hc.com/1.14.2/WOW-1.14.2-new.zip";
    // L"https://dl.wow-hc.com/clients/WOW-Classic-1.14.2.zip";
 
 static constexpr wchar_t CLIENT_112_DOWNLOAD_URL[] =
@@ -4564,7 +4564,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     bool use41yd = g_use41ydNameplates;
                     std::wstring hermesExe  = g_hermesExePath;
                     std::wstring arctiumExe = g_customLaunchExe.empty() ? g_arctiumExePath : g_customLaunchExe;
-                    bool useArctiumParams   = g_customLaunchExe.empty(); // params only for real Arctium
+                    bool useArctiumParams   = g_customLaunchExe.empty() || g_customLaunchExe == g_arctiumExePath;
                     std::wstring clientPath = g_clientPath;
                     bool promptOnKill = g_promptOnKillProcess;
                     std::thread([hermesExe, arctiumExe, clientPath, promptOnKill, use41yd, useArctiumParams]() {

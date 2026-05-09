@@ -287,12 +287,12 @@ const ConsoleOverlay = React.forwardRef(function ConsoleOverlay({ lines }, ref) 
   return (
     <div style={{
       position: 'absolute', bottom: 0, left: 0, right: 0,
-      height: '55%', background: 'rgba(0,0,0,0.96)',
+      height: '61%', background: 'rgba(0,0,0,0.96)',
       borderTop: '1px solid rgba(180,130,60,0.15)',
       display: 'flex', flexDirection: 'column', overflow: 'hidden',
       fontFamily: 'ui-monospace, Consolas, monospace', fontSize: 10, zIndex: 10,
     }}>
-      <div style={{ padding: '4px 10px', borderBottom: '1px solid rgba(180,130,60,0.1)', color: T.textFaint, fontSize: 11, letterSpacing: '0.1em', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ padding: '4px 4px 4px 10px', borderBottom: '1px solid rgba(180,130,60,0.1)', color: T.textFaint, fontSize: 11, letterSpacing: '0.1em', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span>HERMESPROXY OUTPUT</span>
         <button onClick={handleCopy} title="Copy all output" style={{ background: 'none', border: '1px solid rgba(180,130,60,0.25)', color: copied ? '#7dbb5a' : T.textFaint, fontFamily: 'inherit', fontSize: 10, letterSpacing: '0.05em', padding: '1px 7px', cursor: 'pointer', lineHeight: 1.6 }}>
           {copied ? 'COPIED' : 'COPY OUTPUT'}
@@ -604,7 +604,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
       hermesServerSpellDelay: serverSpellDelay === '' ? null : (parseInt(serverSpellDelay) || 0),
       hermesClientSpellDelay: clientSpellDelay === '' ? null : (parseInt(clientSpellDelay) || 0),
       hermesSpellQueueWindow: Math.max(0, parseInt(spellQueueWindow) || 300),
-      customLaunchExe: use41ydNameplates ? '' : exePath,
+      customLaunchExe: use41ydNameplates ? '' : (exePath === ini.defaultLaunchExe ? '' : exePath),
     };
   }
 
