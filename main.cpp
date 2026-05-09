@@ -4554,6 +4554,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             return;
                         }
                         g_wowPid.store(GetProcessId(hWow));
+                        PostText(L"Game is running"); PostPct(100);
                         WaitForSingleObject(hWow, INFINITE);
                         g_wowPid.store(0);
                         CloseHandle(hWow);
@@ -4627,6 +4628,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 return;
                             }
                             g_wowPid.store(GetProcessId(hWow));
+                            PostText(L"Game is running"); PostPct(100);
                             WaitForSingleObject(hWow, INFINITE);
                             g_wowPid.store(0);
                             CloseHandle(hWow);
@@ -4663,6 +4665,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                         return;
                                     }
                                     g_wowPid.store(wowPid);
+                                    PostText(L"Game is running"); PostPct(100);
                                     WaitForSingleObject(hWow, INFINITE);
                                     g_wowPid.store(0);
                                     CloseHandle(hWow);
