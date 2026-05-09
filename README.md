@@ -20,7 +20,7 @@ That is the full scope of what it does. It does not touch anything outside the g
 
 The launcher is currently **unsigned**, a code-signing certificate is in the process of being obtained. Without a signature, Windows SmartScreen and some AV engines will warn on any new `.exe` they haven't seen before, regardless of what it actually does.
 
-A few things specifically make unsigned game launchers look trigger scans:
+A few things specifically make unsigned game launchers trigger scans:
 
 - **Self-update**: the launcher can update itself by downloading a new version (with your approval) and replacing its own `.exe`. This is the same pattern used by Steam, Battle.net, and every other game launcher, but without a signature it can look bad.
 - **Hermes/Wow Launch**: it launches HermesProxy and the WoW client
