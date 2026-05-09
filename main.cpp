@@ -1727,9 +1727,15 @@ static void PostStateToWebView(bool force)
                            : (g_clientType == CT_112) ? L"v1.12.1" : L"";
 
     // Determine the active launch exe basename
-    std::wstring activeLaunchExe = g_customLaunchExe.empty()
-        ? (g_clientType == CT_114 ? g_arctiumExePath : g_wowTweakedExePath)
-        : g_customLaunchExe;
+    std::wstring activeLaunchExe;
+    if (!g_customLaunchExe.empty())
+        activeLaunchExe = g_customLaunchExe;
+    else if (g_clientType == CT_114 && g_use41ydNameplates)
+        activeLaunchExe = NAMEPLATE_41Y_EXE_NAME;
+    else if (g_clientType == CT_114)
+        activeLaunchExe = g_arctiumExePath;
+    else
+        activeLaunchExe = g_wowTweakedExePath;
     {
         size_t sl = activeLaunchExe.rfind(L'\\');
         if (sl != std::wstring::npos) activeLaunchExe = activeLaunchExe.substr(sl + 1);
@@ -4558,9 +4564,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     bool use41yd = g_use41ydNameplates;
                     std::wstring hermesExe  = g_hermesExePath;
                     std::wstring arctiumExe = g_customLaunchExe.empty() ? g_arctiumExePath : g_customLaunchExe;
+                    bool useArctiumParams   = g_customLaunchExe.empty(); // params only for real Arctium
                     std::wstring clientPath = g_clientPath;
                     bool promptOnKill = g_promptOnKillProcess;
-                    std::thread([hermesExe, arctiumExe, clientPath, promptOnKill, use41yd]() {
+                    std::thread([hermesExe, arctiumExe, clientPath, promptOnKill, use41yd, useArctiumParams]() {
 
                         bool wowRunning    = IsProcessRunning(L"WowClassic.exe") ||
                                              IsProcessRunning(NAMEPLATE_41Y_EXE_NAME);
@@ -4630,7 +4637,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             // Normal path: Arctium spawns WowClassic.exe
                             // Keep Arctium's handle so we know exactly which process we started
                             // and can find the WowClassic.exe it spawns by parent PID.
-                            HANDLE hArctium = LaunchExeGetHandle(arctiumExe, L"--staticseed --version=ClassicEra");
+                            HANDLE hArctium = LaunchExeGetHandle(arctiumExe,
+                                useArctiumParams ? L"--staticseed --version=ClassicEra" : L"");
                             Sleep(2000);
                             PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
 
@@ -4970,7 +4978,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         SaveConfig();
         if (g_webview && g_wvReady)
             g_webview->PostWebMessageAsJson(L"{\"type\":\"hideModal\"}");
-        PostStateToWebView();
+        PostStateToWebView(true);
         return 0;
     }
 
