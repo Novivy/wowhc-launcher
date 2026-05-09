@@ -70,7 +70,7 @@ static constexpr char    LAUNCHER_EXE_ASSET[]      = "WOW-HC-Launcher.exe";
 static constexpr char    LAUNCHER_FULL_ZIP_ASSET[] = "WOW-HC-Launcher-Full.zip";
 
 static constexpr wchar_t NAMEPLATE_41Y_ZIP_URL[]  = L"http://client.wow-hc.com/1.14.2/WowClassic_41yNameplates.zip";
-static constexpr wchar_t NAMEPLATE_41Y_EXE_NAME[] = L"WowClassic_41yNameplates.exe";
+static constexpr wchar_t NAMEPLATE_41Y_EXE_NAME[] = L"WowClassic_ForCustomServers.exe";
 
 #ifndef LAUNCHER_VERSION_STR
 #define LAUNCHER_VERSION_STR "v0.0.0-dev"
@@ -682,6 +682,7 @@ static std::string JsonExtractBlock(const std::string& json, const std::string& 
 }
 
 static void PostText(std::wstring text); // forward declaration
+static void PostPct(int pct);           // forward declaration
 static bool IsDevBuild();               // forward declaration
 
 // ── WinHTTP helpers ────────────────────────────────────────────────────────────
@@ -1538,12 +1539,18 @@ static std::wstring CheckAndEnsure41ydNameplatesExe(const std::wstring& classicE
         return exePath;
 
     AppendLog(L"%s not found in '%s', downloading...", NAMEPLATE_41Y_EXE_NAME, classicEraDir.c_str());
+    PostText(L"Downloading 41yd nameplate client patch..."); PostPct(0);
     std::wstring tmpZip = TempFile(L"WowClassic_41yNameplates.zip");
-    if (!HttpDownload(NAMEPLATE_41Y_ZIP_URL, tmpZip)) {
+    if (!HttpDownload(NAMEPLATE_41Y_ZIP_URL, tmpZip, [](DWORD64 dl, DWORD64 tot) {
+            if (tot > 0) PostPct((int)(dl * 80 / tot));
+        })) {
         AppendLog(L"Failed to download %s", NAMEPLATE_41Y_ZIP_URL);
         return L"";
     }
-    bool ok = ExtractZipSmart(tmpZip, classicEraDir, false, nullptr);
+    PostText(L"Extracting 41yd nameplate client patch..."); PostPct(80);
+    bool ok = ExtractZipSmart(tmpZip, classicEraDir, false, [](int pct) {
+        PostPct(80 + pct * 20 / 100);
+    });
     DeleteFileW(tmpZip.c_str());
     if (!ok || GetFileAttributesW(exePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         AppendLog(L"Extraction failed or EXE not found after extracting nameplate zip");
