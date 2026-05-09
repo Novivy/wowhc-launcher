@@ -955,138 +955,6 @@ static std::wstring InstallTempFile(const std::wstring& name)
     return TempFile(name);
 }
 
-static std::wstring GetExeDir();
-
-// ── Write a PS script to disk next to the EXE (UTF-8 with BOM) ────────────────
-// Written to the EXE directory so any folder exclusion the user adds for the
-// launcher also covers the script — far less suspicious to AV than -EncodedCommand.
-static bool WritePsScript(const std::wstring& path, const std::wstring& script)
-{
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    static const BYTE bom[] = { 0xEF, 0xBB, 0xBF };
-    DWORD w;
-    WriteFile(h, bom, 3, &w, nullptr);
-    int len = WideCharToMultiByte(CP_UTF8, 0, script.c_str(), (int)script.size(),
-        nullptr, 0, nullptr, nullptr);
-    if (len > 0) {
-        std::vector<char> buf(len);
-        WideCharToMultiByte(CP_UTF8, 0, script.c_str(), (int)script.size(),
-            buf.data(), len, nullptr, nullptr);
-        WriteFile(h, buf.data(), len, &w, nullptr);
-    }
-    CloseHandle(h);
-    return true;
-}
-
-static std::wstring PsScriptPath()
-{
-    return GetExeDir() + L"\\launcher_script.ps1";
-}
-
-// ── ZIP extraction with progress via PowerShell ────────────────────────────────
-static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir,
-    bool stripTopLevel, const std::function<void(int)>& onProgress)
-{
-    auto escPS = [](const std::wstring& s) {
-        std::wstring r;
-        for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
-        return r;
-    };
-
-    std::wstring strip = stripTopLevel ? L"$true" : L"$false";
-    std::wstring script =
-        L"[Console]::Out.AutoFlush=$true\r\n"
-        L"Add-Type -AN System.IO.Compression.FileSystem\r\n"
-        L"try {\r\n"
-        L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(zip) + L"')\r\n"
-        L"  $en=@($z.Entries|Where-Object{$_.Name -ne ''})\r\n"
-        L"  $pfx=''\r\n"
-        L"  if(" + strip + L"){\r\n"
-        L"    $tops=@($z.Entries|ForEach-Object{($_.FullName -split '/')[0]}|Select-Object -Unique)\r\n"
-        L"    if($tops.Count -eq 1 -and $z.Entries[0].FullName.Contains('/')){\r\n"
-        L"      $pfx=[string]$tops[0]+'/'\r\n"
-        L"    }\r\n"
-        L"  }\r\n"
-        L"  $totalBytes=[long]($en|Measure-Object -Property Length -Sum).Sum\r\n"
-        L"  if($totalBytes -lt 1){$totalBytes=1}\r\n"
-        L"  $doneBytes=[long]0\r\n"
-        L"  $lastPct=-1\r\n"
-        L"  foreach($e in $en){\r\n"
-        L"    $rel=if($pfx -and $e.FullName.StartsWith($pfx)){$e.FullName.Substring($pfx.Length)}else{$e.FullName}\r\n"
-        L"    if($rel){\r\n"
-        L"      $d=[System.IO.Path]::Combine('" + escPS(destDir) + L"',$rel.Replace('/','\\'))\r\n"
-        L"      $dir=[System.IO.Path]::GetDirectoryName($d)\r\n"
-        L"      if($dir){[System.IO.Directory]::CreateDirectory($dir)|Out-Null}\r\n"
-        L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e,$d,$true)\r\n"
-        L"    }\r\n"
-        L"    $doneBytes+=$e.Length\r\n"
-        L"    $pct=[int]($doneBytes*100/$totalBytes)\r\n"
-        L"    if($pct -ne $lastPct){[Console]::WriteLine($pct);$lastPct=$pct}\r\n"
-        L"  }\r\n"
-        L"  $z.Dispose()\r\n"
-        L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
-
-    std::wstring scriptPath = PsScriptPath();
-    if (!WritePsScript(scriptPath, script)) { AppendLog(L"ExtractZipSmart: WritePsScript failed zip='%s'", zip.c_str()); return false; }
-    std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \"" + scriptPath + L"\"";
-    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
-
-    HANDLE hRead, hWrite;
-    SECURITY_ATTRIBUTES sa = {}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
-    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
-        AppendLog(L"ExtractZipSmart: CreatePipe failed (0x%08lX) zip='%s'", GetLastError(), zip.c_str());
-        DeleteFileW(scriptPath.c_str());
-        return false;
-    }
-    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si = {}; si.cb = sizeof(si);
-    si.dwFlags     = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput  = hWrite;
-    si.hStdError   = hWrite;
-
-    PROCESS_INFORMATION pi = {};
-    bool started = CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, TRUE,
-        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi) != 0;
-    CloseHandle(hWrite);
-
-    if (!started) {
-        AppendLog(L"ExtractZipSmart: CreateProcessW(powershell) failed (0x%08lX) zip='%s'", GetLastError(), zip.c_str());
-        CloseHandle(hRead);
-        return false;
-    }
-
-    std::string lineBuf;
-    char readBuf[256];
-    DWORD bytesRead;
-    while (ReadFile(hRead, readBuf, sizeof(readBuf) - 1, &bytesRead, nullptr) && bytesRead > 0) {
-        readBuf[bytesRead] = '\0';
-        lineBuf += readBuf;
-        size_t pos;
-        while ((pos = lineBuf.find('\n')) != std::string::npos) {
-            std::string line = lineBuf.substr(0, pos);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (!line.empty()) {
-                bool parsed = false;
-                if (onProgress) { try { onProgress(std::stoi(line)); parsed = true; } catch (...) {} }
-                if (!parsed) AppendLog(L"ExtractZipSmart PS: %S", line.c_str());
-            }
-            lineBuf = lineBuf.substr(pos + 1);
-        }
-    }
-    CloseHandle(hRead);
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exitCode = 1;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-    AppendLog(L"ExtractZipSmart: exit=%lu zip='%s'", exitCode, zip.c_str());
-    return exitCode == 0;
-}
-
 // ── Directory helpers for transfer ────────────────────────────────────────────
 static void DeleteDirRecursive(const std::wstring& path)
 {
@@ -1116,6 +984,151 @@ static int CountFiles(const std::wstring& dir)
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     return count;
+}
+
+static void MoveDirContents(const std::wstring& src, const std::wstring& dst)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((src + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        std::wstring s = src + L"\\" + fd.cFileName;
+        std::wstring d = dst + L"\\" + fd.cFileName;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            CreateDirectoryW(d.c_str(), nullptr);
+            MoveDirContents(s, d);
+            RemoveDirectoryW(s.c_str());
+        } else {
+            MoveFileExW(s.c_str(), d.c_str(), MOVEFILE_REPLACE_EXISTING);
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+// Extract a ZIP into destDir using Shell.Application COM — no PowerShell.
+// stripTopLevel strips the single common top-level folder (like tar --strip-components=1).
+// pump is optional; pass nullptr from background threads.
+static bool ExtractZipCom(const std::wstring& zipPath, const std::wstring& destDir,
+    bool stripTopLevel, const std::function<void()>& pump = nullptr, int timeoutSec = 120)
+{
+    wchar_t absZip[MAX_PATH] = {}, absDst[MAX_PATH] = {};
+    if (!GetFullPathNameW(zipPath.c_str(), MAX_PATH, absZip, nullptr)) return false;
+    if (!GetFullPathNameW(destDir.c_str(), MAX_PATH, absDst, nullptr)) return false;
+    CreateDirectoryW(absDst, nullptr);
+
+    HRESULT hrCom = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool weInitedCom = SUCCEEDED(hrCom); // S_OK or S_FALSE — either way we must uninit
+
+    auto Cleanup = [&](bool result) -> bool {
+        if (weInitedCom) CoUninitialize();
+        return result;
+    };
+
+    // IDispatch late-binding (no shldisp.h needed)
+    auto Invoke = [](IDispatch* p, const wchar_t* name,
+                     VARIANT* args, UINT argc, VARIANT* out) -> bool {
+        OLECHAR* n = (OLECHAR*)name; DISPID id = 0;
+        if (FAILED(p->GetIDsOfNames(IID_NULL, &n, 1, LOCALE_USER_DEFAULT, &id))) return false;
+        DISPPARAMS dp = {args, nullptr, argc, 0};
+        if (out) VariantInit(out);
+        return SUCCEEDED(p->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT,
+            DISPATCH_METHOD | DISPATCH_PROPERTYGET, &dp, out, nullptr, nullptr));
+    };
+    auto BstrVar = [](const wchar_t* s) -> VARIANT {
+        VARIANT v = {}; v.vt = VT_BSTR; v.bstrVal = SysAllocString(s); return v;
+    };
+
+    CLSID clsid = {};
+    IDispatch* pShell = nullptr;
+    if (FAILED(CLSIDFromProgID(L"Shell.Application", &clsid)) ||
+        FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_IDispatch, (void**)&pShell)))
+        return Cleanup(false);
+
+    VARIANT vZip = BstrVar(absZip), vZipFld = {};
+    Invoke(pShell, L"NameSpace", &vZip, 1, &vZipFld);
+    VariantClear(&vZip);
+    VARIANT vDst = BstrVar(absDst), vDstFld = {};
+    Invoke(pShell, L"NameSpace", &vDst, 1, &vDstFld);
+    VariantClear(&vDst);
+    pShell->Release();
+
+    IDispatch* pZipFld = (vZipFld.vt == VT_DISPATCH) ? vZipFld.pdispVal : nullptr;
+    IDispatch* pDstFld = (vDstFld.vt == VT_DISPATCH) ? vDstFld.pdispVal : nullptr;
+    if (pZipFld) pZipFld->AddRef();
+    if (pDstFld) pDstFld->AddRef();
+    VariantClear(&vZipFld); VariantClear(&vDstFld);
+    if (!pZipFld || !pDstFld) {
+        if (pZipFld) pZipFld->Release();
+        if (pDstFld) pDstFld->Release();
+        return Cleanup(false);
+    }
+
+    // For stripTopLevel: grab the first top-level entry name to use as sentinel
+    std::wstring topFolderName;
+    if (stripTopLevel) {
+        VARIANT vItems = {}, vIdx = {}, vItem = {}, vName = {};
+        vIdx.vt = VT_I4; vIdx.lVal = 0;
+        if (Invoke(pZipFld, L"Items", nullptr, 0, &vItems) && vItems.vt == VT_DISPATCH)
+            if (Invoke(vItems.pdispVal, L"Item", &vIdx, 1, &vItem) && vItem.vt == VT_DISPATCH)
+                if (Invoke(vItem.pdispVal, L"Name", nullptr, 0, &vName) && vName.vt == VT_BSTR && vName.bstrVal)
+                    topFolderName = vName.bstrVal;
+        VariantClear(&vName); VariantClear(&vItem); VariantClear(&vItems);
+    }
+
+    // CopyHere all items from the ZIP into destDir (DISPPARAMS args are reversed)
+    VARIANT vAllItems = {};
+    Invoke(pZipFld, L"Items", nullptr, 0, &vAllItems);
+    if (vAllItems.vt == VT_DISPATCH) {
+        VARIANT cargs[2] = {};
+        VariantCopy(&cargs[1], &vAllItems); // first param: items collection
+        cargs[0].vt = VT_I4; cargs[0].lVal = 4 | 16 | 256; // FOF_SILENT|NOCONFIRM|NOERRORUI
+        Invoke(pDstFld, L"CopyHere", cargs, 2, nullptr);
+        VariantClear(&cargs[1]);
+    }
+    VariantClear(&vAllItems);
+    pZipFld->Release();
+    pDstFld->Release();
+
+    // CopyHere is async — poll until the target dir has content
+    std::wstring pollDir = (stripTopLevel && !topFolderName.empty())
+        ? std::wstring(absDst) + L"\\" + topFolderName
+        : std::wstring(absDst);
+
+    auto HasContent = [&]() -> bool {
+        if (stripTopLevel && !topFolderName.empty())
+            return GetFileAttributesW(pollDir.c_str()) != INVALID_FILE_ATTRIBUTES;
+        WIN32_FIND_DATAW fd2; bool found = false;
+        HANDLE h = FindFirstFileW((pollDir + L"\\*").c_str(), &fd2);
+        if (h != INVALID_HANDLE_VALUE) {
+            do { if (wcscmp(fd2.cFileName, L".") && wcscmp(fd2.cFileName, L"..")) { found = true; break; } }
+            while (FindNextFileW(h, &fd2));
+            FindClose(h);
+        }
+        return found;
+    };
+
+    for (int i = 0, lim = timeoutSec * 10; i < lim && !HasContent(); i++) {
+        if (pump) pump();
+        Sleep(100);
+    }
+    if (!HasContent()) return Cleanup(false);
+
+    // Wait for file count to stabilize: unchanged for 2 consecutive 500ms checks
+    int prev = -1, stable = 0;
+    for (int i = 0, lim = timeoutSec * 2; i < lim && stable < 2; i++) {
+        if (pump) { for (int j = 0; j < 5; j++) pump(); }
+        Sleep(500);
+        int cnt = CountFiles(pollDir);
+        if (cnt > 0 && cnt == prev) stable++;
+        else { prev = cnt; stable = 0; }
+    }
+
+    if (stripTopLevel && !topFolderName.empty()) {
+        MoveDirContents(pollDir, std::wstring(absDst));
+        RemoveDirectoryW(pollDir.c_str());
+    }
+    return Cleanup(stable >= 2);
 }
 
 static bool CopyDirRecursive(const std::wstring& src, const std::wstring& dst,
@@ -1566,9 +1579,7 @@ static std::wstring CheckAndEnsure41ydNameplatesExe(const std::wstring& classicE
         return L"";
     }
     PostText(L"Extracting 41yd nameplate client patch... (this may take a few minutes)"); PostPct(80);
-    bool ok = ExtractZipSmart(tmpZip, classicEraDir, false, [](int pct) {
-        PostPct(80 + pct * 20 / 100);
-    });
+    bool ok = ExtractZipCom(tmpZip, classicEraDir, false);
     DeleteFileW(tmpZip.c_str());
     if (!ok || GetFileAttributesW(exePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         AppendLog(L"Extraction failed or EXE not found after extracting nameplate zip");
@@ -2492,9 +2503,7 @@ static void RunHermesUpdateCheck()
             Sleep(500);
         }
 
-        ok = ExtractZipSmart(tmpZip, hermesDir, true, [](int pct) {
-            PostPct(70 + pct * 30 / 100);
-        });
+        ok = ExtractZipCom(tmpZip, hermesDir, true);
         DeleteFileW(tmpZip.c_str());
         if (ok) {
             // Update stored path in case this was a first-time install
@@ -2565,9 +2574,7 @@ static void RunAddonUpdateCheck()
             PostText(L"WOW_HC addon update failed: could not create destination directory. Check launcher.log for details.");
             DeleteFileW(tmpZip.c_str());
         } else {
-            ok = ExtractZipSmart(tmpZip, addonDest, true, [](int pct) {
-                PostPct(70 + pct * 30 / 100);
-            });
+            ok = ExtractZipCom(tmpZip, addonDest, true);
             DeleteFileW(tmpZip.c_str());
             if (ok) {
                 PostPct(100);
@@ -2703,9 +2710,7 @@ static void RunThirdPartyAddonUpdates()
                 AppendLog(L"RunThirdPartyAddonUpdates: failed to create destination directory '%s' (err=%lu)", addonPath.c_str(), GetLastError());
                 DeleteFileW(tmpZip.c_str());
             } else {
-                ok = ExtractZipSmart(tmpZip, addonPath, true, [](int pct) {
-                    PostPct(70 + pct * 30 / 100);
-                });
+                ok = ExtractZipCom(tmpZip, addonPath, true);
                 DeleteFileW(tmpZip.c_str());
                 if (ok) {
                     PostPct(100);
@@ -2777,58 +2782,28 @@ static void RunLauncherUpdateCheck(bool forced = false)
         return;
     }
 
-    // Extract new EXE to temp + overwrite ui/ in AppData — one PS script
-    std::wstring tmpExe  = TempFile(L"wowhc_launcher_new.exe");
-    auto escPS = [](const std::wstring& s) {
-        std::wstring r;
-        for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
-        return r;
-    };
-    std::wstring script =
-        L"Add-Type -AN System.IO.Compression.FileSystem\r\n"
-        L"try {\r\n"
-        L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(tmpZip) + L"')\r\n"
-        L"  foreach($e in $z.Entries){\r\n"
-        // New launcher EXE (root-level entry)
-        L"    if($e.Name -eq 'WOW-HC-Launcher.exe' -and $e.FullName -notlike '*/*'){\r\n"
-        L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile("
-              L"$e,'" + escPS(tmpExe) + L"',$true)\r\n"
-        L"    } elseif($e.FullName -like 'ui/*' -and $e.Name -ne ''){\r\n"
-        // ui/ folder entries — extract into AppData so they survive EXE-only updates
-        L"      $rel=$e.FullName -replace '/','\\'\r\n"
-        L"      $dst='" + escPS(g_configDir) + L"\\'+$rel\r\n"
-        L"      $dir=[System.IO.Path]::GetDirectoryName($dst)\r\n"
-        L"      if(-not(Test-Path $dir)){New-Item -ItemType Directory -Force -Path $dir|Out-Null}\r\n"
-        L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e,$dst,$true)\r\n"
-        L"    }\r\n"
-        L"  }\r\n"
-        L"  $z.Dispose()\r\n"
-        L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
-
-    bool psOk = false;
-    {
-        std::wstring scriptPath = PsScriptPath();
-        if (WritePsScript(scriptPath, script)) {
-            std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \"" + scriptPath + L"\"";
-            std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
-            STARTUPINFOW si = {}; si.cb = sizeof(si);
-            si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-            PROCESS_INFORMATION pi = {};
-            if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
-                               CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-                WaitForSingleObject(pi.hProcess, 120000);
-                DWORD code = 1;
-                GetExitCodeProcess(pi.hProcess, &code);
-                psOk = (code == 0);
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-            }
+    // Extract EXE + ui/ using Shell.Application COM (no PowerShell)
+    std::wstring tmpExe        = TempFile(L"wowhc_launcher_new.exe");
+    std::wstring tmpExtractDir = TempFile(L"wowhc_upd_tmp");
+    DeleteDirRecursive(tmpExtractDir);
+    bool extractOk = false;
+    if (ExtractZipCom(tmpZip, tmpExtractDir, false)) {
+        std::wstring srcExe = tmpExtractDir + L"\\WOW-HC-Launcher.exe";
+        if (GetFileAttributesW(srcExe.c_str()) != INVALID_FILE_ATTRIBUTES)
+            extractOk = MoveFileExW(srcExe.c_str(), tmpExe.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+        std::wstring srcUi = tmpExtractDir + L"\\ui";
+        if (GetFileAttributesW(srcUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            std::wstring dstUi = g_configDir + L"\\ui";
+            DeleteDirRecursive(dstUi);
+            CreateDirectoryW(dstUi.c_str(), nullptr);
+            MoveDirContents(srcUi, dstUi);
         }
+        DeleteDirRecursive(tmpExtractDir);
     }
     DeleteFileW(tmpZip.c_str());
 
-    if (!psOk || GetFileAttributesW(tmpExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        AppendLog(L"RunLauncherUpdateCheck: extraction failed psOk=%d", (int)psOk);
+    if (!extractOk || GetFileAttributesW(tmpExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        AppendLog(L"RunLauncherUpdateCheck: extraction failed");
         DeleteFileW(tmpExe.c_str());
         MessageBoxW(g_hwnd, L"Failed to extract the launcher update.\nThe previous version is still active.", L"Update Failed", MB_OK | MB_ICONERROR);
         return;
@@ -2947,41 +2922,23 @@ static void CheckAndBootstrapFFmpegDlls()
     PostText(L"Extracting FFmpeg libraries... (this may take a few minutes)");
     PostPct(85);
 
-    // Extract only .dll entries (skip the EXE in the ZIP) to the client folder.
-    auto escPS = [](const std::wstring& s) {
-        std::wstring r;
-        for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
-        return r;
-    };
-    std::wstring script =
-        L"Add-Type -AN System.IO.Compression.FileSystem\r\n"
-        L"try {\r\n"
-        L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(tmpZip) + L"')\r\n"
-        L"  foreach($e in $z.Entries){\r\n"
-        L"    if($e.Name -like '*.dll'){\r\n"
-        L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile("
-        L"$e,'" + escPS(dllDir) + L"\\'+$e.Name,$true)\r\n"
-        L"    }\r\n"
-        L"  }\r\n"
-        L"  $z.Dispose()\r\n"
-        L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
-
+    // Extract .dll files to the client folder using Shell.Application COM (no PowerShell)
     {
-        std::wstring scriptPath = PsScriptPath();
-        if (WritePsScript(scriptPath, script)) {
-            std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \"" + scriptPath + L"\"";
-            std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
-            STARTUPINFOW si = {}; si.cb = sizeof(si);
-            si.dwFlags     = STARTF_USESHOWWINDOW;
-            si.wShowWindow = SW_HIDE;
-            PROCESS_INFORMATION pi = {};
-            if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
-                    CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-                WaitForSingleObject(pi.hProcess, 60000);
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
+        std::wstring tmpExtractDir = TempFile(L"wowhc_ffmpeg_tmp");
+        DeleteDirRecursive(tmpExtractDir);
+        if (ExtractZipCom(tmpZip, tmpExtractDir, false)) {
+            WIN32_FIND_DATAW fd;
+            HANDLE hf = FindFirstFileW((tmpExtractDir + L"\\*.dll").c_str(), &fd);
+            if (hf != INVALID_HANDLE_VALUE) {
+                do {
+                    MoveFileExW((tmpExtractDir + L"\\" + fd.cFileName).c_str(),
+                                (dllDir + L"\\" + fd.cFileName).c_str(),
+                                MOVEFILE_REPLACE_EXISTING);
+                } while (FindNextFileW(hf, &fd));
+                FindClose(hf);
             }
         }
+        DeleteDirRecursive(tmpExtractDir);
     }
 
     DeleteFileW(tmpZip.c_str());
@@ -3220,13 +3177,11 @@ static void Worker()
                 zipBytes = ((DWORD64)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
             AppendLog(L"Worker: extracting client zip size=%llu bytes dest='%s'", zipBytes, g_installPath.c_str());
         }
-        ok = ExtractZipSmart(tmpZip, g_installPath, true, [](int pct) {
-            PostPct(65 + pct * 35 / 100);
-        });
+        ok = ExtractZipCom(tmpZip, g_installPath, true);
         DeleteFileW(tmpZip.c_str());
 
         if (!ok) {
-            AppendLog(L"Worker: client extraction failed (see ExtractZipSmart PS lines above)");
+            AppendLog(L"Worker: client extraction failed");
             PostStatus(WS_ERROR);
             g_workerBusy = false;
             PostMessageW(g_hwnd, WM_WORKER_DONE, 0, 0);
@@ -5721,88 +5676,10 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
     StartMarquee();
     Pump();
 
-    auto escPS = [](const std::wstring& s) {
-        std::wstring r;
-        for (wchar_t c : s) { if (c == L'\'') r += L"''"; else r += c; }
-        return r;
-    };
-    // Method 1: System.IO.Compression.FileSystem (needs .NET Framework)
-    // Method 2: Shell.Application COM fallback (no .NET; works on Wine/Proton)
-    std::wstring script =
-        L"$ok=$false\r\n"
-        L"$z=$null\r\n"
-        L"try{\r\n"
-        L"  Add-Type -AN System.IO.Compression.FileSystem -ErrorAction Stop\r\n"
-        L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(tmpZip) + L"')\r\n"
-        L"  foreach($e in $z.Entries){\r\n"
-        L"    if($e.FullName -like 'ui/*' -and $e.Name -ne ''){\r\n"
-        L"      $rel=$e.FullName -replace '/','\\'\r\n"
-        L"      $dst='" + escPS(g_configDir) + L"\\'+$rel\r\n"
-        L"      $dir=[System.IO.Path]::GetDirectoryName($dst)\r\n"
-        L"      if(-not(Test-Path $dir)){New-Item -ItemType Directory -Force -Path $dir|Out-Null}\r\n"
-        L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e,$dst,$true)\r\n"
-        L"    }\r\n"
-        L"  }\r\n"
-        L"  $z.Dispose()\r\n"
-        L"  $ok=$true\r\n"
-        L"}catch{\r\n"
-        L"  if($z){try{$z.Dispose()}catch{}}\r\n"
-        L"}\r\n"
-        L"if(-not $ok){\r\n"
-        L"  try{\r\n"
-        L"    $sh=New-Object -ComObject Shell.Application -ErrorAction Stop\r\n"
-        L"    $zf=$sh.NameSpace('" + escPS(tmpZip) + L"')\r\n"
-        L"    $df=$sh.NameSpace('" + escPS(g_configDir) + L"')\r\n"
-        L"    $ui=$null\r\n"
-        L"    foreach($it in $zf.Items()){if($it.Name -eq 'ui'){$ui=$it;break}}\r\n"
-        L"    if($ui){\r\n"
-        L"      $df.CopyHere($ui,4+16+256)\r\n"
-        L"      $snt='" + escPS(g_configDir) + L"\\ui\\index.html'\r\n"
-        L"      $w=0\r\n"
-        L"      while(-not(Test-Path $snt)-and $w -lt 300){Start-Sleep -Milliseconds 100;$w++}\r\n"
-        L"      $ok=Test-Path $snt\r\n"
-        L"    }\r\n"
-        L"  }catch{}\r\n"
-        L"}\r\n"
-        L"if(-not $ok){exit 1}\r\n";
-
-    bool psOk = false;
-    {
-        std::wstring scriptPath = PsScriptPath();
-        if (WritePsScript(scriptPath, script)) {
-            std::wstring cmd = L"powershell.exe -NonInteractive -ExecutionPolicy Bypass -File \"" + scriptPath + L"\"";
-            std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end()); cmdBuf.push_back(0);
-            STARTUPINFOW si = {}; si.cb = sizeof(si);
-            si.dwFlags = STARTF_USESHOWWINDOW; si.wShowWindow = SW_HIDE;
-            PROCESS_INFORMATION pi = {};
-            if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE,
-                    CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-                DWORD wait;
-                do { wait = WaitForSingleObject(pi.hProcess, 100); Pump(); }
-                while (wait == WAIT_TIMEOUT);
-                DWORD code = 1;
-                GetExitCodeProcess(pi.hProcess, &code);
-                psOk = (code == 0);
-                AppendLog(L"UI bootstrap: PowerShell exit code %lu (%s)", code, code == 0 ? L"ok" : L"failed");
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-            } else {
-                AppendLog(L"UI bootstrap: PowerShell launch failed (GetLastError=%lu)", GetLastError());
-            }
-        } else {
-            AppendLog(L"UI bootstrap: WritePsScript failed");
-        }
-    }
-
-    // C++ fallback: Shell.Application COM directly, for when powershell.exe is absent
-    bool extractOk = psOk;
-    if (!extractOk) {
-        AppendLog(L"UI bootstrap: trying Shell.Application COM fallback");
-        if (hLabel) SetWindowTextW(hLabel, L"Extracting launcher UI...");
-        Pump();
-        extractOk = ExtractUiFromZipShellCom(tmpZip, g_configDir, Pump);
-        AppendLog(L"UI bootstrap: Shell.Application COM result: %s", extractOk ? L"ok" : L"failed");
-    }
+    // Extract ui/ using Shell.Application COM — no PowerShell
+    AppendLog(L"UI bootstrap: extracting via Shell.Application COM");
+    bool extractOk = ExtractUiFromZipShellCom(tmpZip, g_configDir, Pump);
+    AppendLog(L"UI bootstrap: Shell.Application COM result: %s", extractOk ? L"ok" : L"failed");
 
     DeleteFileW(tmpZip.c_str());
 
