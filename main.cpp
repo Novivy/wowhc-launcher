@@ -1286,11 +1286,13 @@ static std::map<int, std::wstring> FindListeningPorts(const std::vector<int>& po
     return result;
 }
 
-// Ensures SET portal "127.0.0.1" in _classic_era_\WTF\Config.wtf so HermesProxy intercepts traffic.
-static void PatchConfigWtfPortal(const std::wstring& clientPath)
+// Patches _classic_era_\WTF\Config.wtf: sets portal to 127.0.0.1, and sets
+// nameplateMaxDistance to 41 when use41yd is true (removes it otherwise so the
+// game reverts to the exe default of 20). Both keys are replaced or appended in
+// one read-modify-write pass.
+static void PatchConfigWtf(const std::wstring& clientPath, bool use41yd)
 {
     std::wstring path = clientPath + L"\\_classic_era_\\WTF\\Config.wtf";
-    // Read existing file
     HANDLE hf = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     std::string content;
@@ -1305,34 +1307,38 @@ static void PatchConfigWtfPortal(const std::wstring& clientPath)
         CloseHandle(hf);
     }
 
-    // Replace or append SET portal line (case-insensitive key match)
-    const std::string target = "SET portal \"127.0.0.1\"";
+    const std::string portalTarget    = "SET portal \"127.0.0.1\"";
+    const std::string nameplateTarget = "SET nameplateMaxDistance \"41\"";
     std::string out;
-    out.reserve(content.size() + 32);
-    bool found = false;
+    out.reserve(content.size() + 64);
+    bool foundPortal = false, foundNameplate = false;
     size_t i = 0;
     while (i < content.size()) {
         size_t nl = content.find('\n', i);
         std::string line = content.substr(i, nl == std::string::npos ? std::string::npos : nl - i + 1);
         i = (nl == std::string::npos) ? content.size() : nl + 1;
-        // Check if this line is "SET portal ..."
         size_t s = line.find_first_not_of(" \t\r\n");
+        std::string ending = (!line.empty() && line.back() == '\n')
+            ? (line.size() >= 2 && line[line.size()-2] == '\r' ? "\r\n" : "\n") : "";
         if (s != std::string::npos && _strnicmp(line.c_str() + s, "SET portal ", 11) == 0) {
-            // Replace with correct value, preserve line ending
-            std::string ending = (!line.empty() && line.back() == '\n')
-                ? (line.size() >= 2 && line[line.size()-2] == '\r' ? "\r\n" : "\n") : "";
-            out += target + ending;
-            found = true;
+            out += portalTarget + ending;
+            foundPortal = true;
+        } else if (s != std::string::npos && _strnicmp(line.c_str() + s, "SET nameplateMaxDistance ", 25) == 0) {
+            if (use41yd) { out += nameplateTarget + ending; foundNameplate = true; }
+            // else drop the line so the game reverts to its default
         } else {
             out += line;
         }
     }
-    if (!found) {
+    if (!foundPortal) {
         if (!out.empty() && out.back() != '\n') out += "\r\n";
-        out += target + "\r\n";
+        out += portalTarget + "\r\n";
+    }
+    if (use41yd && !foundNameplate) {
+        if (!out.empty() && out.back() != '\n') out += "\r\n";
+        out += nameplateTarget + "\r\n";
     }
 
-    // Write back
     hf = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
         nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hf != INVALID_HANDLE_VALUE) {
@@ -4603,7 +4609,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 return;
                             }
                         }
-                        PatchConfigWtfPortal(clientPath);
+                        PatchConfigWtf(clientPath, use41yd);
                         SetClientFilesReadOnly(clientPath, true);
                         LaunchHermesWithPipe(hermesExe);
                         Sleep(1500);
