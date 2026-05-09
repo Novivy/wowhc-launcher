@@ -133,6 +133,7 @@ enum : UINT {
 #define WM_GEN_SETTINGS_CLOSE       (WM_APP + 35) // lParam = new std::string* (JSON), save & close general settings
 #define WM_GEN_SETTINGS_EXE_BROWSE   (WM_APP + 36) // open exe picker for custom launch exe, result posted to WebView
 #define WM_GEN_SETTINGS_RESET_CONFIRM (WM_APP + 37) // show Yes/No MessageBox; posts generalSettingsResetConfirmed on Yes
+#define WM_ASK_CLOSE_GAME_FOR_UPDATE  (WM_APP + 38) // prompt user to close game for pending update; returns IDYES/IDNO
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
@@ -2379,6 +2380,27 @@ static void ApplyLauncherUpdate(const std::wstring& newExePath)
 }
 
 // ── Per-component update helpers (callable from worker or timer thread) ─────────
+// Called from background update threads. If any WoW exe is running, prompts on the
+// main thread to confirm closing it, then kills game (+ HermesProxy on CT_114).
+// Returns false if user cancelled.
+static bool PromptAndCloseGameForUpdate()
+{
+    bool wowRunning = IsProcessRunning(L"WowClassic.exe")
+                   || IsProcessRunning(NAMEPLATE_41Y_EXE_NAME)
+                   || IsProcessRunning(L"Wow_tweaked.exe");
+    if (!wowRunning) return true;
+
+    LRESULT r = SendMessageW(g_hwnd, WM_ASK_CLOSE_GAME_FOR_UPDATE, 0, 0);
+    if (r != IDYES) return false;
+
+    KillProcess(L"WowClassic.exe");
+    KillProcess(NAMEPLATE_41Y_EXE_NAME);
+    KillProcess(L"Wow_tweaked.exe");
+    if (g_clientType == CT_114) KillProcess(L"HermesProxy.exe");
+    Sleep(1000);
+    return true;
+}
+
 static void RunHermesUpdateCheck()
 {
     if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return; }
@@ -2395,10 +2417,7 @@ static void RunHermesUpdateCheck()
     AppendLog(L"RunHermesUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
-    std::wstring payload = remoteVer + L"\n" + localVer;
-    LRESULT r = SendMessageW(g_hwnd, WM_ASK_UPDATE, UC_HERMES,
-        (LPARAM)(new std::wstring(payload)));
-    if (r != IDYES) return;
+    if (!PromptAndCloseGameForUpdate()) return;
 
     std::string assetUrl = FindAssetUrl(json);
     if (assetUrl.empty()) {
@@ -2482,10 +2501,7 @@ static void RunAddonUpdateCheck()
     AppendLog(L"RunAddonUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
-    std::wstring payload = remoteVer + L"\n" + localVer;
-    LRESULT r = SendMessageW(g_hwnd, WM_ASK_UPDATE, UC_ADDON,
-        (LPARAM)(new std::wstring(payload)));
-    if (r != IDYES) return;
+    if (!PromptAndCloseGameForUpdate()) return;
 
     std::string assetUrl = FindAssetUrl(json);
     if (assetUrl.empty()) assetUrl = JsonString(json, "zipball_url");
@@ -2600,6 +2616,7 @@ static void RunThirdPartyAddonUpdates()
     if (addons.empty()) return;
 
     std::wstring addonsDir = GetAddonsDir();
+    bool gameClosedForUpdate = false;
     for (const ThirdPartyAddon& a : addons) {
         std::wstring addonNameW(a.name.begin(), a.name.end());
         std::wstring tocFileW(a.toc.begin(), a.toc.end());
@@ -2614,6 +2631,11 @@ static void RunThirdPartyAddonUpdates()
             AppendLog(L"RunThirdPartyAddonUpdates: could not read version for '%s' (toc='%s')", addonNameW.c_str(), tocFileW.c_str());
         AppendLog(L"RunThirdPartyAddonUpdates: '%s' local='%s' required='%s'", addonNameW.c_str(), localVer.c_str(), requiredVer.c_str());
         if (!IsNewer(localVer, requiredVer)) continue;
+
+        if (!gameClosedForUpdate) {
+            if (!PromptAndCloseGameForUpdate()) return;
+            gameClosedForUpdate = true;
+        }
 
         // repo field contains "owner/repo" with JSON-escaped slashes (\/); unescape them
         std::wstring repoW;
@@ -2705,6 +2727,8 @@ static void RunLauncherUpdateCheck(bool forced = false)
             (LPARAM)(new std::wstring(payload)));
         if (r != IDYES) return;
     }
+
+    if (!PromptAndCloseGameForUpdate()) return;
 
     // Download the full zip (EXE + ui/ + DLLs) so the UI is updated too
     std::string zipUrl = FindFullZipAssetUrl(json);
@@ -5015,6 +5039,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_webview->PostWebMessageAsJson(L"{\"type\":\"generalSettingsResetConfirmed\"}");
         return 0;
     }
+
+    case WM_ASK_CLOSE_GAME_FOR_UPDATE:
+        return MessageBoxW(hwnd,
+            L"An update is available. Your game will be closed to install it.\r\n\r\nContinue?",
+            L"Update Pending", MB_YESNO | MB_ICONQUESTION);
 
     case WM_WORKER_STATUS:
     {
