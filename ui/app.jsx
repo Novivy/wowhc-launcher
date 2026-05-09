@@ -140,7 +140,7 @@ const BottomBar = ({ state, onAction, booting }) => {
             color: T.textFaint, fontFamily: 'ui-monospace, monospace', fontSize: 12,
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 6,
           }}>{installPath || 'No installation path selected'}</span>
-          {React.createElement(PathIconBtn, { title: 'Edit install path', onClick: () => onAction('browse'),     icon: 'pen',    disabled: workerBusy })}
+          {React.createElement(PathIconBtn, { title: 'Edit install path', onClick: () => onAction('browse'),     icon: 'pen',    disabled: workerBusy || !!isLaunching })}
           {React.createElement(PathIconBtn, { title: 'Open folder',       onClick: () => onAction('openFolder'), icon: 'folder', disabled: !installPath || workerBusy })}
         </div>
 
@@ -192,7 +192,7 @@ const BottomBar = ({ state, onAction, booting }) => {
         </select>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 47px', gap: 6 }}>
           {React.createElement(StartBtn, { label: (isInstalled || !installPath) ? 'START GAME' : 'INSTALL', onClick: () => onAction('startGame'), disabled: !playEnabled })}
-          {React.createElement(CogBtn,   { onClick: () => onAction('openSettings'), disabled: ctrlDisabled })}
+          {React.createElement(CogBtn,   { onClick: () => onAction('openSettings'), disabled: ctrlDisabled || !!isLaunching })}
         </div>
       </div>
     </div>
@@ -785,25 +785,33 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
 
       <div style={{ marginBottom: 10 }}>
         <div style={lbl}>Monitor</div>
-        <select value={monIdx} onChange={e => setMonIdx(parseInt(e.target.value))} style={{
+        <select value={monIdx} onChange={e => setMonIdx(parseInt(e.target.value))} disabled={isRecording} style={{
           ...inp, appearance: 'none', WebkitAppearance: 'none',
           backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M1 1l4 4 4-4' stroke='%236a5638' fill='none' stroke-width='1.4'/></svg>\")",
           backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center', paddingRight: 26,
+          opacity: isRecording ? 0.4 : 1, cursor: isRecording ? 'not-allowed' : 'default',
         }}>
           {monitors.map((m, i) => <option key={i} value={m.index}>{m.name}</option>)}
         </select>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: isRecording ? 6 : 10 }}>
         <div>
           <div style={lbl}>Duration (min, 1–60)</div>
           <input type="number" min={1} max={60} value={mins} onChange={e => setMins(e.target.value)} style={inp} />
         </div>
         <div>
           <div style={lbl}>Frame rate (fps, 20–60)</div>
-          <input type="number" min={20} max={60} value={fps} onChange={e => setFps(e.target.value)} style={inp} />
+          <input type="number" min={20} max={60} value={fps} onChange={e => setFps(e.target.value)} disabled={isRecording} style={{
+            ...inp, opacity: isRecording ? 0.4 : 1, cursor: isRecording ? 'not-allowed' : 'default',
+          }} />
         </div>
       </div>
+      {isRecording && (
+        <div style={{ fontSize: 10, color: 'red', marginBottom: 10, fontStyle: 'italic' }}>
+          Monitor and frame rate cannot be changed while recording is active.
+        </div>
+      )}
 
       <div style={{ marginBottom: 10 }}>
         <div style={lbl}>Save folder</div>

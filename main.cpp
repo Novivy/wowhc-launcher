@@ -159,11 +159,11 @@ enum WorkerStatus : int {
 static const wchar_t* STATUS_TEXT[] = {
     L"Checking for updates...",
     L"Downloading HermesProxy update...",
-    L"Extracting HermesProxy...",
+    L"Extracting HermesProxy... (this may take a few minutes)",
     L"Downloading client...",
-    L"Extracting client...",
+    L"Extracting client... (this may take a few minutes)",
     L"Downloading WOW_HC addon...",
-    L"Extracting WOW_HC addon...",
+    L"Extracting WOW_HC addon... (this may take a few minutes)",
     L"Transferring UI, macros, addons and settings...",
     L"Ready to Play",
     L"Error - check your connection or installation path.",
@@ -994,7 +994,6 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
         L"try {\r\n"
         L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(zip) + L"')\r\n"
         L"  $en=@($z.Entries|Where-Object{$_.Name -ne ''})\r\n"
-        L"  $n=[Math]::Max($en.Count,1)\r\n"
         L"  $pfx=''\r\n"
         L"  if(" + strip + L"){\r\n"
         L"    $tops=@($z.Entries|ForEach-Object{($_.FullName -split '/')[0]}|Select-Object -Unique)\r\n"
@@ -1002,7 +1001,10 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
         L"      $pfx=[string]$tops[0]+'/'\r\n"
         L"    }\r\n"
         L"  }\r\n"
-        L"  $i=0\r\n"
+        L"  $totalBytes=[long]($en|Measure-Object -Property Length -Sum).Sum\r\n"
+        L"  if($totalBytes -lt 1){$totalBytes=1}\r\n"
+        L"  $doneBytes=[long]0\r\n"
+        L"  $lastPct=-1\r\n"
         L"  foreach($e in $en){\r\n"
         L"    $rel=if($pfx -and $e.FullName.StartsWith($pfx)){$e.FullName.Substring($pfx.Length)}else{$e.FullName}\r\n"
         L"    if($rel){\r\n"
@@ -1011,8 +1013,9 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
         L"      if($dir){[System.IO.Directory]::CreateDirectory($dir)|Out-Null}\r\n"
         L"      [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e,$d,$true)\r\n"
         L"    }\r\n"
-        L"    $i++\r\n"
-        L"    [Console]::WriteLine([int]($i*100/$n))\r\n"
+        L"    $doneBytes+=$e.Length\r\n"
+        L"    $pct=[int]($doneBytes*100/$totalBytes)\r\n"
+        L"    if($pct -ne $lastPct){[Console]::WriteLine($pct);$lastPct=$pct}\r\n"
         L"  }\r\n"
         L"  $z.Dispose()\r\n"
         L"} catch { [Console]::Error.WriteLine($_); exit 1 }\r\n";
@@ -1551,7 +1554,7 @@ static std::wstring CheckAndEnsure41ydNameplatesExe(const std::wstring& classicE
         AppendLog(L"Failed to download %s", NAMEPLATE_41Y_ZIP_URL);
         return L"";
     }
-    PostText(L"Extracting 41yd nameplate client patch..."); PostPct(80);
+    PostText(L"Extracting 41yd nameplate client patch... (this may take a few minutes)"); PostPct(80);
     bool ok = ExtractZipSmart(tmpZip, classicEraDir, false, [](int pct) {
         PostPct(80 + pct * 20 / 100);
     });
@@ -2920,7 +2923,7 @@ static void CheckAndBootstrapFFmpegDlls()
         return;
     }
 
-    PostText(L"Extracting FFmpeg libraries...");
+    PostText(L"Extracting FFmpeg libraries... (this may take a few minutes)");
     PostPct(85);
 
     // Extract only .dll entries (skip the EXE in the ZIP) to the client folder.
@@ -4546,15 +4549,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 L"Please re-select your installation path.",
                                 L"Launch Error", MB_OK | MB_ICONERROR);
                         }
-                        PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
-
-                        if (hWow) {
-                            g_wowPid.store(GetProcessId(hWow));
-                            WaitForSingleObject(hWow, INFINITE);
-                            g_wowPid.store(0);
-                            CloseHandle(hWow);
-                            PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
+                        if (!hWow) {
+                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                            return;
                         }
+                        g_wowPid.store(GetProcessId(hWow));
+                        WaitForSingleObject(hWow, INFINITE);
+                        g_wowPid.store(0);
+                        CloseHandle(hWow);
+                        PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
+                        PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                     }).detach();
                 } else {
                     // ── 1.14.2: start HermesProxy + Arctium (or 41yd EXE) ───
@@ -4618,38 +4622,46 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 return;
                             }
                             HANDLE hWow = LaunchExeGetHandle(wowExePath, L"");
-                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
-
-                            if (hWow) {
-                                g_wowPid.store(GetProcessId(hWow));
-                                WaitForSingleObject(hWow, INFINITE);
-                                g_wowPid.store(0);
-                                CloseHandle(hWow);
-                                PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
-                                HANDLE hH = g_hermesProcess;
-                                if (hH) TerminateProcess(hH, 0);
-                                PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                            if (!hWow) {
+                                PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                                return;
                             }
+                            g_wowPid.store(GetProcessId(hWow));
+                            WaitForSingleObject(hWow, INFINITE);
+                            g_wowPid.store(0);
+                            CloseHandle(hWow);
+                            PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
+                            HANDLE hH = g_hermesProcess;
+                            if (hH) TerminateProcess(hH, 0);
+                            PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                         } else {
                             // Normal path: Arctium spawns WowClassic.exe
                             // Keep Arctium's handle so we know exactly which process we started
                             // and can find the WowClassic.exe it spawns by parent PID.
                             HANDLE hArctium = LaunchExeGetHandle(arctiumExe,
                                 useArctiumParams ? L"--staticseed --version=ClassicEra" : L"");
-                            Sleep(2000);
-                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
-
-                            if (hArctium) {
+                            if (!hArctium) {
+                                PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                                return;
+                            }
+                            {
                                 DWORD arctiumPid = GetProcessId(hArctium);
                                 std::thread([hArctium, arctiumPid]() {
                                     // Wait up to 60s for the WowClassic.exe that OUR Arctium spawned.
                                     // Keeping hArctium open prevents PID reuse until we've found the child.
                                     DWORD wowPid = WaitForChildProcess(arctiumPid, L"WowClassic.exe", 60000);
                                     CloseHandle(hArctium);
-                                    if (!wowPid) return;
+                                    if (!wowPid) {
+                                        PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                                        return;
+                                    }
 
                                     HANDLE hWow = OpenProcess(SYNCHRONIZE, FALSE, wowPid);
-                                    if (!hWow) return;
+                                    if (!hWow) {
+                                        PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                                        return;
+                                    }
                                     g_wowPid.store(wowPid);
                                     WaitForSingleObject(hWow, INFINITE);
                                     g_wowPid.store(0);
@@ -4660,6 +4672,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                     HANDLE hH = g_hermesProcess;
                                     if (hH) TerminateProcess(hH, 0);
                                     PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                                    PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                                 }).detach();
                             }
                         }
