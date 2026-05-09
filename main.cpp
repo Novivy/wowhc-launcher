@@ -158,9 +158,9 @@ static const wchar_t* STATUS_TEXT[] = {
     L"Downloading HermesProxy update...",
     L"Extracting HermesProxy...",
     L"Downloading client...",
-    L"Installing client (it may take a few minutes)...",
+    L"Extracting client...",
     L"Downloading WOW_HC addon...",
-    L"Installing WOW_HC addon...",
+    L"Extracting WOW_HC addon...",
     L"Transferring UI, macros, addons and settings...",
     L"Ready to Play",
     L"Error - check your connection or installation path.",
@@ -985,6 +985,7 @@ static bool ExtractZipSmart(const std::wstring& zip, const std::wstring& destDir
 
     std::wstring strip = stripTopLevel ? L"$true" : L"$false";
     std::wstring script =
+        L"[Console]::Out.AutoFlush=$true\r\n"
         L"Add-Type -AN System.IO.Compression.FileSystem\r\n"
         L"try {\r\n"
         L"  $z=[System.IO.Compression.ZipFile]::OpenRead('" + escPS(zip) + L"')\r\n"
@@ -2628,9 +2629,9 @@ static void RunThirdPartyAddonUpdates()
         std::wstring assetW(assetUrl.begin(), assetUrl.end());
         std::wstring tmpZip = InstallTempFile(L"addon_" + addonNameW + L"_update.zip");
 
-        g_currentStatus = L"Downloading " + addonNameW + L" addon...";
+        g_currentStatus = L"Downloading " + addonNameW + L" addon update...";
         PostPct(0);
-        DlProgress dlProg{L"Downloading " + addonNameW + L" addon...", 70};
+        DlProgress dlProg{L"Downloading " + addonNameW + L" addon update...", 70};
         bool ok = HttpDownload(assetW, tmpZip,
             [&dlProg](DWORD64 dl, DWORD64 tot) { dlProg(dl, tot); });
 
@@ -2886,7 +2887,7 @@ static void CheckAndBootstrapFFmpegDlls()
         return;
     }
 
-    PostText(L"Installing FFmpeg libraries...");
+    PostText(L"Extracting FFmpeg libraries...");
     PostPct(85);
 
     // Extract only .dll entries (skip the EXE in the ZIP) to the client folder.
@@ -5635,7 +5636,7 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
     // Extract ui/ entries from the zip into AppData.
     StopMarquee();
     SetPct(90);
-    if (hLabel) SetWindowTextW(hLabel, L"Installing launcher UI...");
+    if (hLabel) SetWindowTextW(hLabel, L"Extracting launcher UI...");
     StartMarquee();
     Pump();
 
@@ -5714,7 +5715,7 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
     bool extractOk = psOk;
     if (!extractOk) {
         AppendLog(L"UI bootstrap: trying Shell.Application COM fallback");
-        if (hLabel) SetWindowTextW(hLabel, L"Installing launcher UI...");
+        if (hLabel) SetWindowTextW(hLabel, L"Extracting launcher UI...");
         Pump();
         extractOk = ExtractUiFromZipShellCom(tmpZip, g_configDir, Pump);
         AppendLog(L"UI bootstrap: Shell.Application COM result: %s", extractOk ? L"ok" : L"failed");
