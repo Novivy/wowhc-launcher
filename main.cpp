@@ -4433,6 +4433,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
                 if (!doFolderPick) break;
             }
+            bool wasExistingInstall = g_pendingExistingInstall;
+            bool retryBrowse = false;
             IFileOpenDialog* pDlg = nullptr;
             if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
                     CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pDlg)))) {
@@ -4590,7 +4592,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                     }
                                 }
                             } else {
-                                // ── No WoW found — new installation ─────────────
+                                // ── No WoW found ─────────────────────────────────
+                                if (wasExistingInstall) {
+                                    MessageBoxW(hwnd,
+                                        L"No valid WoW installation was found in the selected folder.\r\n\r\n"
+                                        L"Please select the correct folder, or choose\r\n"
+                                        L"'New installation' to download the game.",
+                                        L"Installation Not Found", MB_OK | MB_ICONERROR);
+                                    retryBrowse = true;
+                                } else {
+                                // ── new installation ─────────────────────────────
                                 // Determine version (from startup flow or ask now)
                                 ClientType newType = g_pendingInstallType;
                                 g_pendingInstallType = CT_UNKNOWN;
@@ -4646,12 +4657,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                         RefreshPlayButton();
                                     }
                                 }
+                                }   // end else: new installation
                             }
                         }
                         pItem->Release();
                     }
                 }
                 pDlg->Release();
+                if (retryBrowse)
+                    PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_BROWSE, BN_CLICKED), 0);
             }
         }
         else if (id == ID_BTN_PLAY) {
@@ -5920,8 +5934,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
     EnsureDesktopShortcut(true); // refresh shortcut target to current exe path if it exists
 
     // If client path is saved but the game exe is missing, reset so the user is
-    // prompted to set up again. Covers both interrupted downloads (no marker yet)
-    // and completed installs that were later moved or deleted (marker present).
+    // prompted to set up again — unless there is an interrupted download to resume.
     if (!g_clientPath.empty()) {
         std::wstring wowExeCheck = (g_clientType == CT_112)
             ? (g_wowTweakedExePath.empty() ? g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe" : g_wowTweakedExePath)
@@ -5929,19 +5942,28 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
         AppendLog(L"Startup exe check: '%s'", wowExeCheck.c_str());
         if (GetFileAttributesW(wowExeCheck.c_str()) == INVALID_FILE_ATTRIBUTES) {
             bool wasInstalled = GetFileAttributesW(ClientMarker().c_str()) != INVALID_FILE_ATTRIBUTES;
-            AppendLog(L"Startup exe check FAILED (wasInstalled=%d) — clearing all paths", (int)wasInstalled);
-            g_installPath.clear();
-            g_clientPath.clear();
-            g_hermesExePath.clear();
-            g_arctiumExePath.clear();
-            g_wowTweakedExePath.clear();
-            g_clientType = CT_UNKNOWN;
-            SaveConfig();
-            if (wasInstalled) {
-                MessageBoxW(nullptr,
-                    L"The previously configured WoW installation could not be found.\r\n"
-                    L"Please select your installation folder again.",
-                    L"Installation Not Found", MB_OK | MB_ICONWARNING);
+            // If an in-progress or completed-but-unextracted download exists, preserve paths
+            // so the Worker resumes from where it left off instead of showing the install modal.
+            bool hasPartialDownload = !wasInstalled && !g_installPath.empty() &&
+                (GetFileAttributesW((g_installPath + L"\\wowclient_dl.zip.part").c_str()) != INVALID_FILE_ATTRIBUTES ||
+                 GetFileAttributesW((g_installPath + L"\\wowclient_dl.zip").c_str())      != INVALID_FILE_ATTRIBUTES);
+            AppendLog(L"Startup exe check FAILED (wasInstalled=%d, hasPartialDownload=%d) — %s",
+                (int)wasInstalled, (int)hasPartialDownload,
+                hasPartialDownload ? L"resuming download" : L"clearing all paths");
+            if (!hasPartialDownload) {
+                g_installPath.clear();
+                g_clientPath.clear();
+                g_hermesExePath.clear();
+                g_arctiumExePath.clear();
+                g_wowTweakedExePath.clear();
+                g_clientType = CT_UNKNOWN;
+                SaveConfig();
+                if (wasInstalled) {
+                    MessageBoxW(nullptr,
+                        L"The previously configured WoW installation could not be found.\r\n"
+                        L"Please select your installation folder again.",
+                        L"Installation Not Found", MB_OK | MB_ICONWARNING);
+                }
             }
         } else {
             AppendLog(L"Startup exe check OK");
