@@ -2930,10 +2930,13 @@ static void RunLauncherUpdateCheck(bool forced = false)
             extractOk = MoveFileExW(srcExe.c_str(), tmpExe.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
         std::wstring srcUi = tmpExtractDir + L"\\ui";
         if (GetFileAttributesW(srcUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            std::wstring dstUi = g_configDir + L"\\ui";
-            DeleteDirRecursive(dstUi);
-            CreateDirectoryW(dstUi.c_str(), nullptr);
-            MoveDirContents(srcUi, dstUi);
+            // WebView2 holds file locks on ui/ while running — stage the new ui/ in
+            // ui_pending/ instead. CheckAndBootstrapUiFiles applies it on next startup
+            // before WebView2 initialises (no locks at that point).
+            std::wstring pendingUi = g_configDir + L"\\ui_pending";
+            DeleteDirRecursive(pendingUi);
+            CreateDirectoryW(pendingUi.c_str(), nullptr);
+            MoveDirContents(srcUi, pendingUi);
         }
         DeleteDirRecursive(tmpExtractDir);
     }
@@ -5748,6 +5751,16 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         if (GetFullPathNameW((exeDir + L"\\..\\ui").c_str(), MAX_PATH, full, nullptr) &&
                 GetFileAttributesW(full) != INVALID_FILE_ATTRIBUTES)
             return true;
+    }
+
+    // Apply a pending UI update staged by RunLauncherUpdateCheck on the previous run.
+    // WebView2 is not running yet, so there are no file locks on ui/.
+    {
+        std::wstring pendingUi = g_configDir + L"\\ui_pending";
+        if (GetFileAttributesW(pendingUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            DeleteDirRecursive(appDataUi);
+            MoveFileExW(pendingUi.c_str(), appDataUi.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+        }
     }
 
     // Already in AppData?
