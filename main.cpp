@@ -2102,7 +2102,7 @@ static bool CheckWebView2Runtime()
 static bool ShowWebView2InstallPrompt(HWND hwnd)
 {
     int r = MessageBoxW(hwnd,
-        L"WoW HC Launcher requires the Microsoft WebView2 runtime,\n"
+        L"WOW HC Launcher requires the Microsoft WebView2 runtime,\n"
         L"which is not installed on this system.\n\n"
         L"Click OK to download and install it automatically (~2 MB),\n"
         L"then restart the launcher.\n\n"
@@ -2996,6 +2996,20 @@ static void CheckAndBootstrapFFmpegDlls()
 {
     AppendLog(L"FFmpeg bootstrap: clientPath='%s'", g_clientPath.c_str());
     if (g_clientPath.empty()) { AppendLog(L"FFmpeg bootstrap: clientPath empty, skipping"); return; }
+
+    // Skip if the client is not installed yet (e.g. launcher restarted mid-download).
+    // The Worker calls this again after a successful install.
+    {
+        bool installed = GetFileAttributesW(ClientMarker().c_str()) != INVALID_FILE_ATTRIBUTES;
+        if (!installed) {
+            std::wstring exeCheck = (g_clientType == CT_112)
+                ? (!g_wowTweakedExePath.empty() ? g_wowTweakedExePath
+                                                : g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe")
+                : g_clientPath + L"\\_classic_era_\\WowClassic.exe";
+            installed = GetFileAttributesW(exeCheck.c_str()) != INVALID_FILE_ATTRIBUTES;
+        }
+        if (!installed) { AppendLog(L"FFmpeg bootstrap: client not installed yet, skipping"); return; }
+    }
 
     std::wstring dllDir = g_clientPath;
 
@@ -5757,7 +5771,7 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
 
     int dlgW = MulDiv(380, g_dpi, 96);
     int dlgH = MulDiv(112, g_dpi, 96);
-    HWND hDlg = CreateWindowExW(0, kCls, L"WoW HC Launcher",
+    HWND hDlg = CreateWindowExW(0, kCls, L"WOW HC Launcher",
         WS_POPUP | WS_CAPTION,
         (GetSystemMetrics(SM_CXSCREEN) - dlgW) / 2,
         (GetSystemMetrics(SM_CYSCREEN) - dlgH) / 2,
@@ -6011,7 +6025,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
             L"https://github.com/Novivy/wowhc-launcher/releases/latest\n\n"
             L"Extract it and place the 'ui' folder next to this EXE.\n\n"
             L"Wine users: also run 'winetricks webview2' to install the required runtime.",
-            L"WoW HC Launcher", MB_OK | MB_ICONERROR);
+            L"WOW HC Launcher", MB_OK | MB_ICONERROR);
         return 1;
     }
 
