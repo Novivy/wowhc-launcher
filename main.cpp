@@ -2275,15 +2275,18 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
     }
     DeleteFileW(tmp.c_str());
 
-    if (hDlg) DestroyWindow(hDlg);
-
-    // The bootstrapper exits before its child installer finishes COM registration.
-    // Poll up to 30 seconds so the relaunched process finds the runtime truly ready.
+    // The bootstrapper may spawn an elevated child installer; UAC's mediator exits
+    // immediately so hProcess finishes in ~0 ms while the real install continues.
+    // Poll up to 5 minutes, pumping messages so the progress window stays alive.
+    SetLabel(L"Waiting for WebView2 Runtime to register...");
     bool runtimeReady = false;
-    for (int i = 0; i < 60 && !runtimeReady; ++i) {
+    for (int i = 0; i < 600 && !runtimeReady; ++i) {
         Sleep(500);
+        Pump();
         runtimeReady = CheckWebView2Runtime();
     }
+
+    if (hDlg) { DestroyWindow(hDlg); hDlg = nullptr; }
 
     if (!runtimeReady) {
         MessageBoxW(hwnd,
@@ -2295,19 +2298,13 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
         return false;
     }
 
-    // Relaunch the launcher so it picks up the newly installed WebView2 runtime.
+    // Relaunch so the new process picks up the registered WebView2 runtime.
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    STARTUPINFOW si = {};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi = {};
-    if (!CreateProcessW(exePath, nullptr, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+    if ((INT_PTR)ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL) <= 32) {
         MessageBoxW(hwnd,
             L"WebView2 has been installed.\nPlease restart the launcher manually.",
             L"Restart Required", MB_OK | MB_ICONINFORMATION);
-    } else {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
     }
     return false;
 }
