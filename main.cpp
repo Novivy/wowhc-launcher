@@ -64,8 +64,6 @@ static constexpr wchar_t REALM_DEV_SERVER[]    = L"192.168.0.30";
 static constexpr wchar_t APP_NAME[]        = L"WOW-HC Launcher";
 static constexpr wchar_t HERMES_GH_OWNER[] = L"Novivy";
 static constexpr wchar_t HERMES_GH_REPO[]  = L"HermesProxy";
-static constexpr wchar_t ADDON_GH_OWNER[]      = L"Novivy";
-static constexpr wchar_t ADDON_GH_REPO[]       = L"wow-hc-addon";
 static constexpr wchar_t LAUNCHER_GH_OWNER[]   = L"Novivy";
 static constexpr wchar_t LAUNCHER_GH_REPO[]    = L"wowhc-launcher";
 static constexpr char    LAUNCHER_EXE_ASSET[]      = "WOW-HC-Launcher.exe";
@@ -2684,80 +2682,13 @@ static void RunHermesUpdateCheck()
     }
 }
 
-static void RunAddonUpdateCheck()
-{
-    if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return; }
-    std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
-        + ADDON_GH_OWNER + L"/" + ADDON_GH_REPO + L"/releases/latest";
-    std::string json = HttpGet(apiUrl);
-    if (json.empty()) { AppendLog(L"RunAddonUpdateCheck: API returned empty response"); return; }
-
-    std::string tag = JsonString(json, "tag_name");
-    std::wstring remoteVer(tag.begin(), tag.end());
-    std::wstring localVer = ReadAddonTocVersion();
-    if (localVer.empty())
-        AppendLog(L"RunAddonUpdateCheck: could not read ## Version from WOW_HC.toc (path='%s')",
-            (GetAddonsDir() + L"\\WOW_HC\\WOW_HC.toc").c_str());
-    AppendLog(L"RunAddonUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
-    if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
-
-    if (!PromptAndCloseGameForUpdate()) return;
-
-    AssetInfo addonAsset = FindAssetUrl(json);
-    if (addonAsset.url.empty()) addonAsset.url = JsonString(json, "zipball_url"); // zipball has no size
-    if (addonAsset.url.empty()) {
-        AppendLog(L"RunAddonUpdateCheck: no asset URL in release JSON");
-        PostText(L"WOW_HC addon update failed: no download URL found in the GitHub release. Check launcher.log for details.");
-        return;
-    }
-
-    std::wstring assetW(addonAsset.url.begin(), addonAsset.url.end());
-    std::wstring tmpZip = InstallTempFile(L"addon_update.zip");
-
-    PostStatus(WS_DL_ADDON); PostPct(0);
-    DlProgress dlAddon{L"Downloading WOW_HC addon...", 70};
-    bool ok = HttpDownload(assetW, tmpZip,
-        [&dlAddon](DWORD64 dl, DWORD64 tot) { dlAddon(dl, tot); }, addonAsset.size);
-
-    if (ok) {
-        PostStatus(WS_EX_ADDON);
-        std::wstring addonsDir = GetAddonsDir();
-        // Ensure parent chain exists up to the addons directory
-        std::wstring interfaceDir = addonsDir.substr(0, addonsDir.rfind(L'\\'));
-        std::wstring gameDir      = interfaceDir.substr(0, interfaceDir.rfind(L'\\'));
-        CreateDirectoryW(gameDir.c_str(), nullptr);
-        CreateDirectoryW(interfaceDir.c_str(), nullptr);
-        CreateDirectoryW(addonsDir.c_str(), nullptr);
-        std::wstring addonDest = addonsDir + L"\\WOW_HC";
-        DeleteDirRecursive(addonDest);
-        BOOL dirOk = CreateDirectoryW(addonDest.c_str(), nullptr);
-        if (!dirOk && GetLastError() != ERROR_ALREADY_EXISTS) {
-            AppendLog(L"RunAddonUpdateCheck: failed to create destination directory '%s' (err=%lu)", addonDest.c_str(), GetLastError());
-            PostText(L"WOW_HC addon update failed: could not create destination directory. Check launcher.log for details.");
-            DeleteFileW(tmpZip.c_str());
-        } else {
-            ok = ExtractZipCom(tmpZip, addonDest, true);
-            DeleteFileW(tmpZip.c_str());
-            if (ok) {
-                PostPct(100);
-            } else {
-                AppendLog(L"RunAddonUpdateCheck: extraction failed (zip='%s', dest='%s')", tmpZip.c_str(), addonDest.c_str());
-                PostText(L"WOW_HC addon update failed: could not extract the downloaded archive. Check launcher.log for details.");
-            }
-        }
-    } else {
-        AppendLog(L"RunAddonUpdateCheck: download failed (url='%s')", assetW.c_str());
-        DeleteFileW(tmpZip.c_str());
-        PostText(L"WOW_HC addon update failed: download error. Check launcher.log for details.");
-    }
-}
-
 // ── Third-party addon updates (server-managed, silent) ────────────────────────
 struct ThirdPartyAddon {
     std::string name;
     std::string toc;
     std::string version;
     std::string repo;
+    bool        required = false;
 };
 
 static std::vector<ThirdPartyAddon> ParseAddonList(const std::string& obj)
@@ -2784,9 +2715,10 @@ static std::vector<ThirdPartyAddon> ParseAddonList(const std::string& obj)
         std::string sub = obj.substr(brace, end - brace);
         ThirdPartyAddon a;
         a.name    = name;
-        a.toc     = JsonString(sub, "toc");
-        a.version = JsonString(sub, "version");
-        a.repo    = JsonString(sub, "repo");
+        a.toc      = JsonString(sub, "toc");
+        a.version  = JsonString(sub, "version");
+        a.repo     = JsonString(sub, "repo");
+        a.required = JsonBool(sub, "required");
         if (!a.toc.empty() && !a.version.empty() && !a.repo.empty())
             result.push_back(a);
         pos = end;
@@ -2821,13 +2753,16 @@ static void RunThirdPartyAddonUpdates()
         std::wstring requiredVer(a.version.begin(), a.version.end());
 
         std::wstring addonPath = addonsDir + L"\\" + addonNameW;
-        if (GetFileAttributesW(addonPath.c_str()) == INVALID_FILE_ATTRIBUTES)
-            continue;
+        bool addonMissing = GetFileAttributesW(addonPath.c_str()) == INVALID_FILE_ATTRIBUTES;
+        if (addonMissing && !a.required) continue;
 
-        std::wstring localVer = ReadTocVersion(addonNameW, tocFileW);
-        if (localVer.empty())
-            AppendLog(L"RunThirdPartyAddonUpdates: could not read version for '%s' (toc='%s')", addonNameW.c_str(), tocFileW.c_str());
-        AppendLog(L"RunThirdPartyAddonUpdates: '%s' local='%s' required='%s'", addonNameW.c_str(), localVer.c_str(), requiredVer.c_str());
+        std::wstring localVer;
+        if (!addonMissing) {
+            localVer = ReadTocVersion(addonNameW, tocFileW);
+            if (localVer.empty())
+                AppendLog(L"RunThirdPartyAddonUpdates: could not read version for '%s' (toc='%s')", addonNameW.c_str(), tocFileW.c_str());
+        }
+        AppendLog(L"RunThirdPartyAddonUpdates: '%s' local='%s' required='%s'%s", addonNameW.c_str(), localVer.c_str(), requiredVer.c_str(), addonMissing ? L" [missing,installing]" : L"");
         if (!IsNewer(localVer, requiredVer)) continue;
 
         if (!gameClosedForUpdate) {
@@ -3280,7 +3215,6 @@ static void PeriodicUpdateCheck()
                 if (!f.empty()) { g_hermesExePath = f; SaveConfig(); }
             }
         }
-        RunAddonUpdateCheck(); // addon check runs for both versions
         g_workerBusy = true;
         RunThirdPartyAddonUpdates();
         g_workerBusy = false;
@@ -3414,7 +3348,6 @@ static void Worker()
             if (!found.empty()) g_hermesExePath = found;
         }
     }
-    RunAddonUpdateCheck(); // addon is compatible with both 1.14.2 and 1.12.1
     RunThirdPartyAddonUpdates();
     WriteLastCheckTime();
     SaveConfig();
@@ -3423,7 +3356,7 @@ static void Worker()
     g_workerBusy = false;
 
     if (g_clientType == CT_112) {
-        // 1.12.1: only need Wow_tweaked.exe (lives in _classic_era_ same as WowClassic.exe)
+        // 1.12.1: need Wow_tweaked.exe + WOW_HC addon
         if (g_wowTweakedExePath.empty() || GetFileAttributesW(g_wowTweakedExePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
             std::wstring def = g_clientPath + L"\\_classic_era_\\Wow_tweaked.exe";
             if (GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES)
@@ -3434,16 +3367,22 @@ static void Worker()
             }
             if (!g_wowTweakedExePath.empty()) SaveConfig();
         }
-        bool wowOk = !g_wowTweakedExePath.empty() &&
+        bool wowOk   = !g_wowTweakedExePath.empty() &&
             GetFileAttributesW(g_wowTweakedExePath.c_str()) != INVALID_FILE_ATTRIBUTES;
-        if (wowOk) {
+        bool addonOk = GetFileAttributesW(
+            (GetAddonsDir() + L"\\WOW_HC").c_str()) != INVALID_FILE_ATTRIBUTES;
+        bool allReady = wowOk && addonOk;
+        if (allReady) {
             PostStatus(WS_READY);
             PostPct(100);
         } else {
-            PostText(L"Missing: Wow_tweaked.exe");
+            std::wstring missing;
+            if (!wowOk)   missing += L"Wow_tweaked.exe  ";
+            if (!addonOk) missing += L"WOW_HC addon";
+            PostText(L"Missing components: " + missing);
             PostStatus(WS_ERROR);
         }
-        PostMessageW(g_hwnd, WM_WORKER_DONE, wowOk ? 1 : 0, 0);
+        PostMessageW(g_hwnd, WM_WORKER_DONE, allReady ? 1 : 0, 0);
     } else {
         // 1.14.2: need HermesProxy + Arctium + addon
         bool hermesOk  = !g_hermesExePath.empty()  &&
