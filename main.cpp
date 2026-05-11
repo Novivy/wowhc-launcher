@@ -2512,7 +2512,7 @@ static std::wstring GetLauncherVersion()
 
 static bool IsDevBuild()
 {
-    return false;
+    //return false;
     return g_devMode || strstr(LAUNCHER_VERSION_STR, "-dev") != nullptr;
 }
 
