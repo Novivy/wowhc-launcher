@@ -2601,13 +2601,48 @@ static bool PromptAndCloseGameForUpdate()
     return true;
 }
 
+// Returns a releases API URL from a server-stats fallback entry.
+// entry: "owner/repo" → GitHub API URL; "https://..." → returned as-is.
+static std::wstring FallbackReleaseUrl(const std::string& entry, bool testMode = false)
+{
+    if (entry.empty()) return {};
+    std::string repo;
+    for (size_t i = 0; i < entry.size(); ++i) {
+        if (entry[i] == '\\' && i + 1 < entry.size()) { ++i; repo += entry[i]; }
+        else repo += entry[i];
+    }
+    std::wstring repoW(repo.begin(), repo.end());
+    if (repoW.compare(0, 4, L"http") == 0)
+        return repoW;
+    return std::wstring(L"https://api.github.com/repos/") + repoW
+        + (testMode ? L"/releases" : L"/releases/latest");
+}
+
+static std::string GetFallbackRepo(const char* key)
+{
+    std::string statsJson = GetCachedStatsJson();
+    if (statsJson.empty()) statsJson = FetchAndCacheStatsJson();
+    if (statsJson.empty()) return {};
+    std::string block = JsonExtractBlock(statsJson, "launcher_fallback_github");
+    if (block.empty()) return {};
+    return JsonString(block, key);
+}
+
 static void RunHermesUpdateCheck()
 {
     if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return; }
     std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
         + HERMES_GH_OWNER + L"/" + HERMES_GH_REPO + L"/releases/latest";
     std::string json = HttpGet(apiUrl);
-    if (json.empty()) { AppendLog(L"RunHermesUpdateCheck: API returned empty response"); return; }
+    if (json.empty()) {
+        AppendLog(L"RunHermesUpdateCheck: primary API failed, checking server-stats fallback");
+        std::wstring fallbackUrl = FallbackReleaseUrl(GetFallbackRepo("hermesproxy"));
+        if (!fallbackUrl.empty()) {
+            AppendLog(L"RunHermesUpdateCheck: retrying with fallback url='%s'", fallbackUrl.c_str());
+            json = HttpGet(fallbackUrl);
+        }
+        if (json.empty()) { AppendLog(L"RunHermesUpdateCheck: fallback also returned empty response"); return; }
+    }
 
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
@@ -2840,7 +2875,15 @@ static void RunLauncherUpdateCheck(bool forced = false)
         + LAUNCHER_GH_OWNER + L"/" + LAUNCHER_GH_REPO
         + (g_testMode ? L"/releases" : L"/releases/latest");
     std::string json = HttpGet(apiUrl);
-    if (json.empty()) { AppendLog(L"RunLauncherUpdateCheck: API returned empty response"); return; }
+    if (json.empty()) {
+        AppendLog(L"RunLauncherUpdateCheck: primary API failed, checking server-stats fallback");
+        std::wstring fallbackUrl = FallbackReleaseUrl(GetFallbackRepo("launcher"), g_testMode);
+        if (!fallbackUrl.empty()) {
+            AppendLog(L"RunLauncherUpdateCheck: retrying with fallback url='%s'", fallbackUrl.c_str());
+            json = HttpGet(fallbackUrl);
+        }
+        if (json.empty()) { AppendLog(L"RunLauncherUpdateCheck: fallback also returned empty response"); return; }
+    }
 
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
