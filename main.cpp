@@ -2912,7 +2912,9 @@ static void RunLauncherUpdateCheck(bool forced = false)
     std::wstring tmpZip = TempFile(L"wowhc_launcher_update.zip");
     AppendLog(L"RunLauncherUpdateCheck: downloading update url='%s'", zipUrlW.c_str());
     PostText(L"Downloading launcher update...");
-    if (!HttpDownload(zipUrlW, tmpZip, nullptr, launcherZipAsset.size)) {
+    PostPct(0);
+    DlProgress dlLauncher{L"Downloading launcher update...", 100};
+    if (!HttpDownload(zipUrlW, tmpZip, [&dlLauncher](DWORD64 dl, DWORD64 tot) { dlLauncher(dl, tot); }, launcherZipAsset.size)) {
         AppendLog(L"RunLauncherUpdateCheck: download failed");
         DeleteFileW(tmpZip.c_str());
         MessageBoxW(g_hwnd, L"Failed to download the launcher update.\nCheck your internet connection and try again.", L"Update Failed", MB_OK | MB_ICONERROR);
