@@ -842,6 +842,7 @@ static void CaptureThread(int adapterIdx, int outputIdx)
 
     DWORD64 lastFrameTick = 0;
     int64_t framePts      = 0;
+    int64_t frameCount    = 0;
 
     if (g_showNotifications) RB_ShowOsd(L"Recording Started", OSD_RED);
     PostMessageW(g_rbHwnd, WM_RB_STATUS, 1, 0);
@@ -975,8 +976,11 @@ static void CaptureThread(int adapterIdx, int outputIdx)
         // Use actual wall-clock time for pts so playback speed is correct
         // regardless of timer jitter or high-refresh-rate monitors.
         int64_t wallPts  = (int64_t)(elapsedMs * fps / 1000.0);
-        frame->pts = std::max(framePts, wallPts);
-        framePts   = frame->pts + 1;
+        frame->pts       = std::max(framePts, wallPts);
+        framePts         = frame->pts + 1;
+        frame->pict_type = (frameCount % encCtx->gop_size == 0)
+                               ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_NONE;
+        frameCount++;
         avcodec_send_frame(encCtx, frame);
 
         AVPacket* pkt = av_packet_alloc();
