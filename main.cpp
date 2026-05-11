@@ -2363,6 +2363,7 @@ static std::wstring GetLauncherVersion()
 
 static bool IsDevBuild()
 {
+    return false;
     return g_devMode || strstr(LAUNCHER_VERSION_STR, "-dev") != nullptr;
 }
 
@@ -2930,17 +2931,41 @@ static void CheckAndBootstrapFFmpegDlls()
     // Extract .dll files to the client folder using Shell.Application COM (no PowerShell)
     {
         std::wstring tmpExtractDir = TempFile(L"wowhc_ffmpeg_tmp");
+        AppendLog(L"FFmpeg bootstrap: extract dir='%s'", tmpExtractDir.c_str());
         DeleteDirRecursive(tmpExtractDir);
-        if (ExtractZipCom(tmpZip, tmpExtractDir, false)) {
+        bool extractOk = ExtractZipCom(tmpZip, tmpExtractDir, false);
+        AppendLog(L"FFmpeg bootstrap: ExtractZipCom result=%s", extractOk ? L"ok" : L"FAILED");
+        if (extractOk) {
+            // Log everything found in the extract dir (not just *.dll) to see the ZIP layout
+            WIN32_FIND_DATAW fd2;
+            HANDLE hAll = FindFirstFileW((tmpExtractDir + L"\\*").c_str(), &fd2);
+            if (hAll != INVALID_HANDLE_VALUE) {
+                do {
+                    if (wcscmp(fd2.cFileName, L".") && wcscmp(fd2.cFileName, L".."))
+                        AppendLog(L"FFmpeg bootstrap: found in extract dir: '%s' (dir=%s)",
+                            fd2.cFileName,
+                            (fd2.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? L"yes" : L"no");
+                } while (FindNextFileW(hAll, &fd2));
+                FindClose(hAll);
+            } else {
+                AppendLog(L"FFmpeg bootstrap: extract dir is empty or unreadable (err=%lu)", GetLastError());
+            }
+
             WIN32_FIND_DATAW fd;
             HANDLE hf = FindFirstFileW((tmpExtractDir + L"\\*.dll").c_str(), &fd);
             if (hf != INVALID_HANDLE_VALUE) {
                 do {
-                    MoveFileExW((tmpExtractDir + L"\\" + fd.cFileName).c_str(),
-                                (dllDir + L"\\" + fd.cFileName).c_str(),
-                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+                    std::wstring src = tmpExtractDir + L"\\" + fd.cFileName;
+                    std::wstring dst = dllDir + L"\\" + fd.cFileName;
+                    BOOL moved = MoveFileExW(src.c_str(), dst.c_str(),
+                                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+                    AppendLog(L"FFmpeg bootstrap: move '%s' -> '%s': %s (err=%lu)",
+                        fd.cFileName, dllDir.c_str(),
+                        moved ? L"ok" : L"FAILED", moved ? 0 : GetLastError());
                 } while (FindNextFileW(hf, &fd));
                 FindClose(hf);
+            } else {
+                AppendLog(L"FFmpeg bootstrap: no *.dll found at root of extract dir");
             }
         }
         DeleteDirRecursive(tmpExtractDir);
