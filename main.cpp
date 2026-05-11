@@ -4780,7 +4780,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         PatchConfigWtf(clientPath, use41yd);
                         SetClientFilesReadOnly(clientPath, true);
                         LaunchHermesWithPipe(hermesExe);
-                        Sleep(1500);
+                        Sleep(3000);
+
+                        if (g_hermesProcess && WaitForSingleObject(g_hermesProcess, 0) == WAIT_OBJECT_0) {
+                            MessageBoxW(g_hwnd,
+                                L"HermesProxy stopped unexpectedly shortly after launch.\r\n\r\n"
+                                L"Try running this launcher as administrator and start the game again.",
+                                L"HermesProxy Error", MB_OK | MB_ICONERROR);
+                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                            return;
+                        }
 
                         if (use41yd) {
                             // 41yd path: download EXE if missing, launch directly (no Arctium)
