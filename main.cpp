@@ -642,9 +642,32 @@ static std::wstring JsonStringW(const std::string& json, const std::string& key)
     return w;
 }
 
-static std::string FindAssetUrl(const std::string& json)
+struct AssetInfo { std::string url; DWORD64 size = 0; };
+
+// Returns the JSON object (as a substring) that contains the character at keyPos.
+static std::string SliceAssetObject(const std::string& json, size_t keyPos)
 {
-    std::string fallback;
+    int depth = 0;
+    for (size_t i = keyPos; i-- > 0;) {
+        if      (json[i] == '}') depth++;
+        else if (json[i] == '{') {
+            if (!depth) {
+                int d2 = 0;
+                for (size_t j = i; j < json.size(); ++j) {
+                    if      (json[j] == '{') d2++;
+                    else if (json[j] == '}') { if (!--d2) return json.substr(i, j - i + 1); }
+                }
+                return {};
+            }
+            depth--;
+        }
+    }
+    return {};
+}
+
+static AssetInfo FindAssetUrl(const std::string& json)
+{
+    AssetInfo fallback;
     size_t pos = 0;
     while (true) {
         size_t found = json.find("\"browser_download_url\"", pos);
@@ -653,9 +676,10 @@ static std::string FindAssetUrl(const std::string& json)
         if (!url.empty()) {
             std::string lower = url;
             std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-            if (lower.find("win") != std::string::npos) return url;
-            if (lower.rfind(".zip") != std::string::npos && fallback.empty())
-                fallback = url;
+            DWORD64 sz = (DWORD64)JsonInt64(SliceAssetObject(json, found), "size");
+            if (lower.find("win") != std::string::npos) return { url, sz };
+            if (lower.rfind(".zip") != std::string::npos && fallback.url.empty())
+                fallback = { url, sz };
         }
         pos = found + 1;
     }
@@ -868,23 +892,62 @@ static void FetchLiveData()
 }
 
 static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
-    const std::function<void(DWORD64, DWORD64)>& progress = nullptr)
+    const std::function<void(DWORD64, DWORD64)>& progress = nullptr,
+    DWORD64 expectedSize = 0)
 {
+    std::wstring partPath = dest + L".part";
+
+    // Probe for a partial file from a previous interrupted download
+    DWORD64 resumeOffset = 0;
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fa = {};
+        if (GetFileAttributesExW(partPath.c_str(), GetFileExInfoStandard, &fa)) {
+            ULARGE_INTEGER ul; ul.LowPart = fa.nFileSizeLow; ul.HighPart = fa.nFileSizeHigh;
+            resumeOffset = ul.QuadPart;
+            AppendLog(L"HttpDownload: found .part file (%I64u bytes), will attempt resume url='%s'",
+                resumeOffset, url.c_str());
+        }
+    }
+    // Stale .part (>= expected size) means something went wrong previously — start fresh
+    if (expectedSize > 0 && resumeOffset >= expectedSize) {
+        AppendLog(L"HttpDownload: stale .part (%I64u >= expected %I64u), discarding url='%s'",
+            resumeOffset, expectedSize, url.c_str());
+        DeleteFileW(partPath.c_str());
+        resumeOffset = 0;
+    }
+
     HINTERNET hSess = OpenSession();
-    if (!hSess) { AppendLog(L"HttpDownload: OpenSession failed (0x%08lX) url='%s'", GetLastError(), url.c_str()); return false; }
+    if (!hSess) {
+        AppendLog(L"HttpDownload: OpenSession failed (0x%08lX) url='%s'", GetLastError(), url.c_str());
+        return false;
+    }
     HINTERNET hConn = nullptr;
     HINTERNET hReq  = MakeRequest(hSess, url, hConn);
-    if (!hReq) { AppendLog(L"HttpDownload: MakeRequest failed (0x%08lX) url='%s'", GetLastError(), url.c_str()); WinHttpCloseHandle(hSess); return false; }
+    if (!hReq) {
+        AppendLog(L"HttpDownload: MakeRequest failed (0x%08lX) url='%s'", GetLastError(), url.c_str());
+        WinHttpCloseHandle(hSess);
+        return false;
+    }
+
     WinHttpAddRequestHeaders(hReq,
         L"Cache-Control: no-cache\r\nPragma: no-cache",
         (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
+    if (resumeOffset > 0) {
+        wchar_t rangeHdr[64];
+        swprintf_s(rangeHdr, L"Range: bytes=%I64u-", resumeOffset);
+        WinHttpAddRequestHeaders(hReq, rangeHdr, (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD);
+    }
+
     bool ok = false;
-    bool sent = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                    WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    bool keepPart = false; // true = preserve .part for future resume on next launch
+
+    bool sent  = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                     WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
     bool recvd = sent && WinHttpReceiveResponse(hReq, nullptr);
     if (!sent || !recvd) {
         DWORD err = GetLastError();
-        AppendLog(L"HttpDownload: WinHTTP send/recv failed (0x%08lX) url='%s'", err, url.c_str());
+        AppendLog(L"HttpDownload: send/recv failed (0x%08lX), keeping .part for resume url='%s'", err, url.c_str());
+        keepPart = true; // network failure — resume on next launch
         wchar_t msg[128];
         swprintf_s(msg, L"Network error (WinHTTP 0x%08lX).\nCheck your internet connection and try again.", err);
         MessageBoxW(g_hwnd, msg, L"Download Failed", MB_OK | MB_ICONERROR);
@@ -892,8 +955,112 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
         DWORD statusCode = 0; DWORD scLen = sizeof(statusCode);
         WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
             nullptr, &statusCode, &scLen, nullptr);
-        if (statusCode != 200) {
-            // Read up to 2KB of the error body for debugging
+        AppendLog(L"HttpDownload: HTTP %lu (resumeOffset=%I64u) url='%s'", statusCode, resumeOffset, url.c_str());
+
+        if (statusCode == 200 && resumeOffset > 0) {
+            // Server ignored our Range header — discard stale .part and start fresh
+            AppendLog(L"HttpDownload: server returned 200 instead of 206, discarding .part url='%s'", url.c_str());
+            DeleteFileW(partPath.c_str());
+            resumeOffset = 0;
+        }
+
+        if (statusCode == 200 || statusCode == 206) {
+            wchar_t lenBuf[32] = {}; DWORD ls = sizeof(lenBuf);
+            DWORD64 contentLen = 0;
+            if (WinHttpQueryHeaders(hReq, WINHTTP_QUERY_CONTENT_LENGTH,
+                    nullptr, lenBuf, &ls, nullptr))
+                contentLen = (DWORD64)_wtoi64(lenBuf);
+            // fullTotal = full file size for progress display.
+            // For 206: contentLen is the remaining bytes; add resumeOffset for the true total.
+            // If contentLen is 0 (server omitted header), keep fullTotal=0 to signal unknown progress.
+            DWORD64 fullTotal = 0;
+            if (contentLen > 0)
+                fullTotal = (statusCode == 206) ? (resumeOffset + contentLen) : contentLen;
+            AppendLog(L"HttpDownload: contentLen=%I64u fullTotal=%I64u resumeOffset=%I64u",
+                contentLen, fullTotal, resumeOffset);
+
+            DWORD createDisp = (resumeOffset > 0) ? OPEN_EXISTING : CREATE_ALWAYS;
+            HANDLE hFile = CreateFileW(partPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                createDisp, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                bool seekOk = true;
+                if (resumeOffset > 0) {
+                    // SetFilePointerEx handles files >2 GB correctly (SetFilePointer silently fails there)
+                    LARGE_INTEGER liZero = {};
+                    seekOk = SetFilePointerEx(hFile, liZero, nullptr, FILE_END) != FALSE;
+                    if (!seekOk) {
+                        AppendLog(L"HttpDownload: SetFilePointerEx failed (0x%08lX) part='%s'",
+                            GetLastError(), partPath.c_str());
+                        keepPart = true; // don't discard valid partial data on a seek failure
+                    }
+                }
+                DWORD64 downloaded = 0; DWORD read = 0;
+                std::vector<char> buf(65536);
+                if (seekOk) ok = true;
+                while (seekOk && WinHttpReadData(hReq, buf.data(), (DWORD)buf.size(), &read) && read > 0) {
+                    DWORD written;
+                    if (!WriteFile(hFile, buf.data(), read, &written, nullptr)) {
+                        AppendLog(L"HttpDownload: WriteFile failed (0x%08lX) dest='%s'",
+                            GetLastError(), dest.c_str());
+                        ok = false; break;
+                    }
+                    downloaded += read;
+                    if (progress) progress(resumeOffset + downloaded, fullTotal);
+                }
+                CloseHandle(hFile);
+
+                if (ok && contentLen > 0 && downloaded < contentLen) {
+                    // Connection dropped mid-transfer; preserve .part so next launch can resume
+                    AppendLog(L"HttpDownload: truncated — got %I64u of %I64u bytes (offset was %I64u) url='%s'",
+                        downloaded, contentLen, resumeOffset, url.c_str());
+                    ok = false;
+                    keepPart = true;
+                }
+                if (ok && expectedSize > 0) {
+                    WIN32_FILE_ATTRIBUTE_DATA fa = {};
+                    DWORD64 finalSize = 0;
+                    if (GetFileAttributesExW(partPath.c_str(), GetFileExInfoStandard, &fa)) {
+                        ULARGE_INTEGER ul; ul.LowPart = fa.nFileSizeLow; ul.HighPart = fa.nFileSizeHigh;
+                        finalSize = ul.QuadPart;
+                    }
+                    if (finalSize != expectedSize) {
+                        AppendLog(L"HttpDownload: size mismatch — file=%I64u expected=%I64u url='%s'",
+                            finalSize, expectedSize, url.c_str());
+                        ok = false;
+                        DeleteFileW(partPath.c_str()); // corrupt; don't resume from this
+                    }
+                }
+                if (ok) {
+                    // MoveFileExW with MOVEFILE_REPLACE_EXISTING replaces dest atomically on same
+                    // volume; MOVEFILE_COPY_ALLOWED handles cross-volume as fallback
+                    if (!MoveFileExW(partPath.c_str(), dest.c_str(),
+                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+                        AppendLog(L"HttpDownload: rename .part failed (0x%08lX) src='%s' dest='%s'",
+                            GetLastError(), partPath.c_str(), dest.c_str());
+                        ok = false;
+                        DeleteFileW(partPath.c_str());
+                    } else {
+                        // Get final file size for the success log
+                        WIN32_FILE_ATTRIBUTE_DATA fa = {};
+                        DWORD64 finalSize = 0;
+                        if (GetFileAttributesExW(dest.c_str(), GetFileExInfoStandard, &fa)) {
+                            ULARGE_INTEGER ul; ul.LowPart = fa.nFileSizeLow; ul.HighPart = fa.nFileSizeHigh;
+                            finalSize = ul.QuadPart;
+                        }
+                        AppendLog(L"HttpDownload: completed successfully (%I64u bytes) dest='%s'",
+                            finalSize, dest.c_str());
+                    }
+                }
+            } else {
+                DWORD err = GetLastError();
+                AppendLog(L"HttpDownload: CreateFile failed (0x%08lX, disp=%lu) part='%s'",
+                    err, createDisp, partPath.c_str());
+                // If we were trying to open an existing .part, preserve it — CreateFile
+                // failing doesn't mean the file is corrupt
+                if (resumeOffset > 0) keepPart = true;
+            }
+        } else {
+            // HTTP error (non-200/206)
             std::string errBody;
             DWORD avail = 0, rd = 0;
             while (errBody.size() < 2048 &&
@@ -902,41 +1069,25 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                 WinHttpReadData(hReq, eb.data(), avail, &rd);
                 errBody.append(eb.data(), rd);
             }
-            AppendLog(L"HttpDownload: HTTP %lu url='%s'", statusCode, url.c_str());
             wchar_t tmp[MAX_PATH]; GetTempPathW(MAX_PATH, tmp);
             std::wstring logPath = std::wstring(tmp) + L"wowhc_debug.log";
             if (FILE* f = _wfopen(logPath.c_str(), L"a")) {
-                fprintf(f, "URL: %ls\nHTTP %lu\n%s\n---\n",
-                    url.c_str(), statusCode, errBody.c_str());
+                fprintf(f, "URL: %ls\nHTTP %lu\n%s\n---\n", url.c_str(), statusCode, errBody.c_str());
                 fclose(f);
             }
+            AppendLog(L"HttpDownload: HTTP error %lu, discarding .part (see %s) url='%s'",
+                statusCode, logPath.c_str(), url.c_str());
             MessageBoxW(g_hwnd,
                 (L"HTTP error " + std::to_wstring(statusCode) +
                  L"\nCheck: " + logPath).c_str(),
                 L"Download Failed", MB_OK | MB_ICONERROR);
+            DeleteFileW(partPath.c_str()); // HTTP error — discard partial, no point resuming
         }
-        if (statusCode == 200) {
-        wchar_t lenBuf[32] = {}; DWORD ls = sizeof(lenBuf);
-        DWORD64 total = 0;
-        if (WinHttpQueryHeaders(hReq, WINHTTP_QUERY_CONTENT_LENGTH,
-                nullptr, lenBuf, &ls, nullptr))
-            total = _wtoi64(lenBuf);
-        HANDLE hFile = CreateFileW(dest.c_str(), GENERIC_WRITE, 0, nullptr,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hFile != INVALID_HANDLE_VALUE) {
-            DWORD64 downloaded = 0; DWORD read = 0; ok = true;
-            std::vector<char> buf(65536);
-            while (WinHttpReadData(hReq, buf.data(), (DWORD)buf.size(), &read) && read > 0) {
-                DWORD written;
-                if (!WriteFile(hFile, buf.data(), read, &written, nullptr)) { AppendLog(L"HttpDownload: WriteFile failed (0x%08lX) dest='%s'", GetLastError(), dest.c_str()); ok = false; break; }
-                downloaded += read;
-                if (progress) progress(downloaded, total);
-            }
-            CloseHandle(hFile);
-            if (!ok) DeleteFileW(dest.c_str());
-        }
-        } // statusCode == 200
     }
+
+    if (!ok && !keepPart)
+        DeleteFileW(partPath.c_str());
+
     WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess);
     return ok;
 }
@@ -2368,7 +2519,7 @@ static bool IsDevBuild()
 }
 
 // ── EXE asset URL (for self-update) ────────────────────────────────────────────
-static std::string FindExeAssetUrl(const std::string& json)
+static AssetInfo FindExeAssetUrl(const std::string& json)
 {
     size_t pos = 0;
     while (true) {
@@ -2378,14 +2529,17 @@ static std::string FindExeAssetUrl(const std::string& json)
         if (!url.empty()) {
             std::string lower = url;
             std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-            if (lower.rfind(".exe") != std::string::npos) return url;
+            if (lower.rfind(".exe") != std::string::npos) {
+                DWORD64 sz = (DWORD64)JsonInt64(SliceAssetObject(json, found), "size");
+                return { url, sz };
+            }
         }
         pos = found + 1;
     }
     return {};
 }
 
-static std::string FindFullZipAssetUrl(const std::string& json)
+static AssetInfo FindFullZipAssetUrl(const std::string& json)
 {
     size_t pos = 0;
     while (true) {
@@ -2395,8 +2549,10 @@ static std::string FindFullZipAssetUrl(const std::string& json)
         if (!url.empty()) {
             std::string lower = url;
             std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-            if (lower.find("full") != std::string::npos && lower.rfind(".zip") != std::string::npos)
-                return url;
+            if (lower.find("full") != std::string::npos && lower.rfind(".zip") != std::string::npos) {
+                DWORD64 sz = (DWORD64)JsonInt64(SliceAssetObject(json, found), "size");
+                return { url, sz };
+            }
         }
         pos = found + 1;
     }
@@ -2465,20 +2621,20 @@ static void RunHermesUpdateCheck()
 
     if (!PromptAndCloseGameForUpdate()) return;
 
-    std::string assetUrl = FindAssetUrl(json);
-    if (assetUrl.empty()) {
+    AssetInfo hermesAsset = FindAssetUrl(json);
+    if (hermesAsset.url.empty()) {
         AppendLog(L"RunHermesUpdateCheck: no asset URL in release JSON");
         PostText(L"HermesProxy update failed: no download URL found in the GitHub release. Check launcher.log for details.");
         return;
     }
 
-    std::wstring assetW(assetUrl.begin(), assetUrl.end());
+    std::wstring assetW(hermesAsset.url.begin(), hermesAsset.url.end());
     std::wstring tmpZip = InstallTempFile(L"hermes_update.zip");
 
     PostStatus(WS_DL_HERMES); PostPct(0);
     DlProgress dlHermes{L"Downloading HermesProxy update...", 70};
     bool ok = HttpDownload(assetW, tmpZip,
-        [&dlHermes](DWORD64 dl, DWORD64 tot) { dlHermes(dl, tot); });
+        [&dlHermes](DWORD64 dl, DWORD64 tot) { dlHermes(dl, tot); }, hermesAsset.size);
 
     if (ok) {
         PostStatus(WS_EX_HERMES);
@@ -2547,21 +2703,21 @@ static void RunAddonUpdateCheck()
 
     if (!PromptAndCloseGameForUpdate()) return;
 
-    std::string assetUrl = FindAssetUrl(json);
-    if (assetUrl.empty()) assetUrl = JsonString(json, "zipball_url");
-    if (assetUrl.empty()) {
+    AssetInfo addonAsset = FindAssetUrl(json);
+    if (addonAsset.url.empty()) addonAsset.url = JsonString(json, "zipball_url"); // zipball has no size
+    if (addonAsset.url.empty()) {
         AppendLog(L"RunAddonUpdateCheck: no asset URL in release JSON");
         PostText(L"WOW_HC addon update failed: no download URL found in the GitHub release. Check launcher.log for details.");
         return;
     }
 
-    std::wstring assetW(assetUrl.begin(), assetUrl.end());
+    std::wstring assetW(addonAsset.url.begin(), addonAsset.url.end());
     std::wstring tmpZip = InstallTempFile(L"addon_update.zip");
 
     PostStatus(WS_DL_ADDON); PostPct(0);
     DlProgress dlAddon{L"Downloading WOW_HC addon...", 70};
     bool ok = HttpDownload(assetW, tmpZip,
-        [&dlAddon](DWORD64 dl, DWORD64 tot) { dlAddon(dl, tot); });
+        [&dlAddon](DWORD64 dl, DWORD64 tot) { dlAddon(dl, tot); }, addonAsset.size);
 
     if (ok) {
         PostStatus(WS_EX_ADDON);
@@ -2690,18 +2846,18 @@ static void RunThirdPartyAddonUpdates()
         std::string releaseJson = HttpGet(apiUrl);
         if (releaseJson.empty()) continue;
 
-        std::string assetUrl = FindAssetUrl(releaseJson);
-        if (assetUrl.empty()) assetUrl = JsonString(releaseJson, "zipball_url");
-        if (assetUrl.empty()) continue;
+        AssetInfo tpAsset = FindAssetUrl(releaseJson);
+        if (tpAsset.url.empty()) tpAsset.url = JsonString(releaseJson, "zipball_url");
+        if (tpAsset.url.empty()) continue;
 
-        std::wstring assetW(assetUrl.begin(), assetUrl.end());
+        std::wstring assetW(tpAsset.url.begin(), tpAsset.url.end());
         std::wstring tmpZip = InstallTempFile(L"addon_" + addonNameW + L"_update.zip");
 
         g_currentStatus = L"Downloading " + addonNameW + L" addon update...";
         PostPct(0);
         DlProgress dlProg{L"Downloading " + addonNameW + L" addon update...", 70};
         bool ok = HttpDownload(assetW, tmpZip,
-            [&dlProg](DWORD64 dl, DWORD64 tot) { dlProg(dl, tot); });
+            [&dlProg](DWORD64 dl, DWORD64 tot) { dlProg(dl, tot); }, tpAsset.size);
 
         if (ok) {
             g_currentStatus = L"Updating " + addonNameW + L" addon...";
@@ -2771,17 +2927,17 @@ static void RunLauncherUpdateCheck(bool forced = false)
     if (!PromptAndCloseGameForUpdate()) return;
 
     // Download the full zip (EXE + ui/ + DLLs) so the UI is updated too
-    std::string zipUrl = FindFullZipAssetUrl(json);
-    if (zipUrl.empty()) {
-        zipUrl = std::string("https://github.com/") + "Novivy/wowhc-launcher"
+    AssetInfo launcherZipAsset = FindFullZipAssetUrl(json);
+    if (launcherZipAsset.url.empty()) {
+        launcherZipAsset.url = std::string("https://github.com/") + "Novivy/wowhc-launcher"
                + "/releases/latest/download/" + LAUNCHER_FULL_ZIP_ASSET;
     }
 
-    std::wstring zipUrlW(zipUrl.begin(), zipUrl.end());
+    std::wstring zipUrlW(launcherZipAsset.url.begin(), launcherZipAsset.url.end());
     std::wstring tmpZip = TempFile(L"wowhc_launcher_update.zip");
     AppendLog(L"RunLauncherUpdateCheck: downloading update url='%s'", zipUrlW.c_str());
     PostText(L"Downloading launcher update...");
-    if (!HttpDownload(zipUrlW, tmpZip)) {
+    if (!HttpDownload(zipUrlW, tmpZip, nullptr, launcherZipAsset.size)) {
         AppendLog(L"RunLauncherUpdateCheck: download failed");
         DeleteFileW(tmpZip.c_str());
         MessageBoxW(g_hwnd, L"Failed to download the launcher update.\nCheck your internet connection and try again.", L"Update Failed", MB_OK | MB_ICONERROR);
@@ -2902,19 +3058,19 @@ static void CheckAndBootstrapFFmpegDlls()
         std::string json = HttpGet(apiUrl);
         if (json.empty()) { AppendLog(L"FFmpeg bootstrap: empty response (404 or network error)"); continue; }
         AppendLog(L"FFmpeg bootstrap: got API response (%zu bytes)", json.size());
-        std::string url = FindFullZipAssetUrl(json);
-        if (url.empty()) {
+        AssetInfo ffmpegAsset = FindFullZipAssetUrl(json);
+        if (ffmpegAsset.url.empty()) {
             AppendLog(L"FFmpeg bootstrap: no *full*.zip asset found in response");
             continue;
         }
-        AppendLog(L"FFmpeg bootstrap: found zip asset: %hs", url.c_str());
-        std::wstring zipUrl(url.begin(), url.end());
+        AppendLog(L"FFmpeg bootstrap: found zip asset: %hs (size=%I64u)", ffmpegAsset.url.c_str(), ffmpegAsset.size);
+        std::wstring zipUrl(ffmpegAsset.url.begin(), ffmpegAsset.url.end());
         ok = HttpDownload(zipUrl, tmpZip, [](DWORD64 dl, DWORD64 tot) {
             if (tot > 0) PostPct((int)(dl * 85 / tot));
-        });
+        }, ffmpegAsset.size);
         AppendLog(L"FFmpeg bootstrap: download %s", ok ? L"succeeded" : L"failed");
         if (ok) break;
-        DeleteFileW(tmpZip.c_str()); // discard partial file before retrying
+        DeleteFileW(tmpZip.c_str()); // discard partial file before retrying with next API URL
     }
     if (!ok) {
         AppendLog(L"FFmpeg bootstrap: all attempts failed");
@@ -5678,14 +5834,14 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
     for (const auto& apiUrl : apiUrls) {
         std::string json = HttpGet(apiUrl);
         if (json.empty()) continue;
-        std::string url = FindFullZipAssetUrl(json);
-        if (url.empty()) continue;
-        std::wstring zipUrl(url.begin(), url.end());
+        AssetInfo uiAsset = FindFullZipAssetUrl(json);
+        if (uiAsset.url.empty()) continue;
+        std::wstring zipUrl(uiAsset.url.begin(), uiAsset.url.end());
         ok = HttpDownload(zipUrl, tmpZip, [&](DWORD64 dl, DWORD64 tot) {
             if (tot > 0) SetPct((int)(dl * 90 / tot));
-        });
+        }, uiAsset.size);
         if (ok) break;
-        DeleteFileW(tmpZip.c_str());
+        DeleteFileW(tmpZip.c_str()); // discard partial before retrying with next API URL
     }
 
     if (!ok) {
