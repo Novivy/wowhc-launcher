@@ -1000,7 +1000,7 @@ static void MoveDirContents(const std::wstring& src, const std::wstring& dst)
             MoveDirContents(s, d);
             RemoveDirectoryW(s.c_str());
         } else {
-            MoveFileExW(s.c_str(), d.c_str(), MOVEFILE_REPLACE_EXISTING);
+            MoveFileExW(s.c_str(), d.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
         }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
@@ -2414,7 +2414,7 @@ static void ApplyLauncherUpdate(const std::wstring& newExePath)
         MessageBoxW(nullptr, L"Failed to rename the current launcher EXE.\nMake sure the launcher is not running from a read-only location.", L"Update Failed", MB_OK | MB_ICONERROR);
         return;
     }
-    if (!MoveFileW(newExePath.c_str(), exePath)) {
+    if (!MoveFileExW(newExePath.c_str(), exePath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
         MoveFileW(oldPath.c_str(), exePath);
         MessageBoxW(nullptr, L"Failed to place the new launcher EXE.\nThe update was rolled back.", L"Update Failed", MB_OK | MB_ICONERROR);
         return;
@@ -2938,7 +2938,7 @@ static void CheckAndBootstrapFFmpegDlls()
                 do {
                     MoveFileExW((tmpExtractDir + L"\\" + fd.cFileName).c_str(),
                                 (dllDir + L"\\" + fd.cFileName).c_str(),
-                                MOVEFILE_REPLACE_EXISTING);
+                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
                 } while (FindNextFileW(hf, &fd));
                 FindClose(hf);
             }
