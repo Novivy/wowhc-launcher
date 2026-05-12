@@ -2573,7 +2573,12 @@ static void ApplyLauncherUpdate(const std::wstring& newExePath)
 // Returns false if user cancelled.
 static bool PromptAndCloseGameForUpdate()
 {
-    bool wowRunning = IsProcessRunning(L"WowClassic.exe")
+    DWORD  wowPid  = g_wowPid.load();
+    HANDLE hHermes = g_hermesProcess;
+
+    // Prefer tracked PID/handle; fall back to name scan only for externally launched instances.
+    bool wowRunning = (wowPid != 0)
+                   || IsProcessRunning(L"WowClassic.exe")
                    || IsProcessRunning(NAMEPLATE_41Y_EXE_NAME)
                    || IsProcessRunning(L"Wow_tweaked.exe");
     if (!wowRunning) return true;
@@ -2581,10 +2586,16 @@ static bool PromptAndCloseGameForUpdate()
     LRESULT r = SendMessageW(g_hwnd, WM_ASK_CLOSE_GAME_FOR_UPDATE, 0, 0);
     if (r != IDYES) return false;
 
-    KillProcess(L"WowClassic.exe");
-    KillProcess(NAMEPLATE_41Y_EXE_NAME);
-    KillProcess(L"Wow_tweaked.exe");
-    if (g_clientType == CT_114) KillProcess(L"HermesProxy.exe");
+    if (wowPid != 0) {
+        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, wowPid);
+        if (h) { TerminateProcess(h, 0); CloseHandle(h); }
+    } else {
+        KillProcess(L"WowClassic.exe");
+        KillProcess(NAMEPLATE_41Y_EXE_NAME);
+        KillProcess(L"Wow_tweaked.exe");
+    }
+    if (hHermes)                       TerminateProcess(hHermes, 0);
+    else if (g_clientType == CT_114)   KillProcess(L"HermesProxy.exe");
     Sleep(1000);
     return true;
 }
@@ -2669,22 +2680,9 @@ static void RunHermesUpdateCheck()
         CreateDirectoryW(hermesDir.c_str(), nullptr);
 
         // Kill HermesProxy if running — file lock would silently corrupt the update
-        {
-            HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if (hSnap != INVALID_HANDLE_VALUE) {
-                PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
-                if (Process32FirstW(hSnap, &pe)) {
-                    do {
-                        if (_wcsicmp(pe.szExeFile, L"HermesProxy.exe") == 0) {
-                            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
-                            if (h) { TerminateProcess(h, 0); CloseHandle(h); }
-                        }
-                    } while (Process32NextW(hSnap, &pe));
-                }
-                CloseHandle(hSnap);
-            }
-            Sleep(500);
-        }
+        if (g_hermesProcess) TerminateProcess(g_hermesProcess, 0);
+        else                 KillProcess(L"HermesProxy.exe");
+        Sleep(500);
 
         ok = ExtractZipCom(tmpZip, hermesDir, true);
         DeleteFileW(tmpZip.c_str());
@@ -4779,9 +4777,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     bool promptOnKill = g_promptOnKillProcess;
                     std::thread([hermesExe, arctiumExe, clientPath, promptOnKill, use41yd, useArctiumParams]() {
 
-                        bool wowRunning    = IsProcessRunning(L"WowClassic.exe") ||
-                                             IsProcessRunning(NAMEPLATE_41Y_EXE_NAME);
-                        bool hermesRunning = IsProcessRunning(L"HermesProxy.exe");
+                        // Use tracked PID/handle to avoid process enumeration by name.
+                        DWORD  wowPid      = g_wowPid.load();
+                        HANDLE hHermes     = g_hermesProcess;
+                        bool   wowRunning  = (wowPid != 0);
+                        bool   hermesRunning = (hHermes != nullptr);
                         if ((wowRunning || hermesRunning) && promptOnKill) {
                             int ans = MessageBoxW(g_hwnd,
                                 L"A game session is already running.\r\n\r\n"
@@ -4792,9 +4792,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 return;
                             }
                         }
-                        if (IsProcessRunning(L"WowClassic.exe"))      { KillProcess(L"WowClassic.exe");      Sleep(500); }
-                        if (IsProcessRunning(NAMEPLATE_41Y_EXE_NAME)) { KillProcess(NAMEPLATE_41Y_EXE_NAME); Sleep(500); }
-                        if (hermesRunning)                             { KillProcess(L"HermesProxy.exe");     Sleep(500); }
+                        if (wowPid != 0) {
+                            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, wowPid);
+                            if (h) { TerminateProcess(h, 0); CloseHandle(h); Sleep(500); }
+                        }
+                        if (hHermes) { TerminateProcess(hHermes, 0); Sleep(500); }
                         {
                             auto blocking = FindListeningPorts(GetHermesPorts(hermesExe));
                             if (!blocking.empty()) {
