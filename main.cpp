@@ -5798,9 +5798,16 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         }
     }
 
-    // Already in AppData?
-    if (GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES)
-        return true;
+    // Already in AppData? Verify index.html is present, not just the directory.
+    // AV may delete file contents while leaving the empty directory behind.
+    {
+        std::wstring idx = appDataUi + L"\\index.html";
+        if (GetFileAttributesW(idx.c_str()) != INVALID_FILE_ATTRIBUTES)
+            return true;
+        // Directory exists but index.html is gone — treat as missing, remove the stale dir.
+        if (GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES)
+            DeleteDirRecursive(appDataUi);
+    }
 
     // Copy from EXE dir (user extracted the Full ZIP alongside the EXE).
     std::wstring exeUi = GetExeDir() + L"\\ui";
