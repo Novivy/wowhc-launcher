@@ -69,7 +69,7 @@ static constexpr wchar_t LAUNCHER_GH_REPO[]    = L"wowhc-launcher";
 static constexpr char    LAUNCHER_EXE_ASSET[]      = "WOW-HC-Launcher.exe";
 static constexpr char    LAUNCHER_FULL_ZIP_ASSET[] = "WOW-HC-Launcher-Full.zip";
 
-static constexpr wchar_t NAMEPLATE_41Y_ZIP_URL[]  = L"http://client.wow-hc.com/1.14.2/WowClassic41yd.zip";
+static constexpr wchar_t NAMEPLATE_41Y_ZIP_URL[]  = L"https://client.wow-hc.com/1.14.2/WowClassic41yd.zip";
 static constexpr wchar_t NAMEPLATE_41Y_EXE_NAME[] = L"WowClassic41yd.exe";
 
 #ifndef LAUNCHER_VERSION_STR
