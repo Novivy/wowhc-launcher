@@ -5798,8 +5798,9 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         }
     }
 
-    // Already in AppData?
-    if (GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES)
+    // Already in AppData? Check for index.html, not just the directory —
+    // the folder can exist but be empty if files were removed externally.
+    if (GetFileAttributesW((appDataUi + L"\\index.html").c_str()) != INVALID_FILE_ATTRIBUTES)
         return true;
 
     // Copy from EXE dir (user extracted the Full ZIP alongside the EXE).
