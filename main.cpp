@@ -134,6 +134,7 @@ enum : UINT {
 #define WM_GEN_SETTINGS_EXE_BROWSE   (WM_APP + 36) // open exe picker for custom launch exe, result posted to WebView
 #define WM_GEN_SETTINGS_RESET_CONFIRM (WM_APP + 37) // show Yes/No MessageBox; posts generalSettingsResetConfirmed on Yes
 #define WM_ASK_CLOSE_GAME_FOR_UPDATE  (WM_APP + 38) // prompt user to close game for pending update; returns IDYES/IDNO
+#define WM_GEN_SETTINGS_RESET_UI      (WM_APP + 39) // lParam = new std::string* (JSON defaults), save & delete ui/ & restart
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
@@ -249,8 +250,9 @@ static std::string            g_cachedStatsJson;
 static std::mutex             g_statsJsonMtx;
 
 // HermesProxy pipe
-static HANDLE g_hermesProcess  = nullptr;
-static HANDLE g_hermesPipeRead = nullptr;
+static HANDLE  g_hermesProcess    = nullptr;
+static HANDLE  g_hermesPipeRead   = nullptr;
+static DWORD64 g_hermesLaunchTick = 0; // GetTickCount64() at launch; 0 = not tracked
 // PID of the specific WoW process we launched (0 if not running)
 static std::atomic<DWORD> g_wowPid{0};
 static HMODULE g_hRichEdit     = nullptr; // still loaded for existing RichEdit code paths
@@ -891,27 +893,28 @@ static void FetchLiveData()
 
 static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
     const std::function<void(DWORD64, DWORD64)>& progress = nullptr,
-    DWORD64 expectedSize = 0)
+    DWORD64 expectedSize = 0,
+    bool resumable = false)
 {
-    std::wstring partPath = dest + L".part";
+    // resumable=true: write to dest+".part", resume partial downloads across launches.
+    // resumable=false (default): write directly to dest; no temp file rename.
+    const std::wstring writeDest = resumable ? (dest + L".part") : dest;
 
-    // Probe for a partial file from a previous interrupted download
     DWORD64 resumeOffset = 0;
-    {
+    if (resumable) {
         WIN32_FILE_ATTRIBUTE_DATA fa = {};
-        if (GetFileAttributesExW(partPath.c_str(), GetFileExInfoStandard, &fa)) {
+        if (GetFileAttributesExW(writeDest.c_str(), GetFileExInfoStandard, &fa)) {
             ULARGE_INTEGER ul; ul.LowPart = fa.nFileSizeLow; ul.HighPart = fa.nFileSizeHigh;
             resumeOffset = ul.QuadPart;
             AppendLog(L"HttpDownload: found .part file (%I64u bytes), will attempt resume url='%s'",
                 resumeOffset, url.c_str());
         }
-    }
-    // Stale .part (>= expected size) means something went wrong previously — start fresh
-    if (expectedSize > 0 && resumeOffset >= expectedSize) {
-        AppendLog(L"HttpDownload: stale .part (%I64u >= expected %I64u), discarding url='%s'",
-            resumeOffset, expectedSize, url.c_str());
-        DeleteFileW(partPath.c_str());
-        resumeOffset = 0;
+        if (expectedSize > 0 && resumeOffset >= expectedSize) {
+            AppendLog(L"HttpDownload: stale .part (%I64u >= expected %I64u), discarding url='%s'",
+                resumeOffset, expectedSize, url.c_str());
+            DeleteFileW(writeDest.c_str());
+            resumeOffset = 0;
+        }
     }
 
     HINTERNET hSess = OpenSession();
@@ -937,15 +940,15 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
     }
 
     bool ok = false;
-    bool keepPart = false; // true = preserve .part for future resume on next launch
+    bool keepPart = false;
 
     bool sent  = WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                      WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
     bool recvd = sent && WinHttpReceiveResponse(hReq, nullptr);
     if (!sent || !recvd) {
         DWORD err = GetLastError();
-        AppendLog(L"HttpDownload: send/recv failed (0x%08lX), keeping .part for resume url='%s'", err, url.c_str());
-        keepPart = true; // network failure — resume on next launch
+        AppendLog(L"HttpDownload: send/recv failed (0x%08lX) url='%s'", err, url.c_str());
+        keepPart = resumable; // preserve partial only when resumption is meaningful
         wchar_t msg[128];
         swprintf_s(msg, L"Network error (WinHTTP 0x%08lX).\nCheck your internet connection and try again.", err);
         MessageBoxW(g_hwnd, msg, L"Download Failed", MB_OK | MB_ICONERROR);
@@ -956,9 +959,8 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
         AppendLog(L"HttpDownload: HTTP %lu (resumeOffset=%I64u) url='%s'", statusCode, resumeOffset, url.c_str());
 
         if (statusCode == 200 && resumeOffset > 0) {
-            // Server ignored our Range header — discard stale .part and start fresh
             AppendLog(L"HttpDownload: server returned 200 instead of 206, discarding .part url='%s'", url.c_str());
-            DeleteFileW(partPath.c_str());
+            DeleteFileW(writeDest.c_str());
             resumeOffset = 0;
         }
 
@@ -968,9 +970,6 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
             if (WinHttpQueryHeaders(hReq, WINHTTP_QUERY_CONTENT_LENGTH,
                     nullptr, lenBuf, &ls, nullptr))
                 contentLen = (DWORD64)_wtoi64(lenBuf);
-            // fullTotal = full file size for progress display.
-            // For 206: contentLen is the remaining bytes; add resumeOffset for the true total.
-            // If contentLen is 0 (server omitted header), keep fullTotal=0 to signal unknown progress.
             DWORD64 fullTotal = 0;
             if (contentLen > 0)
                 fullTotal = (statusCode == 206) ? (resumeOffset + contentLen) : contentLen;
@@ -978,18 +977,17 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                 contentLen, fullTotal, resumeOffset);
 
             DWORD createDisp = (resumeOffset > 0) ? OPEN_EXISTING : CREATE_ALWAYS;
-            HANDLE hFile = CreateFileW(partPath.c_str(), GENERIC_WRITE, 0, nullptr,
+            HANDLE hFile = CreateFileW(writeDest.c_str(), GENERIC_WRITE, 0, nullptr,
                 createDisp, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (hFile != INVALID_HANDLE_VALUE) {
                 bool seekOk = true;
                 if (resumeOffset > 0) {
-                    // SetFilePointerEx handles files >2 GB correctly (SetFilePointer silently fails there)
                     LARGE_INTEGER liZero = {};
                     seekOk = SetFilePointerEx(hFile, liZero, nullptr, FILE_END) != FALSE;
                     if (!seekOk) {
-                        AppendLog(L"HttpDownload: SetFilePointerEx failed (0x%08lX) part='%s'",
-                            GetLastError(), partPath.c_str());
-                        keepPart = true; // don't discard valid partial data on a seek failure
+                        AppendLog(L"HttpDownload: SetFilePointerEx failed (0x%08lX) dest='%s'",
+                            GetLastError(), writeDest.c_str());
+                        keepPart = resumable;
                     }
                 }
                 DWORD64 downloaded = 0; DWORD read = 0;
@@ -1008,16 +1006,15 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                 CloseHandle(hFile);
 
                 if (ok && contentLen > 0 && downloaded < contentLen) {
-                    // Connection dropped mid-transfer; preserve .part so next launch can resume
                     AppendLog(L"HttpDownload: truncated — got %I64u of %I64u bytes (offset was %I64u) url='%s'",
                         downloaded, contentLen, resumeOffset, url.c_str());
                     ok = false;
-                    keepPart = true;
+                    keepPart = resumable;
                 }
                 if (ok && expectedSize > 0) {
                     WIN32_FILE_ATTRIBUTE_DATA fa = {};
                     DWORD64 finalSize = 0;
-                    if (GetFileAttributesExW(partPath.c_str(), GetFileExInfoStandard, &fa)) {
+                    if (GetFileAttributesExW(writeDest.c_str(), GetFileExInfoStandard, &fa)) {
                         ULARGE_INTEGER ul; ul.LowPart = fa.nFileSizeLow; ul.HighPart = fa.nFileSizeHigh;
                         finalSize = ul.QuadPart;
                     }
@@ -1025,20 +1022,20 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                         AppendLog(L"HttpDownload: size mismatch — file=%I64u expected=%I64u url='%s'",
                             finalSize, expectedSize, url.c_str());
                         ok = false;
-                        DeleteFileW(partPath.c_str()); // corrupt; don't resume from this
+                        DeleteFileW(writeDest.c_str());
                     }
                 }
                 if (ok) {
-                    // MoveFileExW with MOVEFILE_REPLACE_EXISTING replaces dest atomically on same
-                    // volume; MOVEFILE_COPY_ALLOWED handles cross-volume as fallback
-                    if (!MoveFileExW(partPath.c_str(), dest.c_str(),
-                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
-                        AppendLog(L"HttpDownload: rename .part failed (0x%08lX) src='%s' dest='%s'",
-                            GetLastError(), partPath.c_str(), dest.c_str());
-                        ok = false;
-                        DeleteFileW(partPath.c_str());
-                    } else {
-                        // Get final file size for the success log
+                    if (resumable) {
+                        if (!MoveFileExW(writeDest.c_str(), dest.c_str(),
+                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+                            AppendLog(L"HttpDownload: rename failed (0x%08lX) src='%s' dest='%s'",
+                                GetLastError(), writeDest.c_str(), dest.c_str());
+                            ok = false;
+                            DeleteFileW(writeDest.c_str());
+                        }
+                    }
+                    if (ok) {
                         WIN32_FILE_ATTRIBUTE_DATA fa = {};
                         DWORD64 finalSize = 0;
                         if (GetFileAttributesExW(dest.c_str(), GetFileExInfoStandard, &fa)) {
@@ -1051,11 +1048,9 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                 }
             } else {
                 DWORD err = GetLastError();
-                AppendLog(L"HttpDownload: CreateFile failed (0x%08lX, disp=%lu) part='%s'",
-                    err, createDisp, partPath.c_str());
-                // If we were trying to open an existing .part, preserve it — CreateFile
-                // failing doesn't mean the file is corrupt
-                if (resumeOffset > 0) keepPart = true;
+                AppendLog(L"HttpDownload: CreateFile failed (0x%08lX, disp=%lu) dest='%s'",
+                    err, createDisp, writeDest.c_str());
+                if (resumeOffset > 0) keepPart = resumable;
             }
         } else {
             // HTTP error (non-200/206)
@@ -1073,18 +1068,18 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                 fprintf(f, "URL: %ls\nHTTP %lu\n%s\n---\n", url.c_str(), statusCode, errBody.c_str());
                 fclose(f);
             }
-            AppendLog(L"HttpDownload: HTTP error %lu, discarding .part (see %s) url='%s'",
+            AppendLog(L"HttpDownload: HTTP error %lu (see %s) url='%s'",
                 statusCode, logPath.c_str(), url.c_str());
             MessageBoxW(g_hwnd,
                 (L"HTTP error " + std::to_wstring(statusCode) +
                  L"\nCheck: " + logPath).c_str(),
                 L"Download Failed", MB_OK | MB_ICONERROR);
-            DeleteFileW(partPath.c_str()); // HTTP error — discard partial, no point resuming
+            DeleteFileW(writeDest.c_str());
         }
     }
 
     if (!ok && !keepPart)
-        DeleteFileW(partPath.c_str());
+        DeleteFileW(writeDest.c_str());
 
     WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess);
     return ok;
@@ -2298,14 +2293,9 @@ static bool ShowWebView2InstallPrompt(HWND hwnd)
         return false;
     }
 
-    // Relaunch so the new process picks up the registered WebView2 runtime.
-    wchar_t exePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    if ((INT_PTR)ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL) <= 32) {
-        MessageBoxW(hwnd,
-            L"WebView2 has been installed.\nPlease restart the launcher manually.",
-            L"Restart Required", MB_OK | MB_ICONINFORMATION);
-    }
+    MessageBoxW(hwnd,
+        L"WebView2 has been installed.\nPlease restart the launcher.",
+        L"Restart Required", MB_OK | MB_ICONINFORMATION);
     return false;
 }
 
@@ -3335,7 +3325,8 @@ static void Worker()
                              : (g_testMode ? s_114TestUrl.c_str() : CLIENT_DOWNLOAD_URL);
         AppendLog(L"Worker: downloading client url='%s' dest='%s'", dlUrl, tmpZip.c_str());
         bool ok = HttpDownload(dlUrl, tmpZip,
-            [&dlClient](DWORD64 dl, DWORD64 tot) { dlClient(dl, tot); });
+            [&dlClient](DWORD64 dl, DWORD64 tot) { dlClient(dl, tot); },
+            0, true);
 
         if (!ok) {
             AppendLog(L"Worker: client download failed");
@@ -4255,6 +4246,10 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
     else if (action == "generalSettingsResetConfirm") {
         PostMessageW(hwnd, WM_GEN_SETTINGS_RESET_CONFIRM, 0, 0);
     }
+    else if (action == "generalSettingsResetUi") {
+        auto* ps = new std::string(j);
+        PostMessageW(hwnd, WM_GEN_SETTINGS_RESET_UI, 0, (LPARAM)ps);
+    }
     else if (action == "setRealm") {
         int idx = JsonInt(j, "index");
         PostMessageW(hwnd, WM_SET_REALM, (WPARAM)idx, 0);
@@ -4784,17 +4779,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         }
                         PatchConfigWtf(clientPath, use41yd);
                         SetClientFilesReadOnly(clientPath, true);
+                        g_hermesLaunchTick = GetTickCount64();
                         LaunchHermesWithPipe(hermesExe);
-                        Sleep(3000);
-
-                        if (g_hermesProcess && WaitForSingleObject(g_hermesProcess, 0) == WAIT_OBJECT_0) {
-                            MessageBoxW(g_hwnd,
-                                L"HermesProxy stopped unexpectedly shortly after launch.\r\n\r\n"
-                                L"Try running this launcher as administrator and start the game again.",
-                                L"HermesProxy Error", MB_OK | MB_ICONERROR);
-                            PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
-                            return;
-                        }
+                        Sleep(2000);
 
                         if (use41yd) {
                             // 41yd path: download EXE if missing, launch directly (no Arctium)
@@ -5239,11 +5226,42 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_GEN_SETTINGS_RESET_CONFIRM:
     {
         int res = MessageBoxW(hwnd,
-            L"Reset all settings to their defaults?",
+            L"Reset all settings to their defaults and re-download the launcher UI?\r\n\r\n"
+            L"The launcher will restart.",
             L"Reset Settings",
             MB_YESNO | MB_ICONQUESTION);
         if (res == IDYES && g_webview && g_wvReady)
             g_webview->PostWebMessageAsJson(L"{\"type\":\"generalSettingsResetConfirmed\"}");
+        return 0;
+    }
+
+    case WM_GEN_SETTINGS_RESET_UI:
+    {
+        std::string* ps = reinterpret_cast<std::string*>(lp);
+        std::string body = ps ? *ps : "";
+        delete ps;
+
+        g_showRecordingNotifications = JsonBool(body, "showRecordingNotifications", true);
+        RB_SetShowNotifications(g_showRecordingNotifications);
+        g_promptOnKillProcess = JsonBool(body, "promptOnKillProcess", false);
+        g_hermesServerSpellDelay = JsonInt(body, "hermesServerSpellDelay", -1);
+        g_hermesClientSpellDelay = JsonInt(body, "hermesClientSpellDelay", -1);
+        g_hermesSpellQueueWindow = 300;
+        g_customLaunchExe.clear();
+        if (g_clientType == CT_114) g_use41ydNameplates = true;
+        SaveConfig();
+
+        // Can't delete ui/ here — WebView2 holds file locks. Write a marker so the
+        // next startup deletes it in CheckAndBootstrapUiFiles before WebView2 inits.
+        std::wstring marker = g_configDir + L"\\ui_reset_pending";
+        HANDLE hM = CreateFileW(marker.c_str(), GENERIC_WRITE, 0, nullptr,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hM != INVALID_HANDLE_VALUE) CloseHandle(hM);
+
+        wchar_t exePath[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL);
+        PostQuitMessage(0);
         return 0;
     }
 
@@ -5427,6 +5445,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_HERMES_CLOSED:
         AppendLog(L"[Hermes] --- process closed ---");
+        if (g_hermesLaunchTick > 0) {
+            DWORD64 elapsed = GetTickCount64() - g_hermesLaunchTick;
+            g_hermesLaunchTick = 0;
+            if (elapsed < 15000)
+                MessageBoxW(hwnd, L"HermesProxy failed to start.",
+                    L"HermesProxy Error", MB_OK | MB_ICONERROR);
+        }
         g_showConsole    = false;
         g_consoleLineCount = 0;
         PostStateToWebView();
@@ -5521,6 +5546,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         g_wvCtrl.Reset();
         g_webview.Reset();
+        // WebView2 locks on ui/ are released — apply any pending UI update now.
+        {
+            std::wstring pendingUi = g_configDir + L"\\ui_pending";
+            std::wstring appDataUi = g_configDir + L"\\ui";
+            if (GetFileAttributesW(pendingUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                DeleteDirRecursive(appDataUi);
+                MoveFileExW(pendingUi.c_str(), appDataUi.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+            }
+        }
         RB_Shutdown();
         KillTimer(hwnd, ID_TIMER_UPDATE);
         KillTimer(hwnd, ID_TIMER_LIVE);
@@ -5755,13 +5790,13 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
             return true;
     }
 
-    // Apply a pending UI update staged by RunLauncherUpdateCheck on the previous run.
-    // WebView2 is not running yet, so there are no file locks on ui/.
+    // User requested UI reset (Reset to Default). Delete ui/ so we re-download below.
     {
-        std::wstring pendingUi = g_configDir + L"\\ui_pending";
-        if (GetFileAttributesW(pendingUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::wstring marker = g_configDir + L"\\ui_reset_pending";
+        if (GetFileAttributesW(marker.c_str()) != INVALID_FILE_ATTRIBUTES) {
             DeleteDirRecursive(appDataUi);
-            MoveFileExW(pendingUi.c_str(), appDataUi.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+            DeleteDirRecursive(g_configDir + L"\\ui_pending");
+            DeleteFileW(marker.c_str());
         }
     }
 
@@ -5979,9 +6014,24 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
             bool wasInstalled = GetFileAttributesW(ClientMarker().c_str()) != INVALID_FILE_ATTRIBUTES;
             // If an in-progress or completed-but-unextracted download exists, preserve paths
             // so the Worker resumes from where it left off instead of showing the install modal.
+            std::wstring partFile = g_installPath + L"\\wowclient_dl.zip.part";
+            std::wstring zipFile  = g_installPath + L"\\wowclient_dl.zip";
             bool hasPartialDownload = !wasInstalled && !g_installPath.empty() &&
-                (GetFileAttributesW((g_installPath + L"\\wowclient_dl.zip.part").c_str()) != INVALID_FILE_ATTRIBUTES ||
-                 GetFileAttributesW((g_installPath + L"\\wowclient_dl.zip").c_str())      != INVALID_FILE_ATTRIBUTES);
+                (GetFileAttributesW(partFile.c_str()) != INVALID_FILE_ATTRIBUTES ||
+                 GetFileAttributesW(zipFile.c_str())  != INVALID_FILE_ATTRIBUTES);
+            if (hasPartialDownload) {
+                int choice = MessageBoxW(nullptr,
+                    L"A previous WoW client download was interrupted.\r\n\r\n"
+                    L"Resume where it stopped, or restart from the beginning?",
+                    L"Interrupted Download",
+                    MB_ICONQUESTION | MB_YESNOCANCEL);
+                // Yes = resume, No = restart, Cancel = restart
+                if (choice != IDYES) {
+                    DeleteFileW(partFile.c_str());
+                    DeleteFileW(zipFile.c_str());
+                    hasPartialDownload = false;
+                }
+            }
             AppendLog(L"Startup exe check FAILED (wasInstalled=%d, hasPartialDownload=%d) — %s",
                 (int)wasInstalled, (int)hasPartialDownload,
                 hasPartialDownload ? L"resuming download" : L"clearing all paths");

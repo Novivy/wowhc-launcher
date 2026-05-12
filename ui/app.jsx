@@ -572,13 +572,15 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
 
   React.useEffect(() => {
     if (!resetConfirmed) return;
-    setShowRecordingNotifications(true);
-    setServerSpellDelay('15');
-    setClientSpellDelay('15');
-    setSpellQueueWindow('300');
-    setExePath(ini.nameplate41ydExe || ini.defaultLaunchExe || '');
-    setPromptOnKillProcess(false);
-    setUse41ydNameplates(true);
+    onAction('generalSettingsResetUi', {
+      showRecordingNotifications: true,
+      promptOnKillProcess: false,
+      use41ydNameplates: true,
+      hermesServerSpellDelay: null,
+      hermesClientSpellDelay: null,
+      hermesSpellQueueWindow: 300,
+      customLaunchExe: '',
+    });
     onClearResetConfirmed && onClearResetConfirmed();
   }, [resetConfirmed]);
 
