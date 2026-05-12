@@ -166,7 +166,14 @@ const BottomBar = ({ state, onAction, booting }) => {
                 position: 'absolute', top: 0, left: 0, bottom: 0, width: progressPct + '%',
                 background: 'linear-gradient(90deg, ' + T.ember + ', ' + T.amber + ')',
                 transition: 'width 300ms ease',
-              }}/>
+                overflow: 'hidden',
+              }}>
+                {progressPct < 100 && React.createElement('div', { style: {
+                  position: 'absolute', top: 0, bottom: 0, width: '45%',
+                  background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.18) 50%, transparent)',
+                  animation: 'wv-scan 1.3s linear infinite',
+                }})}
+              </div>
             )}
             <div style={{ position: 'absolute', inset: 0, background: 'repeating-linear-gradient(90deg, transparent 0 7px, rgba(0,0,0,0.18) 7px 0px)' }}/>
           </div>
@@ -884,7 +891,7 @@ const App = ({ isNative }) => {
   const [news,    setNews]    = React.useState(NEWS);
   const [booting, setBooting] = React.useState(isNative);
   const [heroHov, setHeroHov] = React.useState(false);
-  const [statsCountdown, setStatsCountdown] = React.useState('10:00');
+  const [statsCountdown, setStatsCountdown] = React.useState('05:00');
   const [deathsAtBottom, setDeathsAtBottom] = React.useState(false);
   const [newsAtBottom,   setNewsAtBottom]   = React.useState(false);
 
@@ -992,7 +999,7 @@ const App = ({ isNative }) => {
     var ts   = function() { return '_=' + Date.now(); };
     var base = 'https://wow-hc.com/json/';
     var qs   = function() { return '?api_version=126&front_realm=1&' + ts(); };
-    var STATS_MS = 10 * 60 * 1000;
+    var STATS_MS = 5 * 60 * 1000;
     var lastStatsAt = Date.now();
 
     fetch(base + 'areas.json' + qs())
@@ -1237,7 +1244,7 @@ const App = ({ isNative }) => {
             <div style={{ borderRight: '1px solid ' + T.line, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', position: 'relative' }}>
               <div style={{ padding: '5px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid ' + T.line2, background: 'rgba(154,52,34,0.08)', flexShrink: 0 }}>
                 <span style={{ fontSize: 11, letterSpacing: '0.14em', color: T.blood, fontWeight: 700 }}>RECENT DEATHS</span>
-                <div style={{ textAlign: 'right', fontFamily: 'Inter, system-ui, sans-serif', lineHeight: 1.3 }} title="Recent deaths, Online players, and latest news are fetched from the server every 10 minutes">
+                <div style={{ textAlign: 'right', fontFamily: 'Inter, system-ui, sans-serif', lineHeight: 1.3 }} title="Recent deaths, Online players, and latest news are fetched from the server every 5 minutes">
                   <div style={{ fontSize: 9, color: T.textFaint, letterSpacing: '0.04em' }}>Auto-refresh in</div>
                   <div style={{ fontSize: 10, color: '#bdd1bb', letterSpacing: '0.04em' }}>{statsCountdown}</div>
                 </div>

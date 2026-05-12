@@ -245,7 +245,7 @@ static std::wstring g_customLaunchExe;            // empty = use default for cur
 static bool         g_promptOnKillProcess = false; // ask before killing existing game processes
 static bool         g_use41ydNameplates   = true;  // CT_114 only: launch 41-yard nameplate EXE
 
-// Server-stats cache — fetched by FetchLiveData (10-min timer), reused by RunThirdPartyAddonUpdates
+// Server-stats cache — fetched by FetchLiveData (5-min timer), reused by RunThirdPartyAddonUpdates
 static std::string            g_cachedStatsJson;
 static std::mutex             g_statsJsonMtx;
 
@@ -2394,6 +2394,7 @@ static void InitWebView2(HWND hwnd)
                                 }).Get(), &tok);
 
                         g_wvReady = true;
+                        InvalidateRect(hwnd, nullptr, FALSE);
                         g_webview->Navigate(navUrl.c_str());
                         return S_OK;
                     }).Get());
@@ -4332,7 +4333,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
         SetTimer(hwnd, ID_TIMER_UPDATE, 24u * 60u * 60u * 1000u, nullptr);
-        SetTimer(hwnd, ID_TIMER_LIVE,   10u * 60u * 1000u, nullptr);
+        SetTimer(hwnd, ID_TIMER_LIVE,    5u * 60u * 1000u, nullptr);
 
         g_currentStatus = STATUS_TEXT[WS_NO_PATH];
 
@@ -4384,6 +4385,41 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HBRUSH hbr = CreateSolidBrush(RGB(10, 8, 6));
         FillRect(hdc, &rc, hbr);
         DeleteObject(hbr);
+
+        if (!g_wvReady) {
+            int logoSz = MulDiv(88, g_dpi, 96);
+            int cx = (rc.right  - rc.left) / 2;
+            int cy = (rc.bottom - rc.top)  / 2;
+            int gap = MulDiv(14, g_dpi, 96);
+
+            std::unique_ptr<Gdiplus::Bitmap> bmp(LoadPngFromResource(202));
+            if (bmp) {
+                Gdiplus::Graphics gfx(hdc);
+                gfx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                gfx.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+                gfx.DrawImage(bmp.get(), cx - logoSz / 2, cy - logoSz / 2 - gap, logoSz, logoSz);
+            }
+
+            int fontH = -MulDiv(9, g_dpi, 72);
+            HFONT hFont = CreateFontW(fontH, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Inter");
+            if (!hFont)
+                hFont = CreateFontW(fontH, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+
+            HFONT hOld = (HFONT)SelectObject(hdc, hFont);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(130, 105, 70));
+            const wchar_t* txt = L"LAUNCHER IS STARTING";
+            SIZE ts; GetTextExtentPoint32W(hdc, txt, (int)wcslen(txt), &ts);
+            int textY = cy + logoSz / 2 - gap + MulDiv(10, g_dpi, 96);
+            TextOutW(hdc, cx - ts.cx / 2, textY, txt, (int)wcslen(txt));
+            SelectObject(hdc, hOld);
+            DeleteObject(hFont);
+        }
+
         EndPaint(hwnd, &ps);
         return 0;
     }
