@@ -1304,35 +1304,6 @@ static bool CopyDirRecursive(const std::wstring& src, const std::wstring& dst,
     return true;
 }
 
-// ── Process helpers ────────────────────────────────────────────────────────────
-static bool IsProcessRunning(const wchar_t* exeName)
-{
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return false;
-    PROCESSENTRY32W pe = {}; pe.dwSize = sizeof(pe);
-    bool found = false;
-    if (Process32FirstW(snap, &pe))
-        do { if (_wcsicmp(pe.szExeFile, exeName) == 0) { found = true; break; } }
-        while (Process32NextW(snap, &pe));
-    CloseHandle(snap);
-    return found;
-}
-
-static void KillProcess(const wchar_t* exeName)
-{
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return;
-    PROCESSENTRY32W pe = {}; pe.dwSize = sizeof(pe);
-    if (Process32FirstW(snap, &pe)) {
-        do {
-            if (_wcsicmp(pe.szExeFile, exeName) == 0) {
-                HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
-                if (h) { TerminateProcess(h, 0); CloseHandle(h); }
-            }
-        } while (Process32NextW(snap, &pe));
-    }
-    CloseHandle(snap);
-}
 
 // Polls up to timeoutMs for a process named exeName whose parent PID is parentPid.
 // Returns the child PID, or 0 on timeout.
@@ -2576,12 +2547,8 @@ static bool PromptAndCloseGameForUpdate()
     DWORD  wowPid  = g_wowPid.load();
     HANDLE hHermes = g_hermesProcess;
 
-    // Prefer tracked PID/handle; fall back to name scan only for externally launched instances.
-    bool wowRunning = (wowPid != 0)
-                   || IsProcessRunning(L"WowClassic.exe")
-                   || IsProcessRunning(NAMEPLATE_41Y_EXE_NAME)
-                   || IsProcessRunning(L"Wow_tweaked.exe");
-    if (!wowRunning) return true;
+    bool wowRunning = (wowPid != 0);
+    if (!wowRunning && !hHermes) return true;
 
     LRESULT r = SendMessageW(g_hwnd, WM_ASK_CLOSE_GAME_FOR_UPDATE, 0, 0);
     if (r != IDYES) return false;
@@ -2589,13 +2556,8 @@ static bool PromptAndCloseGameForUpdate()
     if (wowPid != 0) {
         HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, wowPid);
         if (h) { TerminateProcess(h, 0); CloseHandle(h); }
-    } else {
-        KillProcess(L"WowClassic.exe");
-        KillProcess(NAMEPLATE_41Y_EXE_NAME);
-        KillProcess(L"Wow_tweaked.exe");
     }
-    if (hHermes)                       TerminateProcess(hHermes, 0);
-    else if (g_clientType == CT_114)   KillProcess(L"HermesProxy.exe");
+    if (hHermes) TerminateProcess(hHermes, 0);
     Sleep(1000);
     return true;
 }
@@ -2679,10 +2641,8 @@ static void RunHermesUpdateCheck()
         }
         CreateDirectoryW(hermesDir.c_str(), nullptr);
 
-        // Kill HermesProxy if running — file lock would silently corrupt the update
-        if (g_hermesProcess) TerminateProcess(g_hermesProcess, 0);
-        else                 KillProcess(L"HermesProxy.exe");
-        Sleep(500);
+        // Kill HermesProxy if we own it — file lock would silently corrupt the update
+        if (g_hermesProcess) { TerminateProcess(g_hermesProcess, 0); Sleep(500); }
 
         ok = ExtractZipCom(tmpZip, hermesDir, true);
         DeleteFileW(tmpZip.c_str());
