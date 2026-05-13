@@ -939,7 +939,7 @@ const App = ({ isNative }) => {
         var msg = typeof evt.data === 'string' ? JSON.parse(evt.data) : evt.data;
         console.log('[bridge] msg.type=' + msg.type + ' installPath=' + msg.installPath + ' isInstalled=' + msg.isInstalled);
         if (msg.type === 'state')       { setAppState(function(s) { return Object.assign({}, s, msg); }); setBooting(false); }
-        if (msg.type === 'showModal')   setModal(msg.modal);
+        if (msg.type === 'showModal')   { if (msg.modal === 'ptr' && localStorage.getItem('ptrSeen')) { /* skip */ } else setModal(msg.modal); }
         if (msg.type === 'hideModal')   { setModal(null); setRsConflict(null); setRsPendingFolder(null); setGsPendingExe(null); setGsResetConfirmed(false); }
         if (msg.type === 'hermesLine')  setHermesLines(function(prev) { return prev.slice(-500).concat([msg.text]); });
         if (msg.type === 'recordSettingsState')      { setRsSettings(msg); setRsOpenCount(function(c) { return c + 1; }); }
@@ -1350,8 +1350,8 @@ const App = ({ isNative }) => {
 
       {/* Modal overlays */}
       {modal === 'ptr' && React.createElement(PTRModal, {
-        onDismiss:       function() { setModal(null); onAction('ptrDismiss'); },
-        onRequestAccess: function() { setModal(null); onAction('ptrRequestAccess'); },
+        onDismiss:       function() { localStorage.setItem('ptrSeen', '1'); setModal(null); onAction('ptrDismiss'); },
+        onRequestAccess: function() { localStorage.setItem('ptrSeen', '1'); setModal(null); onAction('ptrRequestAccess'); },
       })}
       {modal === 'installMode' && React.createElement(InstallModeModal, {
         onChoice: function(choice) { setModal(null); onAction('installModeChoice', { choice: choice }); },
