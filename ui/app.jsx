@@ -719,7 +719,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
       <div style={sep} />
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <ModalBtn label="Reset to Default" secondary onClick={() => onAction('generalSettingsResetConfirm')} />
+        <ModalBtn label="Reset Launcher Data" secondary onClick={() => onAction('generalSettingsResetConfirm')} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <a
             onClick={() => { onAction('generalSettingsClose', payload()); onAction('openRecordSettings'); }}

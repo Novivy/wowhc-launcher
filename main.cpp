@@ -232,6 +232,7 @@ static std::atomic<bool> g_ffmpegBusy{false};
 
 static bool       g_testMode              = false; // --test flag: pulls latest pre-release
 static bool       g_devMode               = false; // --dev flag: forces dev-mode behaviour (DevTools, skip update fetches)
+static bool       g_uiResetThisStart      = false; // set when ui_reset_pending marker is found; makes WebView2 skip source-tree ui/ and use AppData
 static bool       g_freshInstall          = false;
 static ClientType g_clientType            = CT_UNKNOWN;
 static ClientType g_pendingInstallType    = CT_UNKNOWN;
@@ -2279,16 +2280,24 @@ static void InitWebView2(HWND hwnd)
 
     // Dev: prefer source-tree ../ui so JSX edits are visible after a plain restart.
     // Release: use AppData ui/ (migrated there from the Full ZIP on first run).
+    // After a UI reset (g_uiResetThisStart): skip source-tree so AppData gets the freshly
+    // downloaded copy.  Fall back to source-tree only if AppData ui/ is still missing
+    // (e.g. dev build where GitHub download was skipped).
     std::wstring uiFolder;
-    {
+    auto trySourceTree = [&]() {
         wchar_t full[MAX_PATH] = {};
         std::wstring candidate = exeDir + L"\\..\\ui";
         if (GetFullPathNameW(candidate.c_str(), MAX_PATH, full, nullptr) &&
-            GetFileAttributesW(full) != INVALID_FILE_ATTRIBUTES)
+                GetFileAttributesW(full) != INVALID_FILE_ATTRIBUTES)
             uiFolder = full;
-    }
+    };
+    if (!g_uiResetThisStart)
+        trySourceTree();
     if (uiFolder.empty())
         uiFolder = g_configDir + L"\\ui";
+    // Safety: if AppData ui/ is also missing (dev build after reset), fall back to source tree.
+    if (GetFileAttributesW(uiFolder.c_str()) == INVALID_FILE_ATTRIBUTES)
+        trySourceTree();
 
     auto envCb = Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
         [hwnd, uiFolder](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
@@ -2591,7 +2600,17 @@ static std::string GetFallbackRepo(const char* key)
 
 static void RunHermesUpdateCheck()
 {
-    if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return; }
+    // Must run before IsDevBuild() guard so the marker is consumed even in dev mode.
+    bool forceRedownload = false;
+    {
+        std::wstring hermesResetMarker = g_configDir + L"\\hermes_reset_pending";
+        if (GetFileAttributesW(hermesResetMarker.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileW(hermesResetMarker.c_str());
+            forceRedownload = true;
+            AppendLog(L"RunHermesUpdateCheck: reset pending, forcing re-download");
+        }
+    }
+
     std::wstring apiUrl = std::wstring(L"https://api.github.com/repos/")
         + HERMES_GH_OWNER + L"/" + HERMES_GH_REPO + L"/releases/latest";
     std::string json = HttpGet(apiUrl);
@@ -2607,9 +2626,13 @@ static void RunHermesUpdateCheck()
 
     std::string tag = JsonString(json, "tag_name");
     std::wstring remoteVer(tag.begin(), tag.end());
-    std::wstring localVer = GetLocalHermesVersion();
-    if (localVer.empty())
-        AppendLog(L"RunHermesUpdateCheck: could not read local version from HermesProxy.exe PE header (path='%s')", g_hermesExePath.c_str());
+
+    std::wstring localVer;
+    if (!forceRedownload) {
+        localVer = GetLocalHermesVersion();
+        if (localVer.empty())
+            AppendLog(L"RunHermesUpdateCheck: could not read local version from HermesProxy.exe PE header (path='%s')", g_hermesExePath.c_str());
+    }
     AppendLog(L"RunHermesUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
@@ -2709,8 +2732,16 @@ static std::vector<ThirdPartyAddon> ParseAddonList(const std::string& obj)
 
 static void RunThirdPartyAddonUpdates()
 {
-    //if (IsDevBuild()) return;
     if (g_clientPath.empty()) return;
+
+    // Check for reset marker written by "Reset to Default" — forces all installed addons to re-download.
+    bool forceRedownload = false;
+    std::wstring addonResetMarker = g_configDir + L"\\addon_reset_pending";
+    if (GetFileAttributesW(addonResetMarker.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        DeleteFileW(addonResetMarker.c_str());
+        forceRedownload = true;
+        AppendLog(L"RunThirdPartyAddonUpdates: reset pending, forcing re-download of all addons");
+    }
 
     std::string statsJson = GetCachedStatsJson();
     if (statsJson.empty()) statsJson = FetchAndCacheStatsJson();
@@ -2738,7 +2769,7 @@ static void RunThirdPartyAddonUpdates()
         if (addonMissing && !a.required) continue;
 
         std::wstring localVer;
-        if (!addonMissing) {
+        if (!addonMissing && !forceRedownload) {
             localVer = ReadTocVersion(addonNameW, tocFileW);
             if (localVer.empty())
                 AppendLog(L"RunThirdPartyAddonUpdates: could not read version for '%s' (toc='%s')", addonNameW.c_str(), tocFileW.c_str());
@@ -2805,10 +2836,8 @@ static void RunThirdPartyAddonUpdates()
 
 // Checks for a newer launcher release, prompts, downloads and hot-swaps the EXE.
 // Safe to call from any thread. Skips if a worker operation is in progress.
-// forced=true: server-enforced minimum version — MB_OK only, no way to skip.
-static void RunLauncherUpdateCheck(bool forced = false)
+static void RunLauncherUpdateCheck()
 {
-    if (IsDevBuild()) { PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits."); return; }
     if (g_workerBusy.load()) return;
 
     // Clean up any leftover .old from a previous self-update
@@ -2837,11 +2866,7 @@ static void RunLauncherUpdateCheck(bool forced = false)
     AppendLog(L"RunLauncherUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
-    if (forced) {
-        std::wstring text = L"Your launcher (v" + localVer + L") is too old to connect.\n\n"
-            L"Version " + remoteVer + L" is required. Click OK to download and install it now.";
-        MessageBoxW(g_hwnd, text.c_str(), L"Launcher Update Required", MB_OK | MB_ICONWARNING);
-    } else {
+    {
         std::wstring payload = remoteVer + L"\n" + localVer;
         LRESULT r = SendMessageW(g_hwnd, WM_ASK_UPDATE, UC_LAUNCHER,
             (LPARAM)(new std::wstring(payload)));
@@ -2966,17 +2991,21 @@ static void CheckAndBootstrapFFmpegDlls()
 
     RB_SetDllDir(dllDir); // set dir early so future LoadFFmpegDynamic() calls look in the right place
 
-    if (FFmpegDllsPresent(dllDir)) {
+    bool forceRedownload = false;
+    {
+        std::wstring ffmpegMarker = g_configDir + L"\\ffmpeg_reset_pending";
+        if (GetFileAttributesW(ffmpegMarker.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            DeleteFileW(ffmpegMarker.c_str());
+            forceRedownload = true;
+            AppendLog(L"FFmpeg bootstrap: reset pending, forcing re-download");
+        }
+    }
+
+    if (!forceRedownload && FFmpegDllsPresent(dllDir)) {
         AppendLog(L"FFmpeg bootstrap: DLLs already present in '%s'", dllDir.c_str());
         return;
     }
     AppendLog(L"FFmpeg bootstrap: DLLs not present in '%s'", dllDir.c_str());
-
-    if (IsDevBuild()) {
-        AppendLog(L"FFmpeg bootstrap: dev build, skipping download");
-        PostText(L"Fetching from GitHub is disabled in dev mode to prevent reaching rate limits.");
-        return;
-    }
 
     g_ffmpegBusy = true;
     PostText(L"Downloading FFmpeg libraries (first-time setup)...");
@@ -5224,7 +5253,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_GEN_SETTINGS_RESET_CONFIRM:
     {
         int res = MessageBoxW(hwnd,
-            L"Reset all settings to their defaults and re-download the launcher UI?\r\n\r\n"
+            L"Reset everything to default (except the downloaded client)?\r\n\r\n"
             L"The launcher will restart.",
             L"Reset Settings",
             MB_YESNO | MB_ICONQUESTION);
@@ -5256,6 +5285,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hM != INVALID_HANDLE_VALUE) CloseHandle(hM);
 
+        // Force re-download of all third-party addons, HermesProxy, and FFmpeg on next startup.
+        for (const wchar_t* name : { L"addon_reset_pending", L"hermes_reset_pending", L"ffmpeg_reset_pending" }) {
+            std::wstring m = g_configDir + L"\\" + name;
+            HANDLE h = CreateFileW(m.c_str(), GENERIC_WRITE, 0, nullptr,
+                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        }
+
         wchar_t exePath[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, exePath, MAX_PATH);
         ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL);
@@ -5272,10 +5309,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         int s = (int)wp;
         if (s >= 0 && s <= WS_NO_PATH) {
-            if (s == WS_ERROR && IsDevBuild())
-                g_currentStatus = L"(Dev build - Github Downloads are skipped)";
-            else
-                g_currentStatus = STATUS_TEXT[s];
+            g_currentStatus = STATUS_TEXT[s];
             PostStateToWebView();
         }
         break;
@@ -5473,20 +5507,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     {
         auto* msg = reinterpret_cast<std::wstring*>(lp);
         if (msg) {
-            // Check server-enforced minimum launcher version (serverStats only, once per session)
-            static bool s_minVerChecked = false;
-            if (!s_minVerChecked && !IsDevBuild() && msg->find(L"\"serverStats\"") != std::wstring::npos) {
-                s_minVerChecked = true;
-                int nlen = WideCharToMultiByte(CP_UTF8, 0, msg->c_str(), (int)msg->size(), nullptr, 0, nullptr, nullptr);
-                std::string narrow(nlen, '\0');
-                WideCharToMultiByte(CP_UTF8, 0, msg->c_str(), (int)msg->size(), narrow.data(), nlen, nullptr, nullptr);
-                std::string minVer = JsonString(narrow, "launcher_min_version");
-                if (!minVer.empty()) {
-                    std::wstring minVerW(minVer.begin(), minVer.end());
-                    if (IsNewer(GetLauncherVersion(), minVerW))
-                        std::thread([]() { RunLauncherUpdateCheck(true); }).detach();
-                }
-            }
             if (g_webview && g_wvReady) g_webview->PostWebMessageAsJson(msg->c_str());
             delete msg;
         }
@@ -5779,23 +5799,26 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
 {
     std::wstring appDataUi = g_configDir + L"\\ui";
 
-    // Dev: ../ui (source tree) takes priority — no AppData copy needed.
+    // User requested UI reset (Reset to Default). Delete ui/ so we re-download below.
+    // Must run before the ../ui early-return so source-tree builds don't swallow the marker.
     {
+        std::wstring marker = g_configDir + L"\\ui_reset_pending";
+        if (GetFileAttributesW(marker.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            g_uiResetThisStart = true;
+            DeleteDirRecursive(appDataUi);
+            DeleteDirRecursive(g_configDir + L"\\ui_pending");
+            DeleteFileW(marker.c_str());
+        }
+    }
+
+    // Dev: ../ui (source tree) takes priority — no AppData copy needed.
+    // Skip during a UI reset so we force a fresh download into AppData instead.
+    if (!g_uiResetThisStart) {
         std::wstring exeDir = GetExeDir();
         wchar_t full[MAX_PATH] = {};
         if (GetFullPathNameW((exeDir + L"\\..\\ui").c_str(), MAX_PATH, full, nullptr) &&
                 GetFileAttributesW(full) != INVALID_FILE_ATTRIBUTES)
             return true;
-    }
-
-    // User requested UI reset (Reset to Default). Delete ui/ so we re-download below.
-    {
-        std::wstring marker = g_configDir + L"\\ui_reset_pending";
-        if (GetFileAttributesW(marker.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            DeleteDirRecursive(appDataUi);
-            DeleteDirRecursive(g_configDir + L"\\ui_pending");
-            DeleteFileW(marker.c_str());
-        }
     }
 
     // Already in AppData? Check for index.html, not just the directory —
@@ -5804,13 +5827,13 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         return true;
 
     // Copy from EXE dir (user extracted the Full ZIP alongside the EXE).
+    // Skip during a UI reset so we force a fresh download instead of a stale local copy.
     std::wstring exeUi = GetExeDir() + L"\\ui";
-    if (GetFileAttributesW(exeUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    if (!g_uiResetThisStart && GetFileAttributesW(exeUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
         CopyUiFolder(exeUi, appDataUi);
         return GetFileAttributesW(appDataUi.c_str()) != INVALID_FILE_ATTRIBUTES;
     }
 
-    if (IsDevBuild()) return false;
 
     // Nothing found: download the Full ZIP and extract ui/ into AppData.
     static const wchar_t kCls[] = L"WOWHCUiBoot";
