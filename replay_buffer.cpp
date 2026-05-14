@@ -467,14 +467,21 @@ static void DoSave(std::deque<StoredPacket> pkts, AVRational timeBase,
     double newestMs = pkts.back().wall_ms;
     double cutoffMs = newestMs - windowMs;
 
-    size_t startIdx = 0;
+    // Prefer: first keyframe at or after the time-window cutoff
+    size_t startIdx = pkts.size();
     for (size_t i = 0; i < pkts.size(); i++) {
         if (pkts[i].wall_ms >= cutoffMs && pkts[i].is_keyframe) {
             startIdx = i; break;
         }
     }
-    while (startIdx < pkts.size() && !pkts[startIdx].is_keyframe) startIdx++;
-    if (startIdx >= pkts.size()) { RB_ShowOsd(L"No keyframe found to save.", OSD_RED); return; }
+    // Fallback: any keyframe anywhere in the buffer (encoder may have skipped IDR intervals)
+    if (startIdx == pkts.size()) {
+        for (size_t i = 0; i < pkts.size(); i++) {
+            if (pkts[i].is_keyframe) { startIdx = i; break; }
+        }
+    }
+    // Last resort: start from oldest packet regardless (avoids empty save on broken encoders)
+    if (startIdx == pkts.size()) startIdx = 0;
 
     std::wstring saveDir = folder.empty() ? DefaultVideosFolder() : folder;
     CreateDirectoryRecursive(saveDir);
@@ -576,8 +583,9 @@ static AVCodecContext* OpenBestEncoder(int width, int height, int fps)
             av_opt_set(ctx->priv_data, "tune",    "ll",  0);
             av_opt_set(ctx->priv_data, "rc",      "cbr", 0);
         } else if (i == 1) { // amf
-            av_opt_set(ctx->priv_data, "usage", "lowlatency", 0);
-            av_opt_set(ctx->priv_data, "rc",    "cbr",        0);
+            av_opt_set(ctx->priv_data, "usage",      "lowlatency", 0);
+            av_opt_set(ctx->priv_data, "rc",         "cbr",        0);
+            av_opt_set(ctx->priv_data, "forced_idr", "1",          0);
         } else if (i == 2) { // qsv
             av_opt_set(ctx->priv_data, "preset", "faster", 0);
         } else { // libx264
