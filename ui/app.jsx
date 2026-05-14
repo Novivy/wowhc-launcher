@@ -724,7 +724,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
       <div style={sep} />
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <ModalBtn label="Reset Launcher Data" danger onClick={() => onAction('generalSettingsResetConfirm')} />
+        <ModalBtn label="Reset Launcher" danger onClick={() => onAction('generalSettingsResetConfirm')} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <a
             onClick={() => { onAction('generalSettingsClose', payload()); onAction('openRecordSettings'); }}
@@ -763,8 +763,8 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
     if (conflict === 'startStop') setSsHk({ vk: 0, mods: 0 });
     if (conflict === 'save')      setSvHk({ vk: 0, mods: 0 });
     setHkError(conflict === 'startStop'
-      ? 'Start/Stop hotkey is already in use by another app — it has been cleared.'
-      : 'Save Replay hotkey is already in use by another app — it has been cleared.');
+      ? 'Start/Stop hotkey is already in use by another app, it has been cleared.'
+      : 'Save Replay hotkey is already in use by another app, it has been cleared.');
     onClearConflict();
   }, [conflict]);
 
@@ -858,14 +858,14 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
             <HotkeyField hk={ssHk}
               onChange={hk => { setSsHk(hk); setHkError(null); }}
               otherHk={svHk}
-              onDuplicate={() => setHkError('Both hotkeys cannot be the same — the duplicate has been cleared.')} />
+              onDuplicate={() => setHkError('Both hotkeys cannot be the same, the duplicate has been cleared.')} />
           </div>
           <div>
             <div style={lbl}>Save replay hotkey</div>
             <HotkeyField hk={svHk}
               onChange={hk => { setSvHk(hk); setHkError(null); }}
               otherHk={ssHk}
-              onDuplicate={() => setHkError('Both hotkeys cannot be the same — the duplicate has been cleared.')} />
+              onDuplicate={() => setHkError('Both hotkeys cannot be the same, the duplicate has been cleared.')} />
           </div>
         </div>
         <div style={{ fontSize: 10, color: T.textFaint, marginTop: 5, letterSpacing: '0.04em' }}>

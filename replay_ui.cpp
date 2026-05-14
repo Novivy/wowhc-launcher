@@ -160,7 +160,7 @@ static LRESULT CALLBACK HkEditSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             UpdateHotkeyEdit(hwnd, *hk);
             SetFocus(GetParent(hwnd));
             MessageBoxW(GetParent(hwnd),
-                L"Both hotkeys cannot be the same.\nThis hotkey has been cleared — please choose a different key.",
+                L"Both hotkeys cannot be the same.\nThis hotkey has been cleared, please choose a different key.",
                 L"Duplicate Hotkey", MB_OK | MB_ICONWARNING);
             return 0;
         }
