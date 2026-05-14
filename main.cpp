@@ -2765,6 +2765,15 @@ static void RunThirdPartyAddonUpdates()
         std::wstring requiredVer(a.version.begin(), a.version.end());
 
         std::wstring addonPath = addonsDir + L"\\" + addonNameW;
+
+        // Developer checkout: skip auto-update to avoid clobbering local work.
+        std::wstring gitDir = addonPath + L"\\.git";
+        if (GetFileAttributesW(gitDir.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            AppendLog(L"RunThirdPartyAddonUpdates: skipping '%s' — .git folder detected", addonNameW.c_str());
+            PostText(L"Addon update skipped for '" + addonNameW + L"': the folder is a git repository. Remove the .git folder to re-enable auto-updates.");
+            continue;
+        }
+
         bool addonMissing = GetFileAttributesW(addonPath.c_str()) == INVALID_FILE_ATTRIBUTES;
         if (addonMissing && !a.required) continue;
 
@@ -5198,6 +5207,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_GEN_SETTINGS_EXE_BROWSE:
     {
+        if (g_clientType == CT_114 && g_use41ydNameplates) {
+            MessageBoxW(hwnd,
+                L"The \"41-yard Nameplates\" option is currently enabled.\n\n"
+                L"This option forces a specific executable and overrides the custom exe setting.\n\n"
+                L"Disable it first if you want to choose a custom executable.",
+                L"Cannot Change Executable", MB_OK | MB_ICONERROR);
+            return 0;
+        }
+
         int warn = MessageBoxW(hwnd,
             L"Changing the launch executable is an advanced option.\n\n"
             L"Do not modify this unless you know what you are doing.\n\n"

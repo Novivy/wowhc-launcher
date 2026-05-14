@@ -342,8 +342,16 @@ const ModalTitle = ({ text }) => (
     React.createElement('span', { style: { fontFamily: '"Cinzel", Georgia, serif', fontSize: 13, fontWeight: 600, color: T.text, letterSpacing: '0.06em', textTransform: 'uppercase' } }, text))
 );
 
-const ModalBtn = ({ label, onClick, secondary, disabled, style: styleOverride }) => {
+const ModalBtn = ({ label, onClick, secondary, danger, disabled, style: styleOverride }) => {
   var [hov, setHov] = React.useState(false);
+  var bg     = danger ? (hov ? 'rgba(154,52,34,0.18)' : 'rgba(154,52,34,0.08)')
+             : secondary ? (hov ? T.bg2 : T.bg1)
+             : (hov ? T.plate : T.bg2);
+  var border = danger ? (hov ? T.ember : T.blood)
+             : secondary ? (hov ? T.line : 'rgba(180,130,60,0.12)')
+             : (hov ? 'rgba(180,130,60,0.45)' : T.line);
+  var color  = danger ? (hov ? T.ember : T.blood)
+             : secondary ? T.textDim : T.text;
   return React.createElement('button', {
     onClick: onClick,
     disabled: !!disabled,
@@ -351,11 +359,9 @@ const ModalBtn = ({ label, onClick, secondary, disabled, style: styleOverride })
     onMouseLeave: function() { setHov(false); },
     style: Object.assign({
       height: 32, padding: '0 16px', fontFamily: 'inherit', cursor: disabled ? 'not-allowed' : 'pointer',
-      background: secondary ? (hov ? T.bg2 : T.bg1) : (hov ? T.plate : T.bg2),
-      border: '1px solid ' + (secondary
-        ? (hov ? T.line : 'rgba(180,130,60,0.12)')
-        : (hov ? 'rgba(180,130,60,0.45)' : T.line)),
-      color: secondary ? T.textDim : T.text,
+      background: bg,
+      border: '1px solid ' + border,
+      color: color,
       fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', fontWeight: 600,
       transition: 'background 120ms, border-color 120ms, color 120ms',
       opacity: disabled ? 0.4 : 1,
@@ -572,7 +578,6 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
   const [use41ydNameplates, setUse41ydNameplates] = React.useState(
     ini.use41ydNameplates !== undefined ? ini.use41ydNameplates : true
   );
-
   React.useEffect(() => {
     if (pendingExe) { setExePath(pendingExe); onClearPendingExe && onClearPendingExe(); }
   }, [pendingExe]);
@@ -709,7 +714,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
             readOnly
             style={{ ...inp, flex: 1, cursor: 'default', fontSize: 11 }}
           />
-          <ModalBtn label="Browse" onClick={() => onAction('generalSettingsExeBrowse')} style={{ height: 28 }} disabled={isHermes && use41ydNameplates} />
+          <ModalBtn label="Browse" onClick={() => onAction('generalSettingsExeBrowse')} style={{ height: 28 }} />
         </div>
         <div style={{ fontSize: 10, color: T.textFaint, marginTop: 4, lineHeight: 1.5 }}>
           Executable launched when clicking Start Game
@@ -719,7 +724,7 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
       <div style={sep} />
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <ModalBtn label="Reset Launcher Data" secondary onClick={() => onAction('generalSettingsResetConfirm')} />
+        <ModalBtn label="Reset Launcher Data" danger onClick={() => onAction('generalSettingsResetConfirm')} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <a
             onClick={() => { onAction('generalSettingsClose', payload()); onAction('openRecordSettings'); }}
