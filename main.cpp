@@ -2566,7 +2566,7 @@ static bool PromptAndCloseGameForUpdate()
         HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, wowPid);
         if (h) { TerminateProcess(h, 0); CloseHandle(h); }
     }
-    if (hHermes) TerminateProcess(hHermes, 0);
+    if (hHermes) { TerminateProcess(hHermes, 0); CloseHandle(hHermes); g_hermesProcess = nullptr; }
     Sleep(1000);
     return true;
 }
@@ -2665,7 +2665,7 @@ static void RunHermesUpdateCheck()
         CreateDirectoryW(hermesDir.c_str(), nullptr);
 
         // Kill HermesProxy if we own it — file lock would silently corrupt the update
-        if (g_hermesProcess) { TerminateProcess(g_hermesProcess, 0); Sleep(500); }
+        if (g_hermesProcess) { TerminateProcess(g_hermesProcess, 0); CloseHandle(g_hermesProcess); g_hermesProcess = nullptr; Sleep(500); }
 
         ok = ExtractZipCom(tmpZip, hermesDir, true);
         DeleteFileW(tmpZip.c_str());
@@ -4785,7 +4785,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, wowPid);
                             if (h) { TerminateProcess(h, 0); CloseHandle(h); Sleep(500); }
                         }
-                        if (hHermes) { TerminateProcess(hHermes, 0); Sleep(500); }
+                        if (hHermes) { TerminateProcess(hHermes, 0); CloseHandle(hHermes); g_hermesProcess = nullptr; Sleep(500); }
                         {
                             auto blocking = FindListeningPorts(GetHermesPorts(hermesExe));
                             if (!blocking.empty()) {
@@ -4798,7 +4798,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 std::wstring msg =
                                     L"The following port(s) needed by HermesProxy are already in use:\r\n\r\n" +
                                     lines +
-                                    L"\r\n\r\nPlease close the application(s) using these ports and try again.";
+                                    L"\r\n\r\nOpen Task Manager (Ctrl+Shift+Esc), find the process listed above,"
+                                    L" right-click it and choose \"End task\", then try again.";
                                 MessageBoxW(g_hwnd, msg.c_str(), L"Ports Unavailable", MB_OK | MB_ICONWARNING);
                                 PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                                 return;
@@ -4834,7 +4835,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             CloseHandle(hWow);
                             PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
                             HANDLE hH = g_hermesProcess;
-                            if (hH) TerminateProcess(hH, 0);
+                            if (hH) { TerminateProcess(hH, 0); CloseHandle(hH); g_hermesProcess = nullptr; }
                             PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
                             PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                         } else {
@@ -4873,7 +4874,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                     PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
                                     // The specific WowClassic.exe we tracked has closed — stop HermesProxy.
                                     HANDLE hH = g_hermesProcess;
-                                    if (hH) TerminateProcess(hH, 0);
+                                    if (hH) { TerminateProcess(hH, 0); CloseHandle(hH); g_hermesProcess = nullptr; }
                                     PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
                                     PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                                 }).detach();
@@ -5550,7 +5551,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     CloseHandle(hCheck);
                 }
             }
-            if (wowRunning) {
+            bool hermesRunning = g_hermesProcess &&
+                WaitForSingleObject(g_hermesProcess, 0) == WAIT_TIMEOUT;
+            if (wowRunning || hermesRunning) {
                 int r = MessageBoxW(hwnd,
                     L"The game is still running.\n\nQuit the launcher anyway?",
                     L"Game Running", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
