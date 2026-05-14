@@ -48,6 +48,7 @@ void                     RB_ShowOsd(const std::wstring& text, OsdAccent accent =
 int                      RB_RegisterHotkeys();  // returns 0 on success, bitmask of failures
 void                     RB_UnregisterHotkeys();
 void                     RB_SetShowNotifications(bool show); // controls whether informational OSD toasts appear
+void                     RB_SuppressNextStopOsd();           // call before RB_Stop() to skip the "Recording Stopped" OSD
 void                     RB_SetDllDir(const std::wstring& dir); // set directory to load FFmpeg DLLs from
 void                     RB_SetLogPath(const std::wstring& path); // set log file path (same as main launcher.log)
 void                     SaveReplaySettings(const ReplaySettings& s, const std::wstring& iniPath);

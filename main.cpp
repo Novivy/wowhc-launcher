@@ -4899,7 +4899,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recorder Settings)",
                         L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                     if (r == IDCANCEL) break;
-                    if (r == IDYES) { RB_SaveNow(); Sleep(100); }
+                    if (r == IDYES) {
+                        RbSaveResult sr = RB_SaveNow();
+                        if (sr == RB_SAVE_TOO_EARLY) {
+                            MessageBoxW(hwnd, L"Recording just started — wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
+                            break;
+                        }
+                        if (sr == RB_SAVE_OK) RB_SuppressNextStopOsd();
+                        if (g_showRecordingNotifications && g_webview && g_wvReady)
+                            g_webview->PostWebMessageAsJson(L"{\"type\":\"notification\",\"text\":\"Replay saved\"}");
+                        Sleep(100);
+                    }
                 }
                 RB_Stop();
             } else {
@@ -5012,7 +5022,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recorder Settings)",
                         L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                     if (r == IDCANCEL) return 0;
-                    if (r == IDYES) { RB_SaveNow(); Sleep(100); }
+                    if (r == IDYES) {
+                        RbSaveResult sr = RB_SaveNow();
+                        if (sr == RB_SAVE_TOO_EARLY) {
+                            MessageBoxW(hwnd, L"Recording just started — wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
+                            return 0;
+                        }
+                        if (sr == RB_SAVE_OK) RB_SuppressNextStopOsd();
+                        if (g_showRecordingNotifications && g_webview && g_wvReady)
+                            g_webview->PostWebMessageAsJson(L"{\"type\":\"notification\",\"text\":\"Replay saved\"}");
+                        Sleep(100);
+                    }
                 }
                 RB_Stop();
             } else {
@@ -5123,7 +5143,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recorder Settings)",
                     L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                 if (r == IDCANCEL) { PostStateToWebView(); return 0; }
-                if (r == IDYES) { RB_SaveNow(); Sleep(100); }
+                if (r == IDYES) {
+                    RbSaveResult sr = RB_SaveNow();
+                    if (sr == RB_SAVE_TOO_EARLY) {
+                        MessageBoxW(hwnd, L"Recording just started — wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
+                        PostStateToWebView();
+                        return 0;
+                    }
+                    if (sr == RB_SAVE_OK) RB_SuppressNextStopOsd();
+                    if (g_showRecordingNotifications && g_webview && g_wvReady)
+                        g_webview->PostWebMessageAsJson(L"{\"type\":\"notification\",\"text\":\"Replay saved\"}");
+                    Sleep(100);
+                }
             }
             RB_Stop();
         } else {
@@ -5515,7 +5546,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 int r = MessageBoxW(hwnd, L"Save the replay before stopping?\n\n(You can disable this prompt in the Video Recorder Settings)",
                     L"Save Replay", MB_YESNOCANCEL | MB_ICONQUESTION);
                 if (r == IDCANCEL) break;
-                if (r == IDYES) { RB_SaveNow(); Sleep(100); }
+                if (r == IDYES) {
+                    RbSaveResult sr = RB_SaveNow();
+                    if (sr == RB_SAVE_TOO_EARLY) {
+                        MessageBoxW(hwnd, L"Recording just started — wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
+                        break;
+                    }
+                    if (sr == RB_SAVE_OK) RB_SuppressNextStopOsd();
+                    if (g_showRecordingNotifications && g_webview && g_wvReady)
+                        g_webview->PostWebMessageAsJson(L"{\"type\":\"notification\",\"text\":\"Replay saved\"}");
+                    Sleep(100);
+                }
             }
             RB_Stop();
             PostStateToWebView();

@@ -216,8 +216,10 @@ static bool LoadFFmpegDynamic()
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 
-static bool   g_showNotifications = false;
+static bool              g_showNotifications  = false;
+static std::atomic<bool> g_suppressStopOsd   {false};
 void RB_SetShowNotifications(bool show) { g_showNotifications = show; }
+void RB_SuppressNextStopOsd() { g_suppressStopOsd = true; }
 
 // ── OSD window ────────────────────────────────────────────────────────────────
 static HWND   g_osdHwnd      = nullptr;
@@ -1015,7 +1017,8 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     if (gdiBmp) { SelectObject(gdiMemDC, gdiOldBmp); DeleteObject(gdiBmp); DeleteDC(gdiMemDC); ReleaseDC(nullptr, gdiScrDC); }
 
     PostMessageW(g_rbHwnd, WM_RB_STATUS, 0, 0);
-    if (g_showNotifications) RB_ShowOsd(L"Recording Stopped", OSD_ORANGE);
+    if (g_showNotifications && !g_suppressStopOsd.exchange(false))
+        RB_ShowOsd(L"Recording Stopped", OSD_ORANGE);
     g_rbRunning = false;
 }
 

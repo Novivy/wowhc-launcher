@@ -930,10 +930,11 @@ const App = ({ isNative }) => {
   const [gsPendingExe,    setGsPendingExe]     = React.useState(null);
   const [gsResetConfirmed, setGsResetConfirmed] = React.useState(false);
   const [toasts,          setToasts]           = React.useState([]);
-  const toastIdRef       = React.useRef(0);
-  const prevRecordRef    = React.useRef(null); // null = not yet initialised
-  const showNotifRef     = React.useRef(false); // mirrors appState.showRecordingNotifications for bridge closure
-  const consoleScrollRef = React.useRef(null);
+  const toastIdRef          = React.useRef(0);
+  const prevRecordRef       = React.useRef(null); // null = not yet initialised
+  const showNotifRef        = React.useRef(false); // mirrors appState.showRecordingNotifications for bridge closure
+  const suppressNextStopRef = React.useRef(false); // set when a save-before-stop fires, to skip "Recording stopped" toast
+  const consoleScrollRef    = React.useRef(null);
 
   // Bridge: receive messages from C++ host
   React.useEffect(function() {
@@ -951,9 +952,12 @@ const App = ({ isNative }) => {
         if (msg.type === 'generalSettingsState')     { setGsSettings(msg); setGsOpenCount(function(c) { return c + 1; }); setGsPendingExe(null); }
         if (msg.type === 'generalSettingsExeChosen')    setGsPendingExe(msg.path);
         if (msg.type === 'generalSettingsResetConfirmed') setGsResetConfirmed(true);
-        if (msg.type === 'notification' && msg.text && showNotifRef.current) {
-          var nid = ++toastIdRef.current;
-          setToasts(function(prev) { return prev.concat([{ id: nid, text: msg.text }]); });
+        if (msg.type === 'notification' && msg.text) {
+          if (msg.text === 'Replay saved') suppressNextStopRef.current = true;
+          if (showNotifRef.current) {
+            var nid = ++toastIdRef.current;
+            setToasts(function(prev) { return prev.concat([{ id: nid, text: msg.text }]); });
+          }
         }
         if (msg.type === 'recordSettingsFolderChosen') setRsPendingFolder(msg.folder);
         if (msg.type === 'recordSettingsConflict')   setRsConflict(msg.field);
@@ -989,7 +993,10 @@ const App = ({ isNative }) => {
       return;
     }
     if (appState.isRecording && !prevRecordRef.current)  addToast('Recording started');
-    if (!appState.isRecording && prevRecordRef.current)  addToast('Recording stopped');
+    if (!appState.isRecording && prevRecordRef.current) {
+      if (!suppressNextStopRef.current) addToast('Recording stopped');
+      suppressNextStopRef.current = false;
+    }
     prevRecordRef.current = appState.isRecording;
   }, [appState.isRecording]);
 
