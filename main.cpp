@@ -359,6 +359,8 @@ static void SaveConfig()
     WritePrivateProfileStringW(L"Launcher", L"CustomLaunchExe", g_customLaunchExe.c_str(), ini);
 }
 
+static bool IsDevBuild(); // forward declaration (defined below; needed by LoadConfig realm clamp)
+
 static void LoadConfig()
 {
     wchar_t buf[MAX_PATH] = {};
@@ -395,6 +397,10 @@ static void LoadConfig()
         GetPrivateProfileStringW(L"Launcher", L"RealmIndex", L"0", ri, 8, ini);
         int idx = _wtoi(ri);
         g_realmIndex = (idx >= 0 && idx <= 2) ? idx : 0;
+        // Realm 2 ("Local Dev") is only selectable in dev builds; a leftover
+        // RealmIndex=2 on a release build is invisible/un-correctable in the UI
+        // and silently disables auto-start recording. Clamp it back to 0.
+        if (g_realmIndex == 2 && !IsDevBuild()) g_realmIndex = 0;
     }
     {
         wchar_t rn[8] = {};
