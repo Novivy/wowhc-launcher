@@ -254,6 +254,7 @@ static std::mutex             g_statsJsonMtx;
 static HANDLE  g_hermesProcess    = nullptr;
 static HANDLE  g_hermesPipeRead   = nullptr;
 static DWORD64 g_hermesLaunchTick = 0; // GetTickCount64() at launch; 0 = not tracked
+static std::atomic<bool> g_hermesStarted{false}; // true once HermesProxy emitted output (confirmed it actually launched)
 // PID of the specific WoW process we launched (0 if not running)
 static std::atomic<DWORD> g_wowPid{0};
 static HMODULE g_hRichEdit     = nullptr; // still loaded for existing RichEdit code paths
@@ -1765,6 +1766,7 @@ static void LaunchHermesWithPipe(const std::wstring& exe)
                 std::string line = partial.substr(0, pos);
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 if (!line.empty()) {
+                    g_hermesStarted = true; // Hermes is alive and producing output
                     int wlen = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, nullptr, 0);
                     if (wlen > 1) {
                         auto* ws = new std::wstring(wlen - 1, L'\0');
@@ -4827,6 +4829,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         }
                         PatchConfigWtf(clientPath, use41yd);
                         SetClientFilesReadOnly(clientPath, true);
+                        g_hermesStarted = false;
                         g_hermesLaunchTick = GetTickCount64();
                         LaunchHermesWithPipe(hermesExe);
                         Sleep(2000);
@@ -5541,7 +5544,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (g_hermesLaunchTick > 0) {
             DWORD64 elapsed = GetTickCount64() - g_hermesLaunchTick;
             g_hermesLaunchTick = 0;
-            if (elapsed < 15000)
+            // Only a genuine failure-to-start if Hermes never produced any output.
+            // If it emitted lines it did launch — a quick close just means the
+            // player exited the game early, which is not a Hermes failure.
+            if (elapsed < 15000 && !g_hermesStarted.load())
                 MessageBoxW(hwnd, L"HermesProxy failed to start.",
                     L"HermesProxy Error", MB_OK | MB_ICONERROR);
         }
