@@ -2444,11 +2444,12 @@ struct DlProgress {
     DWORD64 lastTick  = 0;
     DWORD64 lastBytes = 0;
     DWORD64 speed     = 0;
+    int     lastPct   = -1;
 
     void operator()(DWORD64 dl, DWORD64 tot)
     {
         DWORD64 now = GetTickCount64();
-        if (lastTick == 0) lastTick = now;
+        if (lastTick == 0) { lastTick = now; lastBytes = dl; }
         DWORD64 elapsed = now - lastTick;
         if (elapsed >= 1000) {
             DWORD64 delta = (dl > lastBytes) ? dl - lastBytes : 0;
@@ -2456,7 +2457,17 @@ struct DlProgress {
             lastBytes = dl; lastTick = now;
         }
         if (tot > 0) PostPct((int)(dl * pctMax / tot));
-        if (elapsed < 1000 && lastTick != 0 && speed != 0) return;
+        // Only refresh the status text when the displayed percent advances
+        // (avoids flooding the UI with one update per network chunk). For
+        // unknown-size downloads (tot==0) fall back to a once-per-second tick.
+        if (tot > 0) {
+            int pct = (int)(dl * 100 / tot);
+            if (pct == lastPct && dl != tot) return;
+            lastPct = pct;
+        } else {
+            if (elapsed < 1000 && lastPct != -1) return;
+            lastPct = 0;
+        }
         std::wstring text = label + L"   ";
         if (tot > 0) {
             wchar_t pctBuf[8];
