@@ -6,10 +6,12 @@ set CL=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.
 set RC=C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\rc.exe
 set MT=C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\mt.exe
 set ROOT=%~dp0
+set BUILD=%ROOT%cmake-build-release
 
 if exist "%ROOT%credentials.local.bat" call "%ROOT%credentials.local.bat"
 
-cmake -B cmake-build-debug -G Ninja ^
+cmake -B "%BUILD%" -G Ninja ^
+    -DCMAKE_BUILD_TYPE=Release ^
     -DCMAKE_MAKE_PROGRAM="%NINJA%" ^
     -DCMAKE_C_COMPILER="%CL%" ^
     -DCMAKE_CXX_COMPILER="%CL%" ^
@@ -18,10 +20,11 @@ cmake -B cmake-build-debug -G Ninja ^
     -DGDRIVE_CLIENT_ID="%GDRIVE_CLIENT_ID%" ^
     -DGDRIVE_CLIENT_SECRET="%GDRIVE_CLIENT_SECRET%"
 
-cmake --build cmake-build-debug
+cmake --build "%BUILD%" --config Release
 if %ERRORLEVEL% == 0 (
     echo.
-    echo Build successful: cmake-build-debug\2026_wowhc_launcher.exe
+    echo Release build: cmake-build-release\2026_wowhc_launcher.exe
+    echo This EXE is standalone -- no runtime DLLs needed.
 ) else (
     echo Build FAILED
 )

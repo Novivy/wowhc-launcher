@@ -27,6 +27,8 @@
 #include <cwchar>
 #include <memory>
 #include <ctime>
+#include <cstdio>
+#include <cstring>
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -46,6 +48,7 @@
 
 #include "replay_buffer.h"
 #include "upload_window.h"
+#include "miniz.h"
 
 // ── Build-time config ──────────────────────────────────────────────────────────
 static constexpr wchar_t CLIENT_DOWNLOAD_URL[] =
@@ -1152,6 +1155,154 @@ static void MoveDirContents(const std::wstring& src, const std::wstring& dst)
     FindClose(h);
 }
 
+// Recursively create every component of a directory path (no-op if it exists).
+static void MkDirsW(const std::wstring& dir)
+{
+    if (dir.empty()) return;
+    if (GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES) return;
+    size_t sep = dir.find_last_of(L"\\/");
+    if (sep != std::wstring::npos && sep > 0)
+        MkDirsW(dir.substr(0, sep));
+    CreateDirectoryW(dir.c_str(), nullptr);
+}
+
+// In-process ZIP extraction via miniz — no subprocess, no COM, no scripts.
+// Works identically on every Windows version and on Wine/Proton (where the
+// Shell.Application COM path below fails). This is the primary extractor.
+//   stripTopLevel : strip a single common top-level folder (tar --strip-components=1),
+//                   but only when EVERY entry lives under that one folder (else nothing
+//                   is stripped, so no files are ever lost).
+//   filterPrefix  : if non-null, extract ONLY entries whose path begins with it
+//                   (case-insensitive), preserving that prefix in the output. Used to
+//                   pull just "ui/" out of the Full ZIP. Mutually exclusive with strip.
+// Returns true only if the archive opened and every selected entry extracted OK
+// (and at least one entry was selected).
+static bool ExtractZipMiniz(const std::wstring& zipPath, const std::wstring& destDir,
+    bool stripTopLevel, const std::function<void()>& pump = nullptr,
+    const wchar_t* filterPrefix = nullptr)
+{
+    wchar_t absZip[MAX_PATH] = {}, absDst[MAX_PATH] = {};
+    if (!GetFullPathNameW(zipPath.c_str(), MAX_PATH, absZip, nullptr)) return false;
+    if (!GetFullPathNameW(destDir.c_str(), MAX_PATH, absDst, nullptr)) return false;
+    CreateDirectoryW(absDst, nullptr);
+
+    auto Utf8ToWide = [](const char* s) -> std::wstring {
+        if (!s || !*s) return std::wstring();
+        int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
+        if (n <= 1) return std::wstring();
+        std::wstring w(n - 1, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s, -1, w.data(), n);
+        return w;
+    };
+
+    // Open with a wide path — miniz's *_init_file uses narrow fopen which mangles
+    // non-ASCII paths. _wfopen + init_cfile preserves full Unicode and streams
+    // (never loads the whole archive into RAM — the client ZIP is multi-GB).
+    FILE* fp = _wfopen(absZip, L"rb");
+    if (!fp) return false;
+    if (_fseeki64(fp, 0, SEEK_END) != 0) { fclose(fp); return false; }
+    long long zipSize = _ftelli64(fp);
+    if (zipSize <= 0) { fclose(fp); return false; }
+    _fseeki64(fp, 0, SEEK_SET);
+
+    mz_zip_archive zip = {};
+    if (!mz_zip_reader_init_cfile(&zip, fp, (mz_uint64)zipSize, 0)) {
+        fclose(fp);
+        return false;
+    }
+
+    mz_uint numFiles = mz_zip_reader_get_num_files(&zip);
+
+    // Resolve the common top-level folder to strip (only if every entry shares it).
+    std::wstring stripSeg;
+    if (stripTopLevel && numFiles > 0) {
+        bool uniform = true;
+        std::wstring common;
+        for (mz_uint i = 0; i < numFiles && uniform; i++) {
+            mz_zip_archive_file_stat st;
+            if (!mz_zip_reader_file_stat(&zip, i, &st)) { uniform = false; break; }
+            std::wstring name = Utf8ToWide(st.m_filename);
+            if (name.empty()) continue;
+            size_t slash = name.find(L'/');
+            if (slash == std::wstring::npos) {
+                // A top-level file with no folder — can't strip a common folder.
+                uniform = false; break;
+            }
+            std::wstring seg = name.substr(0, slash);
+            if (common.empty()) common = seg;
+            else if (_wcsicmp(common.c_str(), seg.c_str()) != 0) { uniform = false; break; }
+        }
+        if (uniform && !common.empty()) stripSeg = common;
+    }
+
+    bool ok = true;
+    int extracted = 0;
+    for (mz_uint i = 0; i < numFiles && ok; i++) {
+        if (pump && (i % 8) == 0) pump();
+
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, i, &st)) { ok = false; break; }
+
+        std::wstring name = Utf8ToWide(st.m_filename);
+        if (name.empty()) continue;
+
+        // Compute the relative output path (still '/'-separated).
+        std::wstring rel;
+        if (filterPrefix && *filterPrefix) {
+            size_t plen = wcslen(filterPrefix);
+            if (_wcsnicmp(name.c_str(), filterPrefix, plen) != 0) continue; // not selected
+            rel = name; // keep the prefix in the output path
+        } else if (!stripSeg.empty()) {
+            std::wstring pfx = stripSeg + L"/";
+            if (_wcsnicmp(name.c_str(), pfx.c_str(), pfx.length()) == 0)
+                rel = name.substr(pfx.length());
+            else
+                rel = name; // shouldn't happen (uniform check), but never drop a file
+        } else {
+            rel = name;
+        }
+        if (rel.empty()) continue; // the stripped folder entry itself
+
+        // Reject zip path traversal: any ".." path *segment* (not substring, so a
+        // legitimate name like "a..b.dll" is still allowed). rel is '/'-separated here.
+        {
+            bool bad = false;
+            for (size_t start = 0; start <= rel.size();) {
+                size_t sl = rel.find(L'/', start);
+                std::wstring seg = rel.substr(start, sl == std::wstring::npos ? std::wstring::npos : sl - start);
+                if (seg == L"..") { bad = true; break; }
+                if (sl == std::wstring::npos) break;
+                start = sl + 1;
+            }
+            if (bad) { ok = false; break; }
+        }
+        // Convert separators to backslash for Win32 file APIs.
+        for (auto& c : rel) if (c == L'/') c = L'\\';
+        std::wstring full = std::wstring(absDst) + L"\\" + rel;
+
+        bool isDir = st.m_is_directory || (!name.empty() && name.back() == L'/');
+        if (isDir) {
+            MkDirsW(full);
+            continue;
+        }
+
+        // Ensure the parent directory exists, then stream-extract to a wide file.
+        size_t sep = full.find_last_of(L'\\');
+        if (sep != std::wstring::npos) MkDirsW(full.substr(0, sep));
+
+        FILE* out = _wfopen(full.c_str(), L"wb");
+        if (!out) { ok = false; break; }
+        mz_bool exOk = mz_zip_reader_extract_to_cfile(&zip, i, out, 0);
+        fclose(out);
+        if (!exOk) { DeleteFileW(full.c_str()); ok = false; break; }
+        ++extracted;
+    }
+
+    mz_zip_reader_end(&zip);
+    fclose(fp);
+    return ok && extracted > 0;
+}
+
 // Extract a ZIP into destDir using Shell.Application COM — no PowerShell.
 // stripTopLevel strips the single common top-level folder (like tar --strip-components=1).
 // pump is optional; pass nullptr from background threads.
@@ -1275,6 +1426,18 @@ static bool ExtractZipCom(const std::wstring& zipPath, const std::wstring& destD
         RemoveDirectoryW(pollDir.c_str());
     }
     return Cleanup(stable >= 2);
+}
+
+// Primary ZIP extractor: in-process miniz (Windows + Wine), with the
+// Shell.Application COM method as a fallback only if miniz fails for some reason.
+// Same signature/semantics as ExtractZipCom so call sites are a drop-in swap.
+static bool ExtractZip(const std::wstring& zipPath, const std::wstring& destDir,
+    bool stripTopLevel, const std::function<void()>& pump = nullptr, int timeoutSec = 120)
+{
+    if (ExtractZipMiniz(zipPath, destDir, stripTopLevel, pump))
+        return true;
+    AppendLog(L"ExtractZip: miniz failed for '%s' -> falling back to Shell.Application COM", zipPath.c_str());
+    return ExtractZipCom(zipPath, destDir, stripTopLevel, pump, timeoutSec);
 }
 
 static bool CopyDirRecursive(const std::wstring& src, const std::wstring& dst,
@@ -1701,7 +1864,7 @@ static std::wstring CheckAndEnsure41ydNameplatesExe(const std::wstring& classicE
         return L"";
     }
     PostText(L"Extracting 41yd nameplate client patch... (this may take a few minutes)"); PostPct(80);
-    bool ok = ExtractZipCom(tmpZip, classicEraDir, false);
+    bool ok = ExtractZip(tmpZip, classicEraDir, false);
     DeleteFileW(tmpZip.c_str());
     if (!ok || GetFileAttributesW(exePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         AppendLog(L"Extraction failed or EXE not found after extracting nameplate zip");
@@ -2680,7 +2843,7 @@ static void RunHermesUpdateCheck()
         // Kill HermesProxy if we own it — file lock would silently corrupt the update
         if (g_hermesProcess) { TerminateProcess(g_hermesProcess, 0); CloseHandle(g_hermesProcess); g_hermesProcess = nullptr; Sleep(500); }
 
-        ok = ExtractZipCom(tmpZip, hermesDir, true);
+        ok = ExtractZip(tmpZip, hermesDir, true);
         DeleteFileW(tmpZip.c_str());
         if (ok) {
             // Update stored path in case this was a first-time install
@@ -2841,7 +3004,7 @@ static void RunThirdPartyAddonUpdates()
                 AppendLog(L"RunThirdPartyAddonUpdates: failed to create destination directory '%s' (err=%lu)", addonPath.c_str(), GetLastError());
                 DeleteFileW(tmpZip.c_str());
             } else {
-                ok = ExtractZipCom(tmpZip, addonPath, true);
+                ok = ExtractZip(tmpZip, addonPath, true);
                 DeleteFileW(tmpZip.c_str());
                 if (ok) {
                     PostPct(100);
@@ -2922,7 +3085,7 @@ static void RunLauncherUpdateCheck()
     std::wstring tmpExtractDir = TempFile(L"wowhc_upd_tmp");
     DeleteDirRecursive(tmpExtractDir);
     bool extractOk = false;
-    if (ExtractZipCom(tmpZip, tmpExtractDir, false)) {
+    if (ExtractZip(tmpZip, tmpExtractDir, false)) {
         std::wstring srcExe = tmpExtractDir + L"\\WOW-HC-Launcher.exe";
         if (GetFileAttributesW(srcExe.c_str()) != INVALID_FILE_ATTRIBUTES)
             extractOk = MoveFileExW(srcExe.c_str(), tmpExe.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
@@ -3083,8 +3246,8 @@ static void CheckAndBootstrapFFmpegDlls()
         std::wstring tmpExtractDir = TempFile(L"wowhc_ffmpeg_tmp");
         AppendLog(L"FFmpeg bootstrap: extract dir='%s'", tmpExtractDir.c_str());
         DeleteDirRecursive(tmpExtractDir);
-        bool extractOk = ExtractZipCom(tmpZip, tmpExtractDir, false);
-        AppendLog(L"FFmpeg bootstrap: ExtractZipCom result=%s", extractOk ? L"ok" : L"FAILED");
+        bool extractOk = ExtractZip(tmpZip, tmpExtractDir, false);
+        AppendLog(L"FFmpeg bootstrap: ExtractZip result=%s", extractOk ? L"ok" : L"FAILED");
         if (extractOk) {
             // Log everything found in the extract dir (not just *.dll) to see the ZIP layout
             WIN32_FIND_DATAW fd2;
@@ -3357,7 +3520,7 @@ static void Worker()
                 zipBytes = ((DWORD64)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
             AppendLog(L"Worker: extracting client zip size=%llu bytes dest='%s'", zipBytes, g_installPath.c_str());
         }
-        ok = ExtractZipCom(tmpZip, g_installPath, true);
+        ok = ExtractZip(tmpZip, g_installPath, true);
         DeleteFileW(tmpZip.c_str());
 
         if (!ok) {
@@ -6029,10 +6192,16 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
     StartMarquee();
     Pump();
 
-    // Extract ui/ using Shell.Application COM — no PowerShell
-    AppendLog(L"UI bootstrap: extracting via Shell.Application COM");
-    bool extractOk = ExtractUiFromZipShellCom(tmpZip, g_configDir, Pump);
-    AppendLog(L"UI bootstrap: Shell.Application COM result: %s", extractOk ? L"ok" : L"failed");
+    // Extract just the ui/ subtree. Primary: in-process miniz (works on Wine too);
+    // fallback: Shell.Application COM. Neither spawns a process or runs a script.
+    AppendLog(L"UI bootstrap: extracting ui/ via miniz");
+    bool extractOk = ExtractZipMiniz(tmpZip, g_configDir, false, Pump, L"ui/");
+    AppendLog(L"UI bootstrap: miniz result: %s", extractOk ? L"ok" : L"failed");
+    if (!extractOk) {
+        AppendLog(L"UI bootstrap: falling back to Shell.Application COM");
+        extractOk = ExtractUiFromZipShellCom(tmpZip, g_configDir, Pump);
+        AppendLog(L"UI bootstrap: Shell.Application COM result: %s", extractOk ? L"ok" : L"failed");
+    }
 
     DeleteFileW(tmpZip.c_str());
 

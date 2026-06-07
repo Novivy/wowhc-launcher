@@ -22,19 +22,21 @@ if(NOT DEFINED ENV{CI})
   set(_HAS_LOCAL_PATHS TRUE)
 endif()
 
-project(2026_wowhc_launcher LANGUAGES CXX)
+project(2026_wowhc_launcher LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(FFMPEG_DIR   "${CMAKE_SOURCE_DIR}/third_party/ffmpeg")
 set(WEBVIEW2_DIR "${CMAKE_SOURCE_DIR}/third_party/webview2")
+set(MINIZ_DIR    "${CMAKE_SOURCE_DIR}/third_party/miniz")
 
 add_executable(${PROJECT_NAME} WIN32
     main.cpp
     replay_buffer.cpp
     google_drive.cpp
     upload_window.cpp
+    third_party/miniz/miniz.c
     app.rc
 )
 
@@ -79,11 +81,13 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     LAUNCHER_VERSION_STR="${_VER_STR}"
     GDRIVE_CLIENT_ID="${_GDRIVE_ID}"
     GDRIVE_CLIENT_SECRET="${_GDRIVE_SEC}"
+    _CRT_SECURE_NO_WARNINGS
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${FFMPEG_DIR}/include"
     "${WEBVIEW2_DIR}/include"
+    "${MINIZ_DIR}"
 )
 
 target_link_directories(${PROJECT_NAME} PRIVATE
