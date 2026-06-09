@@ -675,8 +675,12 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     RbLog(L"CaptureThread: adapter=%d output=%d monitor='%ls' res=%dx%d",
           adapterIdx, outputIdx, outDesc.DeviceName, frameW, frameH);
 
-    // Clamp encoder output: 720p min, 1080p max; preserve aspect ratio
-    int encH = std::max(720, std::min(1080, frameH)) & ~1;
+    // Clamp encoder output: 720p min, 1080p max; preserve aspect ratio.
+    // Lower FPS settings cap resolution lower to ease encode load on weak PCs:
+    //   >=45fps -> 1080p, 30-44fps -> 900p, <30fps -> 720p.
+    int rbFps  = std::max(20, std::min(60, g_rbSettings.fps));
+    int fpsCap = (rbFps >= 45) ? 1080 : (rbFps >= 30) ? 900 : 720;
+    int encH = std::max(720, std::min(fpsCap, frameH)) & ~1;
     int encW = ((int)((int64_t)frameW * encH / frameH)) & ~1;
 
     IDXGIOutputDuplication* dupl = nullptr;
@@ -1093,7 +1097,7 @@ bool RB_Start()
     if (g_rbRunning.load()) return true;
 
     if (!LoadFFmpegDynamic()) {
-        RB_ShowOsd(L"Recording DLLs not ready yet — download in progress.", OSD_ORANGE);
+        RB_ShowOsd(L"Recording DLLs not ready yet, download in progress.", OSD_ORANGE);
         return false;
     }
 
