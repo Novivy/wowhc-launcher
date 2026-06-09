@@ -430,7 +430,7 @@ static size_t MaxBufferBytes()
 {
     MEMORYSTATUSEX ms = { sizeof(ms) };
     GlobalMemoryStatusEx(&ms);
-    int fps = std::max(20, std::min(60, g_rbSettings.fps));
+    int fps = std::max(15, std::min(60, g_rbSettings.fps));
     int pct = 6 + (fps - 20) * 9 / 40;  // 6% at 20fps, 15% at 60fps
     return (size_t)(ms.ullTotalPhys * pct / 100);
 }
@@ -588,8 +588,8 @@ static AVCodecContext* OpenBestEncoder(int width, int height, int fps)
             av_opt_set(ctx->priv_data, "forced_idr", "1",          0);
         } else if (i == 2) { // qsv
             av_opt_set(ctx->priv_data, "preset", "faster", 0);
-        } else { // libx264
-            av_opt_set(ctx->priv_data, "preset", "veryfast",    0);
+        } else { // libx264 (CPU fallback) - cheapest preset for weak CPUs
+            av_opt_set(ctx->priv_data, "preset", "ultrafast",   0);
             av_opt_set(ctx->priv_data, "tune",   "zerolatency", 0);
         }
 
@@ -675,12 +675,12 @@ static void CaptureThread(int adapterIdx, int outputIdx)
     RbLog(L"CaptureThread: adapter=%d output=%d monitor='%ls' res=%dx%d",
           adapterIdx, outputIdx, outDesc.DeviceName, frameW, frameH);
 
-    // Clamp encoder output: 720p min, 1080p max; preserve aspect ratio.
+    // Clamp encoder output: 480p min, 1080p max; preserve aspect ratio.
     // Lower FPS settings cap resolution lower to ease encode load on weak PCs:
-    //   >=45fps -> 1080p, 30-44fps -> 900p, <30fps -> 720p.
-    int rbFps  = std::max(20, std::min(60, g_rbSettings.fps));
-    int fpsCap = (rbFps >= 45) ? 1080 : (rbFps >= 30) ? 900 : 720;
-    int encH = std::max(720, std::min(fpsCap, frameH)) & ~1;
+    //   >=45fps -> 1080p, 30-44fps -> 900p, 25-29fps -> 720p, <25fps -> 480p.
+    int rbFps  = std::max(15, std::min(60, g_rbSettings.fps));
+    int fpsCap = (rbFps >= 45) ? 1080 : (rbFps >= 30) ? 900 : (rbFps >= 25) ? 720 : 480;
+    int encH = std::max(480, std::min(fpsCap, frameH)) & ~1;
     int encW = ((int)((int64_t)frameW * encH / frameH)) & ~1;
 
     IDXGIOutputDuplication* dupl = nullptr;
@@ -820,7 +820,7 @@ static void CaptureThread(int adapterIdx, int outputIdx)
         RbLog(L"CaptureThread: GDI capture started encRes=%dx%d", encW, encH);
     }
 
-    int     fps             = std::max(20, std::min(60, g_rbSettings.fps));
+    int     fps             = std::max(15, std::min(60, g_rbSettings.fps));
     DWORD64 frameIntervalMs = 1000u / (DWORD64)fps;
 
     // Encoder
@@ -1288,7 +1288,7 @@ ReplaySettings LoadReplaySettings(const std::wstring& iniPath)
 
     if (s.minutes < 1)  s.minutes = 1;
     if (s.minutes > 60) s.minutes = 60;
-    if (s.fps < 20)     s.fps = 20;
+    if (s.fps < 15)     s.fps = 15;
     if (s.fps > 60)     s.fps = 60;
 
     return s;

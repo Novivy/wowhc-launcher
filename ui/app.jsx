@@ -772,7 +772,7 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
     return {
       monitorIndex: monIdx,
       minutes: Math.max(1, Math.min(60, parseInt(mins) || 2)),
-      fps: Math.max(20, Math.min(60, parseInt(fps) || 30)),
+      fps: Math.max(15, Math.min(60, parseInt(fps) || 30)),
       saveFolder: folder,
       promptSaveOnStop: prompt,
       autoStartOnPlay: auto,
@@ -815,8 +815,8 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
           <input type="number" min={1} max={60} value={mins} onChange={e => setMins(e.target.value)} style={inp} />
         </div>
         <div>
-          <div style={lbl}>Frame rate (fps, 20–60)</div>
-          <input type="number" min={20} max={60} value={fps} onChange={e => setFps(e.target.value)} disabled={isRecording} style={{
+          <div style={lbl}>Frame rate (fps, 15–60)</div>
+          <input type="number" min={15} max={60} value={fps} onChange={e => setFps(e.target.value)} disabled={isRecording} style={{
             ...inp, opacity: isRecording ? 0.4 : 1, cursor: isRecording ? 'not-allowed' : 'default',
           }} />
         </div>
