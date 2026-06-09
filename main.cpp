@@ -1017,7 +1017,7 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                 CloseHandle(hFile);
 
                 if (ok && contentLen > 0 && downloaded < contentLen) {
-                    AppendLog(L"HttpDownload: truncated — got %I64u of %I64u bytes (offset was %I64u) url='%s'",
+                    AppendLog(L"HttpDownload: truncated, got %I64u of %I64u bytes (offset was %I64u) url='%s'",
                         downloaded, contentLen, resumeOffset, url.c_str());
                     ok = false;
                     keepPart = resumable;
@@ -1030,7 +1030,7 @@ static bool HttpDownload(const std::wstring& url, const std::wstring& dest,
                         finalSize = ul.QuadPart;
                     }
                     if (finalSize != expectedSize) {
-                        AppendLog(L"HttpDownload: size mismatch — file=%I64u expected=%I64u url='%s'",
+                        AppendLog(L"HttpDownload: size mismatch, file=%I64u expected=%I64u url='%s'",
                             finalSize, expectedSize, url.c_str());
                         ok = false;
                         DeleteFileW(writeDest.c_str());
@@ -2951,7 +2951,7 @@ static void RunThirdPartyAddonUpdates()
         // Developer checkout: skip auto-update to avoid clobbering local work.
         std::wstring gitDir = addonPath + L"\\.git";
         if (GetFileAttributesW(gitDir.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            AppendLog(L"RunThirdPartyAddonUpdates: skipping '%s' — .git folder detected", addonNameW.c_str());
+            AppendLog(L"RunThirdPartyAddonUpdates: skipping '%s', .git folder detected", addonNameW.c_str());
             PostText(L"Addon update skipped for '" + addonNameW + L"': the folder is a git repository. Remove the .git folder to re-enable auto-updates.");
             continue;
         }
@@ -5085,7 +5085,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     if (r == IDYES) {
                         RbSaveResult sr = RB_SaveNow();
                         if (sr == RB_SAVE_TOO_EARLY) {
-                            MessageBoxW(hwnd, L"Recording just started — wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
+                            MessageBoxW(hwnd, L"Recording just started, wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
                             break;
                         }
                         if (sr == RB_SAVE_OK) RB_SuppressNextStopOsd();
@@ -5208,7 +5208,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     if (r == IDYES) {
                         RbSaveResult sr = RB_SaveNow();
                         if (sr == RB_SAVE_TOO_EARLY) {
-                            MessageBoxW(hwnd, L"Recording just started — wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
+                            MessageBoxW(hwnd, L"Recording just started, wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
                             return 0;
                         }
                         if (sr == RB_SAVE_OK) RB_SuppressNextStopOsd();
@@ -5329,7 +5329,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (r == IDYES) {
                     RbSaveResult sr = RB_SaveNow();
                     if (sr == RB_SAVE_TOO_EARLY) {
-                        MessageBoxW(hwnd, L"Recording just started — wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
+                        MessageBoxW(hwnd, L"Recording just started, wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
                         PostStateToWebView();
                         return 0;
                     }
@@ -5735,7 +5735,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (r == IDYES) {
                     RbSaveResult sr = RB_SaveNow();
                     if (sr == RB_SAVE_TOO_EARLY) {
-                        MessageBoxW(hwnd, L"Recording just started — wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
+                        MessageBoxW(hwnd, L"Recording just started, wait a few seconds, then try again.", L"Cannot Save Yet", MB_OK | MB_ICONWARNING);
                         break;
                     }
                     if (sr == RB_SAVE_OK) RB_SuppressNextStopOsd();
