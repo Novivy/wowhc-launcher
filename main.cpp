@@ -229,10 +229,11 @@ static std::wstring g_arctiumExePath;
 static std::wstring g_wowTweakedExePath;
 static std::wstring g_configDir;
 static std::wstring g_logPath;
-// A remembered install location plus an optional user-chosen display label and the
-// detected client type (1=1.14 / 2=1.12). When the label is empty the UI shows the
-// raw path instead; the type drives the version chip in the dropdown.
-struct RecentPath { std::wstring path; std::wstring title; int type = 0; };
+// A remembered install location plus an optional user-chosen display label, the
+// detected client type (1=1.14 / 2=1.12), and the server cache-clear timestamp this
+// install has acknowledged (cache staleness is tracked per install). When the label
+// is empty the UI shows the raw path; the type drives the version chip in the dropdown.
+struct RecentPath { std::wstring path; std::wstring title; int type = 0; long long cacheAck = 0; };
 static std::vector<RecentPath> g_recentPaths;    // remembered installs in stable insertion order; shown in the path dropdown
 static constexpr int RECENT_PATHS_MAX = 6;
 
@@ -261,6 +262,11 @@ static bool         g_use41ydNameplates   = true;  // CT_114 only: launch 41-yar
 // Server-stats cache — fetched by FetchLiveData (5-min timer), reused by RunThirdPartyAddonUpdates
 static std::string            g_cachedStatsJson;
 static std::mutex             g_statsJsonMtx;
+// launcher_cache_clear timestamp from server-stats. When it is newer than the value a
+// given install has acknowledged (RecentPath::cacheAck), that install's local game cache
+// (Cache on 1.14 / WDB on 1.12) is considered stale. The launcher no longer deletes it
+// (AV-sensitive) — it asks the user, per install path.
+static std::atomic<long long> g_serverCacheClearTime{0};
 
 // HermesProxy pipe
 static HANDLE  g_hermesProcess    = nullptr;
@@ -407,6 +413,9 @@ static void SaveConfig()
         swprintf_s(key, L"Type%d", i);
         wchar_t tb[8]; swprintf_s(tb, L"%d", g_recentPaths[i].type);
         WritePrivateProfileStringW(L"RecentPaths", key, tb, ini);
+        swprintf_s(key, L"CacheAck%d", i);
+        wchar_t cb[32]; swprintf_s(cb, L"%I64d", g_recentPaths[i].cacheAck);
+        WritePrivateProfileStringW(L"RecentPaths", key, cb, ini);
     }
 }
 
@@ -521,7 +530,10 @@ static void LoadConfig()
         GetPrivateProfileStringW(L"RecentPaths", key, L"", rt, MAX_PATH, ini);
         swprintf_s(key, L"Type%d", i);
         int rtype = GetPrivateProfileIntW(L"RecentPaths", key, 0, ini);
-        g_recentPaths.push_back(RecentPath{ rp, rt, rtype });
+        swprintf_s(key, L"CacheAck%d", i);
+        wchar_t cb[32] = {};
+        GetPrivateProfileStringW(L"RecentPaths", key, L"0", cb, 32, ini);
+        g_recentPaths.push_back(RecentPath{ rp, rt, rtype, _wtoi64(cb) });
     }
     if (!g_installPath.empty()) AddRecentPath(g_installPath);
 }
@@ -942,6 +954,8 @@ static std::string FetchAndCacheStatsJson()
     const std::wstring url = L"https://wow-hc.com/json/server-stats.json?api_version=126&front_realm=1&_=" + ts;
     std::string json = HttpGetSimple(url);
     if (!json.empty()) {
+        long long cacheClearTs = JsonInt64(json, "launcher_cache_clear");
+        if (cacheClearTs > 0) g_serverCacheClearTime.store(cacheClearTs);
         std::lock_guard<std::mutex> lk(g_statsJsonMtx);
         g_cachedStatsJson = json;
     }
@@ -2883,7 +2897,18 @@ static void RunHermesUpdateCheck()
     AppendLog(L"RunHermesUpdateCheck: local='%s' remote='%s'", localVer.c_str(), remoteVer.c_str());
     if (remoteVer.empty() || !IsNewer(localVer, remoteVer)) return;
 
-    if (!PromptAndCloseGameForUpdate()) return;
+    // If HermesProxy is currently running (a 1.14 game session is active), ask before
+    // updating — installing it closes HermesProxy (and disconnects the session). We
+    // only ever act on the handle we own; never enumerate processes.
+    bool hermesUp = g_hermesProcess && (WaitForSingleObject(g_hermesProcess, 0) == WAIT_TIMEOUT);
+    if (hermesUp) {
+        int r = MessageBoxW(g_hwnd,
+            L"A HermesProxy update is available.\r\n\r\n"
+            L"Updating now will disconnect your current game session. Update now?",
+            L"HermesProxy Update", MB_YESNO | MB_ICONQUESTION);
+        if (r != IDYES) return;
+        // User consented; the extraction below terminates HermesProxy via its handle.
+    }
 
     AssetInfo hermesAsset = FindAssetUrl(json);
     if (hermesAsset.url.empty()) {
@@ -3129,7 +3154,15 @@ static void RunLauncherUpdateCheck()
         if (r != IDYES) return;
     }
 
-    if (!PromptAndCloseGameForUpdate()) return;
+    // The launcher self-update restarts the app and tears down HermesProxy. We don't
+    // force-close anything — just warn that a running 1.14 session will be dropped.
+    if (g_wow114Count.load() > 0) {
+        int r = MessageBoxW(g_hwnd,
+            L"A 1.14 game session is currently running and will be disconnected when the "
+            L"launcher restarts to apply the update.\r\n\r\nContinue?",
+            L"Update Launcher", MB_YESNO | MB_ICONWARNING);
+        if (r != IDYES) return;
+    }
 
     // Download the full zip (EXE + ui/ + DLLs) so the UI is updated too
     AssetInfo launcherZipAsset = FindFullZipAssetUrl(json);
@@ -4752,6 +4785,112 @@ static bool ApplyExistingWowInstall(HWND hwnd, const std::wstring& selected)
     return true;
 }
 
+// ── Game cache staleness (server-driven, user-cleared) ─────────────────────────
+// The server publishes launcher_cache_clear (a timestamp) in server-stats. When it is
+// newer than what the user has acknowledged, the local game cache may be out of date.
+// We never delete it ourselves (AV-sensitive) — we point the user at the folder.
+// Cache-clear timestamp the active install (g_installPath) has acknowledged.
+static long long CurrentInstallCacheAck()
+{
+    for (auto& e : g_recentPaths)
+        if (_wcsicmp(e.path.c_str(), g_installPath.c_str()) == 0) return e.cacheAck;
+    return 0;
+}
+
+static bool IsWowCacheStale()
+{
+    long long serverTs = g_serverCacheClearTime.load();
+    return serverTs != 0 && serverTs > CurrentInstallCacheAck() && !g_clientPath.empty();
+}
+
+// The client cache folder: Cache for 1.14, WDB for 1.12.
+static std::wstring WowCacheFolder()
+{
+    std::wstring exeDir;
+    if (g_clientType == CT_112 && !g_wowTweakedExePath.empty()) {
+        size_t sep = g_wowTweakedExePath.rfind(L'\\');
+        if (sep != std::wstring::npos) exeDir = g_wowTweakedExePath.substr(0, sep);
+    }
+    if (exeDir.empty()) exeDir = g_clientPath + L"\\_classic_era_";
+    const wchar_t* folder = (g_clientType == CT_112) ? L"WDB" : L"Cache";
+    return exeDir + L"\\" + folder;
+}
+
+// Mark the current server cache-clear timestamp as handled for the active install
+// (so we stop nagging for this specific install path).
+static void AcknowledgeWowCache()
+{
+    long long ts = g_serverCacheClearTime.load();
+    AddRecentPath(g_installPath); // make sure the active install is in the list
+    for (auto& e : g_recentPaths)
+        if (_wcsicmp(e.path.c_str(), g_installPath.c_str()) == 0) { e.cacheAck = ts; break; }
+    SaveConfig();
+}
+
+// True if `dir` is absent or contains no entries (other than . and ..).
+static bool IsDirEmpty(const std::wstring& dir)
+{
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return true;
+    bool empty = true;
+    do {
+        if (wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0) { empty = false; break; }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return empty;
+}
+
+// Called on START. Returns true if the launch must be blocked (cache is flagged stale
+// and still has contents). We detect that the user cleared it by the folder being
+// empty on a later launch — at which point we acknowledge and stop nagging.
+static bool WowCacheBlocksLaunch(HWND hwnd)
+{
+    if (!IsWowCacheStale()) return false;
+
+    std::wstring cacheDir = WowCacheFolder();
+    if (IsDirEmpty(cacheDir)) {
+        // Folder is gone or emptied (the user cleared it) — record it as handled.
+        AcknowledgeWowCache();
+        return false;
+    }
+
+    int r = MessageBoxW(hwnd,
+        L"WOW-HC has updated game data and your local cache is now out of date.\r\n\r\n"
+        L"Leaving it can cause display glitches or errors. To clear it: open the cache "
+        L"folder, delete everything inside it, then start the game again.\r\n\r\n"
+        L"Open the cache folder now?\r\n"
+        L"(Choose No to ignore and start the game anyway - not recommended.)",
+        L"Game Cache Out Of Date", MB_YESNO | MB_ICONWARNING);
+    if (r == IDYES) {
+        if (g_runningClients.load() > 0) {
+            // A game is still running — its cache files are locked. Make the user close
+            // everything first; don't open the folder yet.
+            MessageBoxW(hwnd,
+                L"One or more game clients are still running.\r\n\r\n"
+                L"Close ALL game clients first (the cache files are locked while a game is "
+                L"open), then start the game again to open the cache folder.",
+                L"Close All Games First", MB_OK | MB_ICONWARNING);
+        } else {
+            // Always remind the user to keep every game closed while deleting — locked
+            // files won't delete otherwise — then open the folder.
+            MessageBoxW(hwnd,
+                L"Make sure ALL game clients are closed before deleting the cache files "
+                L"\r\n\r\n"
+                L"The cache folder will now open.\r\nDelete everything inside it, then start "
+                L"the game again.",
+                L"Close All Games Before Deleting", MB_OK | MB_ICONINFORMATION);
+            ShellExecuteW(nullptr, L"open", cacheDir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        // Stay blocked until the folder is actually emptied (checked on the next START).
+        return true;
+    }
+
+    // No = ignore: the user is allowed to start with a stale cache. Don't acknowledge,
+    // so the reminder reappears next launch until the cache is actually cleared.
+    return false;
+}
+
 // ── Window procedure ───────────────────────────────────────────────────────────
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -5164,6 +5303,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 std::thread(Worker).detach();
             }
             else if (installed && g_playReady.load()) {
+                // Block the launch if the server flagged the game cache as out of date,
+                // until the user clears it (we no longer delete it ourselves).
+                if (WowCacheBlocksLaunch(hwnd)) break;
                 g_isLaunching = true;
                 // Keep START disabled for at least LAUNCH_LOCK_MS even if the game
                 // reports running sooner (e.g. when reusing a live HermesProxy).
