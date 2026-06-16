@@ -113,6 +113,7 @@ enum : UINT {
     ID_TIMER_UPDATE         = 200,
     ID_TIMER_HOVER          = 201,
     ID_TIMER_LIVE           = 202,
+    ID_TIMER_LAUNCH_LOCK    = 203, // keeps START disabled for a minimum window after a launch
 };
 
 #define WM_WORKER_STATUS    (WM_APP + 1)  // wParam = WorkerStatus
@@ -136,8 +137,11 @@ enum : UINT {
 #define WM_GEN_SETTINGS_CLOSE       (WM_APP + 35) // lParam = new std::string* (JSON), save & close general settings
 #define WM_GEN_SETTINGS_EXE_BROWSE   (WM_APP + 36) // open exe picker for custom launch exe, result posted to WebView
 #define WM_GEN_SETTINGS_RESET_CONFIRM (WM_APP + 37) // show Yes/No MessageBox; posts generalSettingsResetConfirmed on Yes
-#define WM_ASK_CLOSE_GAME_FOR_UPDATE  (WM_APP + 38) // prompt user to close game for pending update; returns IDYES/IDNO
 #define WM_GEN_SETTINGS_RESET_UI      (WM_APP + 39) // lParam = new std::string* (JSON defaults), save & delete ui/ & restart
+#define WM_SELECT_RECENT_PATH         (WM_APP + 40) // lParam = new std::wstring* (recent install path to switch to)
+#define WM_GAME_RUNNING               (WM_APP + 41) // game process confirmed running — clear launching state, re-enable controls
+#define WM_DELETE_RECENT_PATH         (WM_APP + 42) // lParam = new std::wstring* (recent install path to remove from the list)
+#define WM_SET_RECENT_PATH_TITLE      (WM_APP + 43) // lParam = new std::string* (JSON {path,title}) — set a recent install's label
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
@@ -225,6 +229,12 @@ static std::wstring g_arctiumExePath;
 static std::wstring g_wowTweakedExePath;
 static std::wstring g_configDir;
 static std::wstring g_logPath;
+// A remembered install location plus an optional user-chosen display label and the
+// detected client type (1=1.14 / 2=1.12). When the label is empty the UI shows the
+// raw path instead; the type drives the version chip in the dropdown.
+struct RecentPath { std::wstring path; std::wstring title; int type = 0; };
+static std::vector<RecentPath> g_recentPaths;    // remembered installs in stable insertion order; shown in the path dropdown
+static constexpr int RECENT_PATHS_MAX = 6;
 
 static std::atomic<bool> g_workerBusy{false};
 static std::atomic<bool> g_startupCheckBusy{true}; // true until WM_STARTUP_CHECK_DONE
@@ -246,7 +256,6 @@ static int        g_hermesServerSpellDelay = -1; // -1 = UNSET (not passed to He
 static int        g_hermesClientSpellDelay = -1; // -1 = UNSET
 static int        g_hermesSpellQueueWindow = 300;
 static std::wstring g_customLaunchExe;            // empty = use default for current client type
-static bool         g_promptOnKillProcess = false; // ask before killing existing game processes
 static bool         g_use41ydNameplates   = true;  // CT_114 only: launch 41-yard nameplate EXE
 
 // Server-stats cache — fetched by FetchLiveData (5-min timer), reused by RunThirdPartyAddonUpdates
@@ -258,8 +267,19 @@ static HANDLE  g_hermesProcess    = nullptr;
 static HANDLE  g_hermesPipeRead   = nullptr;
 static DWORD64 g_hermesLaunchTick = 0; // GetTickCount64() at launch; 0 = not tracked
 static std::atomic<bool> g_hermesStarted{false}; // true once HermesProxy emitted output (confirmed it actually launched)
-// PID of the specific WoW process we launched (0 if not running)
-static std::atomic<DWORD> g_wowPid{0};
+// Number of 1.14 game clients we currently have running and attached to the shared
+// HermesProxy. HermesProxy is started when this goes 0->1 and stopped when it goes
+// back to 0 (the last client closed) — so launching a second client never restarts
+// HermesProxy and closing one client never disconnects the others.
+static std::atomic<int> g_wow114Count{0};
+// Total running game clients of any type (1.14 + 1.12). Used so closing one client
+// while others remain does not stop/prompt the shared recording.
+static std::atomic<int> g_runningClients{0};
+// START-button launch lock: keeps the button disabled for at least LAUNCH_LOCK_MS
+// after a launch, even if the game reports "running" sooner (e.g. reused HermesProxy).
+static constexpr DWORD64 LAUNCH_LOCK_MS = 3000;
+static DWORD64 g_playClickTick   = 0;     // GetTickCount64() at the START click
+static bool    g_gameRunningSeen = false; // set when WM_GAME_RUNNING arrived for the current launch
 static HMODULE g_hRichEdit     = nullptr; // still loaded for existing RichEdit code paths
 
 static constexpr int WND_CLIENT_W = 875;
@@ -331,6 +351,26 @@ static std::wstring GetAddonsDir()
     return g_clientPath + L"\\_classic_era_\\Interface\\AddOns";
 }
 
+// Remember `p` in the recent-paths list. The order is kept STABLE (insertion order,
+// never reordered on use) so dropdown positions don't shift around — an existing
+// entry stays where it is. Brand-new paths are appended; once over the cap the
+// oldest is dropped. Returns true if the list actually changed (so callers persist).
+static bool AddRecentPath(const std::wstring& p)
+{
+    if (p.empty()) return false;
+    for (auto& e : g_recentPaths) {
+        if (_wcsicmp(e.path.c_str(), p.c_str()) == 0) {
+            // Already present — keep its position and label; refresh the detected type.
+            if (e.type != (int)g_clientType) { e.type = (int)g_clientType; return true; }
+            return false;
+        }
+    }
+    g_recentPaths.push_back(RecentPath{ p, L"", (int)g_clientType });
+    if ((int)g_recentPaths.size() > RECENT_PATHS_MAX)
+        g_recentPaths.erase(g_recentPaths.begin()); // over cap — drop the oldest
+    return true;
+}
+
 static void SaveConfig()
 {
     std::wstring iniPath = ConfigPath();
@@ -345,7 +385,6 @@ static void SaveConfig()
     wchar_t riBuf[8]; swprintf_s(riBuf, L"%d", g_realmIndex);
     WritePrivateProfileStringW(L"Launcher", L"RealmIndex", riBuf, ini);
     WritePrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", g_showRecordingNotifications ? L"1" : L"0", ini);
-    WritePrivateProfileStringW(L"Launcher", L"PromptOnKillProcess", g_promptOnKillProcess ? L"1" : L"0", ini);
     WritePrivateProfileStringW(L"Launcher", L"Use41ydNameplates",   g_use41ydNameplates   ? L"1" : L"0", ini);
     {
         wchar_t sb[16];
@@ -357,6 +396,18 @@ static void SaveConfig()
         WritePrivateProfileStringW(L"Launcher", L"HermesSpellQueueWindow", sb, ini);
     }
     WritePrivateProfileStringW(L"Launcher", L"CustomLaunchExe", g_customLaunchExe.c_str(), ini);
+    // Recent install paths (newest first). Clear the section first so stale
+    // entries beyond the current count don't linger.
+    WritePrivateProfileStringW(L"RecentPaths", nullptr, nullptr, ini);
+    for (int i = 0; i < (int)g_recentPaths.size(); i++) {
+        wchar_t key[16]; swprintf_s(key, L"Path%d", i);
+        WritePrivateProfileStringW(L"RecentPaths", key, g_recentPaths[i].path.c_str(), ini);
+        swprintf_s(key, L"Title%d", i);
+        WritePrivateProfileStringW(L"RecentPaths", key, g_recentPaths[i].title.c_str(), ini);
+        swprintf_s(key, L"Type%d", i);
+        wchar_t tb[8]; swprintf_s(tb, L"%d", g_recentPaths[i].type);
+        WritePrivateProfileStringW(L"RecentPaths", key, tb, ini);
+    }
 }
 
 static bool IsDevBuild(); // forward declaration (defined below; needed by LoadConfig realm clamp)
@@ -410,11 +461,6 @@ static void LoadConfig()
     }
     {
         wchar_t rn[8] = {};
-        GetPrivateProfileStringW(L"Launcher", L"PromptOnKillProcess", L"0", rn, 8, ini);
-        g_promptOnKillProcess = (_wtoi(rn) != 0);
-    }
-    {
-        wchar_t rn[8] = {};
         GetPrivateProfileStringW(L"Launcher", L"Use41ydNameplates", L"1", rn, 8, ini);
         g_use41ydNameplates = (_wtoi(rn) != 0);
     }
@@ -462,6 +508,22 @@ static void LoadConfig()
             }
         }
     }
+    // Recent install paths (newest first). Load up to RECENT_PATHS_MAX, then make
+    // sure the active install path is present (front) for older configs.
+    g_recentPaths.clear();
+    for (int i = 0; i < RECENT_PATHS_MAX; i++) {
+        wchar_t key[16]; swprintf_s(key, L"Path%d", i);
+        wchar_t rp[MAX_PATH] = {};
+        GetPrivateProfileStringW(L"RecentPaths", key, L"", rp, MAX_PATH, ini);
+        if (!rp[0]) continue;
+        wchar_t rt[MAX_PATH] = {};
+        swprintf_s(key, L"Title%d", i);
+        GetPrivateProfileStringW(L"RecentPaths", key, L"", rt, MAX_PATH, ini);
+        swprintf_s(key, L"Type%d", i);
+        int rtype = GetPrivateProfileIntW(L"RecentPaths", key, 0, ini);
+        g_recentPaths.push_back(RecentPath{ rp, rt, rtype });
+    }
+    if (!g_installPath.empty()) AddRecentPath(g_installPath);
 }
 
 // ── EXE version reader ────────────────────────────────────────────────────────
@@ -2060,12 +2122,22 @@ static void PostStateToWebView(bool force)
         if (sl != std::wstring::npos) activeLaunchExe = activeLaunchExe.substr(sl + 1);
     }
 
-    wchar_t json[4096];
+    std::wstring recentJson = L"[";
+    for (int i = 0; i < (int)g_recentPaths.size(); i++) {
+        if (i > 0) recentJson += L",";
+        recentJson += L"{\"path\":\"" + JsonEscW(g_recentPaths[i].path) + L"\","
+                      L"\"title\":\"" + JsonEscW(g_recentPaths[i].title) + L"\","
+                      L"\"type\":" + std::to_wstring(g_recentPaths[i].type) + L"}";
+    }
+    recentJson += L"]";
+
+    wchar_t json[8192];
     swprintf_s(json,
         L"{\"type\":\"state\","
         L"\"status\":\"%s\","
         L"\"progress\":%d,"
         L"\"installPath\":\"%s\","
+        L"\"recentPaths\":%s,"
         L"\"isInstalled\":%s,"
         L"\"isRecording\":%s,"
         L"\"canSaveReplay\":%s,"
@@ -2087,6 +2159,7 @@ static void PostStateToWebView(bool force)
         JsonEscW(g_currentStatus).c_str(),
         g_currentProgress,
         JsonEscW(g_installPath.empty() ? g_clientPath : g_installPath).c_str(),
+        recentJson.c_str(),
         isInstalled  ? L"true" : L"false",
         isRecording  ? L"true" : L"false",
         isRecording  ? L"true" : L"false",
@@ -2194,7 +2267,6 @@ static void PostGeneralSettingsStateToWebView()
         L",\"defaultLaunchExe\":\"" + JsonEscW(defaultExe) + L"\"" +
         L",\"nameplate41ydExe\":\"" + JsonEscW(nameplate41ydExe) + L"\"" +
         L",\"customLaunchExe\":\"" + JsonEscW(g_customLaunchExe) + L"\"" +
-        L",\"promptOnKillProcess\":" + (g_promptOnKillProcess ? L"true" : L"false") +
         L",\"use41ydNameplates\":"   + (g_use41ydNameplates   ? L"true" : L"false") + L"}";
     g_webview->PostWebMessageAsJson(json.c_str());
 }
@@ -2730,26 +2802,19 @@ static void ApplyLauncherUpdate(const std::wstring& newExePath)
 }
 
 // ── Per-component update helpers (callable from worker or timer thread) ─────────
-// Called from background update threads. If any WoW exe is running, prompts on the
-// main thread to confirm closing it, then kills game (+ HermesProxy on CT_114).
-// Returns false if user cancelled.
+// Called from background update threads before replacing files that a running game
+// or HermesProxy would lock. We never force-close the user's game clients: if a game
+// (or the shared HermesProxy) is running, the update is simply deferred and retried
+// on a later check, once the user has closed everything themselves.
+// Returns true when it is safe to update (nothing running), false to defer.
 static bool PromptAndCloseGameForUpdate()
 {
-    DWORD  wowPid  = g_wowPid.load();
+    if (g_runningClients.load() > 0) return false; // a game client is running — defer
+
     HANDLE hHermes = g_hermesProcess;
+    bool hermesRunning = hHermes && (WaitForSingleObject(hHermes, 0) == WAIT_TIMEOUT);
+    if (hermesRunning) return false;               // HermesProxy still up — defer
 
-    bool wowRunning = (wowPid != 0);
-    if (!wowRunning && !hHermes) return true;
-
-    LRESULT r = SendMessageW(g_hwnd, WM_ASK_CLOSE_GAME_FOR_UPDATE, 0, 0);
-    if (r != IDYES) return false;
-
-    if (wowPid != 0) {
-        HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, wowPid);
-        if (h) { TerminateProcess(h, 0); CloseHandle(h); }
-    }
-    if (hHermes) { TerminateProcess(hHermes, 0); CloseHandle(hHermes); g_hermesProcess = nullptr; }
-    Sleep(1000);
     return true;
 }
 
@@ -4466,6 +4531,19 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
     else if (action == "browse") {
         PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_BROWSE, BN_CLICKED), 0);
     }
+    else if (action == "selectRecentPath") {
+        std::wstring path = JsonStringW(j, "path");
+        if (!path.empty())
+            PostMessageW(hwnd, WM_SELECT_RECENT_PATH, 0, (LPARAM)new std::wstring(path));
+    }
+    else if (action == "deleteRecentPath") {
+        std::wstring path = JsonStringW(j, "path");
+        if (!path.empty())
+            PostMessageW(hwnd, WM_DELETE_RECENT_PATH, 0, (LPARAM)new std::wstring(path));
+    }
+    else if (action == "setRecentPathTitle") {
+        PostMessageW(hwnd, WM_SET_RECENT_PATH_TITLE, 0, (LPARAM)new std::string(j));
+    }
     else if (action == "openFolder") {
         PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_OPEN, BN_CLICKED), 0);
     }
@@ -4563,6 +4641,116 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
     }
 }
 
+
+// Detect and apply an existing WoW installation located at (or under) `selected`.
+// Shows message boxes for version mismatches / missing components. Returns true if
+// FindWowInstall located an install (whether or not the user accepted it), false if
+// no install was found there. Shared by Browse and the recent-paths dropdown.
+static bool ApplyExistingWowInstall(HWND hwnd, const std::wstring& selected)
+{
+    WowInstallInfo info;
+    if (!FindWowInstall(selected, info)) return false;
+
+    // ── Existing WoW installation detected ──────────
+    if (info.type == CT_114) {
+        int verMaj=0, verMin=0, verPatch=0;
+        bool gotVer = GetExeVersion(info.wowExePath, verMaj, verMin, verPatch);
+        bool versionOk = gotVer && (verMaj == 1 && verMin == 14 && verPatch == 2);
+
+        if (gotVer && !versionOk) {
+            wchar_t msg[320];
+            swprintf_s(msg,
+                L"This WoW installation (version %d.%d.%d) is not compatible.\r\n\r\n"
+                L"Only WoW Classic Era 1.14.2 is supported for this client type.\r\n"
+                L"Please select an empty folder for a fresh installation instead.",
+                verMaj, verMin, verPatch);
+            MessageBoxW(hwnd, msg, L"Incompatible Installation", MB_OK | MB_ICONERROR);
+        } else if (!gotVer) {
+            int ans = MessageBoxW(hwnd,
+                L"Could not read the version of WowClassic.exe.\r\n\r\n"
+                L"Continue using this installation?\r\n"
+                L"(Only WoW Classic Era 1.14.2 is compatible)",
+                L"Version Unknown", MB_YESNO | MB_ICONWARNING);
+            versionOk = (ans == IDYES);
+        }
+
+        if (versionOk) {
+            std::wstring foundHermes  = FindExeNearby(info.clientDir, L"HermesProxy.exe");
+            std::wstring foundArctium = FindExeNearby(info.clientDir, L"Arctium WoW Launcher.exe");
+
+            if (foundHermes.empty() || foundArctium.empty()) {
+                std::wstring missing;
+                if (foundHermes.empty())  missing += L"  - HermesProxy.exe\r\n";
+                if (foundArctium.empty()) missing += L"  - Arctium WoW Launcher.exe\r\n";
+                std::wstring mbMsg =
+                    std::wstring(L"The following file(s) were not found in or near the selected folder:\r\n\r\n")
+                    + missing
+                    + L"\r\nIf they are installed in a parent folder, please select that folder instead.\r\n"
+                      L"Otherwise choose an empty folder and the launcher will install everything.";
+                MessageBoxW(hwnd, mbMsg.c_str(), L"Missing Files", MB_OK | MB_ICONWARNING);
+            } else {
+                bool pathChanged    = (g_clientPath != info.clientDir);
+                bool typeChanged    = (g_clientType != CT_114);
+                g_clientPath        = info.clientDir;
+                g_installPath       = info.clientDir;
+                g_hermesExePath     = foundHermes;
+                g_arctiumExePath    = foundArctium;
+                g_clientType        = CT_114;
+                g_wowTweakedExePath.clear();
+                if (pathChanged || typeChanged) g_customLaunchExe.clear();
+                AddRecentPath(g_installPath);
+                PostStateToWebView();
+                if (pathChanged || typeChanged) {
+                    if (pathChanged) ResetLastCheckTime();
+                }
+                SaveConfig();
+                if (!g_workerBusy.load() && (pathChanged || !g_playReady.load())) {
+                    g_workerBusy = true;
+                    std::thread(Worker).detach();
+                }
+                RefreshPlayButton();
+            }
+        }
+    } else { // CT_112
+        int verMaj=0, verMin=0, verPatch=0;
+        bool gotVer = GetExeVersion(info.wowExePath, verMaj, verMin, verPatch);
+        bool versionOk = !gotVer || (verMaj == 1 && verMin == 12);
+
+        if (gotVer && !versionOk) {
+            wchar_t msg[320];
+            swprintf_s(msg,
+                L"Wow_tweaked.exe version %d.%d.%d does not appear to be 1.12.x.\r\n\r\n"
+                L"Continue using this installation anyway?",
+                verMaj, verMin, verPatch);
+            versionOk = (MessageBoxW(hwnd, msg,
+                L"Version Mismatch", MB_YESNO | MB_ICONWARNING) == IDYES);
+        }
+
+        if (versionOk) {
+            bool pathChanged    = (g_clientPath != info.clientDir);
+            bool typeChanged    = (g_clientType != CT_112);
+            g_clientPath        = info.clientDir;
+            g_installPath       = info.clientDir;
+            g_clientType        = CT_112;
+            g_hermesExePath.clear();
+            g_arctiumExePath.clear();
+            g_wowTweakedExePath = info.wowExePath;
+            if (pathChanged || typeChanged) g_customLaunchExe.clear();
+            AddRecentPath(g_installPath);
+            PostStateToWebView();
+            if (pathChanged || typeChanged) {
+                if (pathChanged) ResetLastCheckTime();
+            }
+            SaveConfig();
+            if (!g_workerBusy.load() && (pathChanged || !g_playReady.load())) {
+                g_workerBusy = true;
+                std::thread(Worker).detach();
+            }
+            RefreshPlayButton();
+        }
+    }
+    return true;
+}
 
 // ── Window procedure ───────────────────────────────────────────────────────────
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -4845,104 +5033,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 }
                             }
 
-                            WowInstallInfo info;
-                            if (FindWowInstall(selected, info)) {
-                                // ── Existing WoW installation detected ──────────
-                                if (info.type == CT_114) {
-                                    int verMaj=0, verMin=0, verPatch=0;
-                                    bool gotVer = GetExeVersion(info.wowExePath, verMaj, verMin, verPatch);
-                                    bool versionOk = gotVer && (verMaj == 1 && verMin == 14 && verPatch == 2);
-
-                                    if (gotVer && !versionOk) {
-                                        wchar_t msg[320];
-                                        swprintf_s(msg,
-                                            L"This WoW installation (version %d.%d.%d) is not compatible.\r\n\r\n"
-                                            L"Only WoW Classic Era 1.14.2 is supported for this client type.\r\n"
-                                            L"Please select an empty folder for a fresh installation instead.",
-                                            verMaj, verMin, verPatch);
-                                        MessageBoxW(hwnd, msg, L"Incompatible Installation", MB_OK | MB_ICONERROR);
-                                    } else if (!gotVer) {
-                                        int ans = MessageBoxW(hwnd,
-                                            L"Could not read the version of WowClassic.exe.\r\n\r\n"
-                                            L"Continue using this installation?\r\n"
-                                            L"(Only WoW Classic Era 1.14.2 is compatible)",
-                                            L"Version Unknown", MB_YESNO | MB_ICONWARNING);
-                                        versionOk = (ans == IDYES);
-                                    }
-
-                                    if (versionOk) {
-                                        std::wstring foundHermes  = FindExeNearby(info.clientDir, L"HermesProxy.exe");
-                                        std::wstring foundArctium = FindExeNearby(info.clientDir, L"Arctium WoW Launcher.exe");
-
-                                        if (foundHermes.empty() || foundArctium.empty()) {
-                                            std::wstring missing;
-                                            if (foundHermes.empty())  missing += L"  - HermesProxy.exe\r\n";
-                                            if (foundArctium.empty()) missing += L"  - Arctium WoW Launcher.exe\r\n";
-                                            std::wstring mbMsg =
-                                                std::wstring(L"The following file(s) were not found in or near the selected folder:\r\n\r\n")
-                                                + missing
-                                                + L"\r\nIf they are installed in a parent folder, please select that folder instead.\r\n"
-                                                  L"Otherwise choose an empty folder and the launcher will install everything.";
-                                            MessageBoxW(hwnd, mbMsg.c_str(), L"Missing Files", MB_OK | MB_ICONWARNING);
-                                        } else {
-                                            bool pathChanged    = (g_clientPath != info.clientDir);
-                                            bool typeChanged    = (g_clientType != CT_114);
-                                            g_clientPath        = info.clientDir;
-                                            g_installPath       = info.clientDir;
-                                            g_hermesExePath     = foundHermes;
-                                            g_arctiumExePath    = foundArctium;
-                                            g_clientType        = CT_114;
-                                            g_wowTweakedExePath.clear();
-                                            if (pathChanged || typeChanged) g_customLaunchExe.clear();
-                                            PostStateToWebView();
-                                            if (pathChanged || typeChanged) {
-                                                if (pathChanged) ResetLastCheckTime();
-                                                SaveConfig();
-                                            }
-                                            if (!g_workerBusy.load() && (pathChanged || !g_playReady.load())) {
-                                                g_workerBusy = true;
-                                                std::thread(Worker).detach();
-                                            }
-                                            RefreshPlayButton();
-                                        }
-                                    }
-                                } else { // CT_112
-                                    int verMaj=0, verMin=0, verPatch=0;
-                                    bool gotVer = GetExeVersion(info.wowExePath, verMaj, verMin, verPatch);
-                                    bool versionOk = !gotVer || (verMaj == 1 && verMin == 12);
-
-                                    if (gotVer && !versionOk) {
-                                        wchar_t msg[320];
-                                        swprintf_s(msg,
-                                            L"Wow_tweaked.exe version %d.%d.%d does not appear to be 1.12.x.\r\n\r\n"
-                                            L"Continue using this installation anyway?",
-                                            verMaj, verMin, verPatch);
-                                        versionOk = (MessageBoxW(hwnd, msg,
-                                            L"Version Mismatch", MB_YESNO | MB_ICONWARNING) == IDYES);
-                                    }
-
-                                    if (versionOk) {
-                                        bool pathChanged    = (g_clientPath != info.clientDir);
-                                        bool typeChanged    = (g_clientType != CT_112);
-                                        g_clientPath        = info.clientDir;
-                                        g_installPath       = info.clientDir;
-                                        g_clientType        = CT_112;
-                                        g_hermesExePath.clear();
-                                        g_arctiumExePath.clear();
-                                        g_wowTweakedExePath = info.wowExePath;
-                                        if (pathChanged || typeChanged) g_customLaunchExe.clear();
-                                        PostStateToWebView();
-                                        if (pathChanged || typeChanged) {
-                                            if (pathChanged) ResetLastCheckTime();
-                                            SaveConfig();
-                                        }
-                                        if (!g_workerBusy.load() && (pathChanged || !g_playReady.load())) {
-                                            g_workerBusy = true;
-                                            std::thread(Worker).detach();
-                                        }
-                                        RefreshPlayButton();
-                                    }
-                                }
+                            if (ApplyExistingWowInstall(hwnd, selected)) {
+                                // Existing WoW install detected and handled by helper.
                             } else {
                                 // ── No WoW found ─────────────────────────────────
                                 if (wasExistingInstall) {
@@ -4999,6 +5091,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                             g_hermesExePath.clear();
                                             g_arctiumExePath.clear();
                                         }
+                                        // Note: not added to recent paths yet — a new install
+                                        // is only valid once the download/setup succeeds
+                                        // (added in WM_WORKER_DONE on success).
                                         PostStateToWebView();
                                         ResetLastCheckTime();
                                         SaveConfig();
@@ -5070,6 +5165,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             else if (installed && g_playReady.load()) {
                 g_isLaunching = true;
+                // Keep START disabled for at least LAUNCH_LOCK_MS even if the game
+                // reports running sooner (e.g. when reusing a live HermesProxy).
+                g_playClickTick   = GetTickCount64();
+                g_gameRunningSeen = false;
+                SetTimer(hwnd, ID_TIMER_LAUNCH_LOCK, (UINT)LAUNCH_LOCK_MS, nullptr);
                 if (RB_GetSettings().autoStartOnPlay && !RB_IsRunning() && g_realmIndex != 2) {
                     EnsureRecordingSaveFolder(hwnd);
                     RB_Start();
@@ -5103,11 +5203,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                             return;
                         }
-                        g_wowPid.store(GetProcessId(hWow));
+                        g_runningClients.fetch_add(1);
                         PostText(L"Game is running"); PostPct(100);
+                        PostMessageW(g_hwnd, WM_GAME_RUNNING, 0, 0);
                         WaitForSingleObject(hWow, INFINITE);
-                        g_wowPid.store(0);
                         CloseHandle(hWow);
+                        g_runningClients.fetch_sub(1);
                         PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
                         PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                     }).detach();
@@ -5118,54 +5219,52 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     std::wstring arctiumExe = g_customLaunchExe.empty() ? g_arctiumExePath : g_customLaunchExe;
                     bool useArctiumParams   = g_customLaunchExe.empty() || g_customLaunchExe == g_arctiumExePath;
                     std::wstring clientPath = g_clientPath;
-                    bool promptOnKill = g_promptOnKillProcess;
-                    std::thread([hermesExe, arctiumExe, clientPath, promptOnKill, use41yd, useArctiumParams]() {
+                    std::thread([hermesExe, arctiumExe, clientPath, use41yd, useArctiumParams]() {
 
-                        // Use tracked PID/handle to avoid process enumeration by name.
-                        DWORD  wowPid      = g_wowPid.load();
                         HANDLE hHermes     = g_hermesProcess;
-                        bool   wowRunning  = (wowPid != 0);
-                        bool   hermesRunning = (hHermes != nullptr);
-                        if ((wowRunning || hermesRunning) && promptOnKill) {
-                            int ans = MessageBoxW(g_hwnd,
-                                L"A game session is already running.\r\n\r\n"
-                                L"Do you want to close it and start a new one?",
-                                L"Game Already Running", MB_YESNO | MB_ICONQUESTION);
-                            if (ans != IDYES) {
-                                PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
-                                return;
-                            }
-                        }
-                        if (wowPid != 0) {
-                            HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, wowPid);
-                            if (h) { TerminateProcess(h, 0); CloseHandle(h); Sleep(500); }
-                        }
-                        if (hHermes) { TerminateProcess(hHermes, 0); CloseHandle(hHermes); g_hermesProcess = nullptr; Sleep(500); }
-                        {
-                            auto blocking = FindListeningPorts(GetHermesPorts(hermesExe));
-                            if (!blocking.empty()) {
-                                std::wstring lines;
-                                for (auto& [p, owner] : blocking) {
-                                    if (!lines.empty()) lines += L"\r\n";
-                                    lines += L"    " + std::to_wstring(p);
-                                    if (!owner.empty()) lines += L"  (" + owner + L")";
+                        // Reuse an already-running HermesProxy instead of restarting it: a
+                        // restart would drop the connection of any client (e.g. another 1.14
+                        // install) already attached to it. HermesProxy keeps working after it
+                        // logs Error lines (in release it logs benign conditions at Error level),
+                        // so "alive" is the only condition that matters. Port-bind problems can
+                        // only happen at startup, which the fresh-start path below already checks.
+                        bool   reuseHermes = (hHermes != nullptr) &&
+                                             (WaitForSingleObject(hHermes, 0) == WAIT_TIMEOUT);
+
+                        if (!reuseHermes) {
+                            // Starting HermesProxy fresh. NEVER kill any game client here — other
+                            // clients (including 1.12 instances that don't use HermesProxy) must
+                            // keep running. Only clean up our own dead HermesProxy handle, then
+                            // verify the ports are free before launching a new one.
+                            if (hHermes) { CloseHandle(hHermes); g_hermesProcess = nullptr; }
+                            {
+                                auto blocking = FindListeningPorts(GetHermesPorts(hermesExe));
+                                if (!blocking.empty()) {
+                                    std::wstring lines;
+                                    for (auto& [p, owner] : blocking) {
+                                        if (!lines.empty()) lines += L"\r\n";
+                                        lines += L"    " + std::to_wstring(p);
+                                        if (!owner.empty()) lines += L"  (" + owner + L")";
+                                    }
+                                    std::wstring msg =
+                                        L"The following port(s) needed by HermesProxy are already in use:\r\n\r\n" +
+                                        lines +
+                                        L"\r\n\r\nOpen Task Manager (Ctrl+Shift+Esc), find the process listed above,"
+                                        L" right-click it and choose \"End task\", then try again.";
+                                    MessageBoxW(g_hwnd, msg.c_str(), L"Ports Unavailable", MB_OK | MB_ICONWARNING);
+                                    PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
+                                    return;
                                 }
-                                std::wstring msg =
-                                    L"The following port(s) needed by HermesProxy are already in use:\r\n\r\n" +
-                                    lines +
-                                    L"\r\n\r\nOpen Task Manager (Ctrl+Shift+Esc), find the process listed above,"
-                                    L" right-click it and choose \"End task\", then try again.";
-                                MessageBoxW(g_hwnd, msg.c_str(), L"Ports Unavailable", MB_OK | MB_ICONWARNING);
-                                PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
-                                return;
                             }
                         }
                         PatchConfigWtf(clientPath, use41yd);
                         SetClientFilesReadOnly(clientPath, true);
-                        g_hermesStarted = false;
-                        g_hermesLaunchTick = GetTickCount64();
-                        LaunchHermesWithPipe(hermesExe);
-                        Sleep(2000);
+                        if (!reuseHermes) {
+                            g_hermesStarted = false;
+                            g_hermesLaunchTick = GetTickCount64();
+                            LaunchHermesWithPipe(hermesExe);
+                            Sleep(2000);
+                        }
 
                         if (use41yd) {
                             // 41yd path: download EXE if missing, launch directly (no Arctium)
@@ -5184,15 +5283,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                                 return;
                             }
-                            g_wowPid.store(GetProcessId(hWow));
+                            g_wow114Count.fetch_add(1);
+                            g_runningClients.fetch_add(1);
                             PostText(L"Game is running"); PostPct(100);
+                            PostMessageW(g_hwnd, WM_GAME_RUNNING, 0, 0);
                             WaitForSingleObject(hWow, INFINITE);
-                            g_wowPid.store(0);
                             CloseHandle(hWow);
+                            g_runningClients.fetch_sub(1);
                             PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
-                            HANDLE hH = g_hermesProcess;
-                            if (hH) { TerminateProcess(hH, 0); CloseHandle(hH); g_hermesProcess = nullptr; }
-                            PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                            // Stop HermesProxy only when the last 1.14 client closes; other
+                            // attached clients keep it (and their connection) alive.
+                            if (g_wow114Count.fetch_sub(1) == 1) {
+                                HANDLE hH = g_hermesProcess;
+                                if (hH) { TerminateProcess(hH, 0); CloseHandle(hH); g_hermesProcess = nullptr; }
+                                PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                            }
                             PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                         } else {
                             // Normal path: Arctium spawns WowClassic.exe
@@ -5221,17 +5326,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                         PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                                         return;
                                     }
-                                    g_wowPid.store(wowPid);
+                                    g_wow114Count.fetch_add(1);
+                                    g_runningClients.fetch_add(1);
                                     PostText(L"Game is running"); PostPct(100);
+                                    PostMessageW(g_hwnd, WM_GAME_RUNNING, 0, 0);
                                     WaitForSingleObject(hWow, INFINITE);
-                                    g_wowPid.store(0);
                                     CloseHandle(hWow);
+                                    g_runningClients.fetch_sub(1);
 
                                     PostMessageW(g_hwnd, WM_WOW_CLOSED, 0, 0);
-                                    // The specific WowClassic.exe we tracked has closed — stop HermesProxy.
-                                    HANDLE hH = g_hermesProcess;
-                                    if (hH) { TerminateProcess(hH, 0); CloseHandle(hH); g_hermesProcess = nullptr; }
-                                    PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                                    // The specific WowClassic.exe we tracked has closed. Stop
+                                    // HermesProxy only when this was the last 1.14 client — other
+                                    // attached clients keep it (and their connection) alive.
+                                    if (g_wow114Count.fetch_sub(1) == 1) {
+                                        HANDLE hH = g_hermesProcess;
+                                        if (hH) { TerminateProcess(hH, 0); CloseHandle(hH); g_hermesProcess = nullptr; }
+                                        PostMessageW(g_hwnd, WM_HERMES_CLOSED, 0, 0);
+                                    }
                                     PostMessageW(g_hwnd, WM_WORKER_DONE, 1, 0);
                                 }).detach();
                             }
@@ -5568,7 +5679,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_showRecordingNotifications = JsonBool(body, "showRecordingNotifications", g_showRecordingNotifications);
         RB_SetShowNotifications(g_showRecordingNotifications);
-        g_promptOnKillProcess = JsonBool(body, "promptOnKillProcess", g_promptOnKillProcess);
         g_hermesServerSpellDelay = JsonInt(body, "hermesServerSpellDelay", -1);
         g_hermesClientSpellDelay = JsonInt(body, "hermesClientSpellDelay", -1);
         g_hermesSpellQueueWindow = JsonInt(body, "hermesSpellQueueWindow", g_hermesSpellQueueWindow);
@@ -5667,7 +5777,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
         g_showRecordingNotifications = JsonBool(body, "showRecordingNotifications", true);
         RB_SetShowNotifications(g_showRecordingNotifications);
-        g_promptOnKillProcess = JsonBool(body, "promptOnKillProcess", false);
         g_hermesServerSpellDelay = JsonInt(body, "hermesServerSpellDelay", -1);
         g_hermesClientSpellDelay = JsonInt(body, "hermesClientSpellDelay", -1);
         g_hermesSpellQueueWindow = 300;
@@ -5696,11 +5805,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         PostQuitMessage(0);
         return 0;
     }
-
-    case WM_ASK_CLOSE_GAME_FOR_UPDATE:
-        return MessageBoxW(hwnd,
-            L"An update is available. Your game will be closed to install it.\r\n\r\nContinue?",
-            L"Update Pending", MB_YESNO | MB_ICONQUESTION);
 
     case WM_WORKER_STATUS:
     {
@@ -5742,6 +5846,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_isLaunching = false;
         g_playReady = ok;
         if (ok) g_clientInstalled = true;
+        // Record the active install in the recent-paths dropdown only once it is
+        // confirmed valid (install/update/launch succeeded).
+        if (ok && AddRecentPath(g_installPath.empty() ? g_clientPath : g_installPath)) SaveConfig();
         if (ok && g_clientType == CT_114) SetClientFilesReadOnly(g_clientPath, true);
         g_taskbarHasProgress = false;
         RefreshPlayButton();
@@ -5793,6 +5900,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == ID_TIMER_HOVER) {
             KillTimer(hwnd, ID_TIMER_HOVER); // hover animations now in CSS/JS
+            return 0;
+        }
+        if (wp == ID_TIMER_LAUNCH_LOCK) {
+            // Minimum launch-lock window elapsed. Re-enable START only if the game
+            // has reported running; otherwise WM_GAME_RUNNING will clear it later.
+            KillTimer(hwnd, ID_TIMER_LAUNCH_LOCK);
+            if (g_gameRunningSeen && g_isLaunching.load()) {
+                g_isLaunching = false;
+                RefreshPlayButton();
+            }
             return 0;
         }
         if (wp == ID_TIMER_UPDATE && !g_workerBusy.load())
@@ -5890,6 +6007,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_WOW_CLOSED:
+        // Only act on the LAST client closing — if other clients are still running,
+        // leave the shared recording alone (and don't prompt to save).
+        if (g_runningClients.load() > 0) break;
         if (RB_IsRunning() && RB_GetSettings().stopOnWowExit) {
             AppendLog(L"[Rec] WoW closed — auto-stopping recording");
             if (RB_GetSettings().promptSaveOnStop) {
@@ -5932,6 +6052,81 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
+    case WM_SELECT_RECENT_PATH:
+    {
+        std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lp));
+        if (!path || path->empty()) return 0;
+        // Ignore while a download/install is running or the game is launching.
+        if (!g_workerBusy.load() && !g_isLaunching.load()) {
+            if (!ApplyExistingWowInstall(hwnd, *path)) {
+                // The recent install is gone (folder moved/deleted). Drop it from
+                // the list and tell the user.
+                for (auto it = g_recentPaths.begin(); it != g_recentPaths.end(); ) {
+                    if (_wcsicmp(it->path.c_str(), path->c_str()) == 0) it = g_recentPaths.erase(it);
+                    else ++it;
+                }
+                SaveConfig();
+                MessageBoxW(hwnd,
+                    L"No valid WoW installation was found at that location anymore.\r\n\r\n"
+                    L"The folder may have been moved or deleted. It has been removed "
+                    L"from the list.",
+                    L"Installation Not Found", MB_OK | MB_ICONERROR);
+            }
+        }
+        // Always force a re-sync so the dropdown reflects the active path even when
+        // the switch was rejected or ignored (controlled <select> in the UI).
+        PostStateToWebView(true);
+        return 0;
+    }
+
+    case WM_GAME_RUNNING:
+    {
+        // The game process is confirmed running. Re-enable the START button (and the
+        // path/realm controls) once the minimum launch-lock window has also elapsed —
+        // a second client can then be launched and will reuse the running HermesProxy.
+        g_gameRunningSeen = true;
+        if (GetTickCount64() - g_playClickTick >= LAUNCH_LOCK_MS) {
+            KillTimer(hwnd, ID_TIMER_LAUNCH_LOCK);
+            g_isLaunching = false;
+            RefreshPlayButton();
+        }
+        return 0;
+    }
+
+    case WM_DELETE_RECENT_PATH:
+    {
+        std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lp));
+        if (path && !path->empty()) {
+            bool changed = false;
+            for (auto it = g_recentPaths.begin(); it != g_recentPaths.end(); ) {
+                if (_wcsicmp(it->path.c_str(), path->c_str()) == 0) { it = g_recentPaths.erase(it); changed = true; }
+                else ++it;
+            }
+            if (changed) { SaveConfig(); PostStateToWebView(true); }
+        }
+        return 0;
+    }
+
+    case WM_SET_RECENT_PATH_TITLE:
+    {
+        std::unique_ptr<std::string> js(reinterpret_cast<std::string*>(lp));
+        if (js) {
+            std::wstring path  = JsonStringW(*js, "path");
+            std::wstring title = JsonStringW(*js, "title");
+            if (title.size() > 60) title.resize(60);
+            if (!path.empty()) {
+                bool found = false;
+                for (auto& e : g_recentPaths) {
+                    if (_wcsicmp(e.path.c_str(), path.c_str()) == 0) { e.title = title; found = true; break; }
+                }
+                if (!found) { AddRecentPath(path); g_recentPaths.front().title = title; }
+                SaveConfig();
+                PostStateToWebView(true);
+            }
+        }
+        return 0;
+    }
+
     case WM_GETMINMAXINFO:
     {
         // WS_POPUP: window size == client size (no NC area)
@@ -5951,15 +6146,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 L"Recorder Running", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
             if (r != IDYES) return 0;
         } else {
-            DWORD wowPid = g_wowPid.load();
-            bool wowRunning = false;
-            if (wowPid) {
-                HANDLE hCheck = OpenProcess(SYNCHRONIZE, FALSE, wowPid);
-                if (hCheck) {
-                    wowRunning = WaitForSingleObject(hCheck, 0) == WAIT_TIMEOUT;
-                    CloseHandle(hCheck);
-                }
-            }
+            bool wowRunning = g_runningClients.load() > 0;
             bool hermesRunning = g_hermesProcess &&
                 WaitForSingleObject(g_hermesProcess, 0) == WAIT_TIMEOUT;
             if (wowRunning || hermesRunning) {
@@ -5989,6 +6176,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         RB_Shutdown();
         KillTimer(hwnd, ID_TIMER_UPDATE);
         KillTimer(hwnd, ID_TIMER_LIVE);
+        KillTimer(hwnd, ID_TIMER_LAUNCH_LOCK);
         if (g_hermesProcess)  { TerminateProcess(g_hermesProcess, 0); CloseHandle(g_hermesProcess); g_hermesProcess = nullptr; }
         if (g_hermesPipeRead) { CloseHandle(g_hermesPipeRead); g_hermesPipeRead = nullptr; }
         if (g_pTaskbar) { g_pTaskbar->Release(); g_pTaskbar = nullptr; }

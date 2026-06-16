@@ -44,6 +44,13 @@ const Icon = ({ k, c, size }) => {
       React.createElement('rect', { x: 3, y: 3, width: 18, height: 18, rx: 1 }),
       React.createElement('line', { x1: 12, y1: 8,  x2: 12, y2: 16 }),
       React.createElement('line', { x1: 8,  y1: 12, x2: 16, y2: 12 }));
+    case 'trash':  return React.createElement('svg', p,
+      React.createElement('polyline', { points: '3 6 5 6 21 6' }),
+      React.createElement('path',     { d: 'M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6' }),
+      React.createElement('path',     { d: 'M10 11v6 M14 11v6' }),
+      React.createElement('path',     { d: 'M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2' }));
+    case 'chevron': return React.createElement('svg', p,
+      React.createElement('polyline', { points: '6 9 12 15 18 9' }));
     default: return null;
   }
 };
@@ -103,9 +110,275 @@ const PathIconBtn = ({ title, onClick, icon, disabled }) => {
   );
 };
 
+// Small square icon button used inside the custom path dropdown rows.
+// Same visual language as PathIconBtn (amber bordered box), slightly smaller.
+const MiniIconBtn = ({ title, onClick, icon, danger }) => {
+  const [hov, setHov] = React.useState(false);
+  const hotColor = danger ? T.blood : T.amber;
+  return (
+    <button title={title}
+      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      onClick={function(e) { e.stopPropagation(); onClick(e); }}
+      style={{
+        flexShrink: 0, width: 22, height: 22, padding: 0,
+        background: hov ? (danger ? 'rgba(154,52,34,0.15)' : 'rgba(180,130,60,0.10)') : 'transparent',
+        border: '1px solid ' + (hov ? (danger ? 'rgba(154,52,34,0.65)' : 'rgba(180,130,60,0.65)') : T.line),
+        color: hov ? hotColor : T.amber2,
+        cursor: 'pointer', display: 'grid', placeItems: 'center',
+        transition: 'color 140ms, border-color 140ms, background 140ms',
+      }}>
+      {React.createElement(Icon, { k: icon, size: 11 })}
+    </button>
+  );
+};
+
+// "1.14" / "1.12" version label from a stored client type (1 = CT_114, 2 = CT_112).
+function clientTypeVer(type) { return type === 1 ? '1.14' : type === 2 ? '1.12' : ''; }
+function entryLabel(e) { return (e && e.title) ? e.title : (e ? e.path : ''); }
+
+// Small version chip shown before each install's label.
+const VersionChip = ({ type }) => {
+  const ver = clientTypeVer(type);
+  if (!ver) return null;
+  return (
+    <span style={{
+      flexShrink: 0, fontSize: 9, fontWeight: 700, letterSpacing: '0.04em',
+      color: T.amber, border: '1px solid rgba(180,130,60,0.45)', borderRadius: 2,
+      padding: '1px 4px', lineHeight: 1.3, fontFamily: 'ui-monospace, monospace',
+      background: 'rgba(180,130,60,0.08)',
+    }}>{ver}</span>
+  );
+};
+
+// Custom (non-native) install-path dropdown. Closed trigger matches the old amber
+// PathIconBtn style; each open row carries Edit + Delete buttons on the right, plus
+// an "Add new installation" entry. Opens upward (anchored to the bottom bar).
+const PathSelect = ({ paths, value, disabled, onAction, onEditPath }) => {
+  const [open, setOpen] = React.useState(false);
+  const [hov, setHov]   = React.useState(false);
+  const ref = React.useRef(null);
+
+  React.useEffect(function() {
+    if (!open) return;
+    function onDocDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
+    document.addEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKey);
+    return function() {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  React.useEffect(function() { if (disabled) setOpen(false); }, [disabled]);
+
+  const borderColor = disabled ? T.line : ((open || hov) ? 'rgba(180,130,60,0.65)' : T.amber);
+  const activeEntry = paths.filter(function(e) { return e.path === value; })[0];
+
+  return (
+    <div ref={ref} style={{ position: 'relative', width: 239, flexShrink: 0 }}>
+      {open && (
+        <div style={{
+          position: 'absolute', bottom: 'calc(100% + 4px)', left: 0, right: 0,
+          background: T.plate, border: '1px solid rgba(180,130,60,0.45)',
+          boxShadow: '0 8px 22px rgba(0,0,0,0.55)', zIndex: 50,
+          maxHeight: 400, overflowY: 'auto',
+        }}>
+          {paths.length === 0 && (
+            <div style={{ padding: '8px 10px', color: T.textFaint, fontSize: 12, fontFamily: 'ui-monospace, monospace' }}>
+              No installation path selected
+            </div>
+          )}
+          {paths.map(function(e, i) {
+            const active = (e.path === value);
+            return (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px 6px 0',
+                borderBottom: '1px solid ' + T.line2,
+                background: active ? 'rgba(180,130,60,0.12)' : 'transparent',
+              }}>
+                <button
+                  title={e.path}
+                  onClick={function() { if (!active) onAction('selectRecentPath', { path: e.path }); setOpen(false); }}
+                  onMouseEnter={function(ev) { if (!active) ev.currentTarget.style.background = 'rgba(180,130,60,0.10)'; }}
+                  onMouseLeave={function(ev) { ev.currentTarget.style.background = 'transparent'; }}
+                  style={{
+                    flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 8,
+                    textAlign: 'left', background: 'transparent', border: 'none',
+                    color: active ? T.amber : T.amber2, fontFamily: 'ui-monospace, monospace', fontSize: 12,
+                    padding: '11px 10px 11px 12px', cursor: 'pointer',
+                  }}>
+                  {React.createElement(VersionChip, { type: e.type })}
+                  <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entryLabel(e)}</span>
+                </button>
+                {React.createElement(MiniIconBtn, { title: 'Edit label', icon: 'pen',
+                  onClick: function() { setOpen(false); onEditPath(e); } })}
+                {!active && React.createElement(MiniIconBtn, { title: 'Remove from list', icon: 'trash', danger: true,
+                  onClick: function() { onAction('deleteRecentPath', { path: e.path }); } })}
+              </div>
+            );
+          })}
+          <button
+            onClick={function() { setOpen(false); onAction('browse'); }}
+            onMouseEnter={function(ev) { ev.currentTarget.style.background = 'rgba(180,130,60,0.10)'; }}
+            onMouseLeave={function(ev) { ev.currentTarget.style.background = 'transparent'; }}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
+              background: 'transparent', border: 'none',
+              color: T.amber, fontFamily: 'Inter, system-ui, sans-serif', fontSize: 12, fontWeight: 500,
+              padding: '17px 18px 17px 12px', cursor: 'pointer',
+            }}>
+            {React.createElement(Icon, { k: 'addon', size: 13 })}
+            Add or download new installation
+          </button>
+        </div>
+      )}
+      <button
+        title="Switch between recent installation folders"
+        disabled={disabled}
+        onClick={function() { if (!disabled) setOpen(function(o) { return !o; }); }}
+        onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+        style={{
+          width: '100%', height: 25, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: 6,
+          background: !disabled && (open || hov) ? 'rgba(180,130,60,0.10)' : 'transparent',
+          border: '1px solid ' + borderColor,
+          color: disabled ? T.textDim : (hov ? T.amber : T.amber2),
+          fontFamily: 'ui-monospace, monospace', fontSize: 12, textAlign: 'left',
+          padding: '0 8px 0 4px', cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1, transition: 'color 140ms, border-color 140ms, background 140ms',
+        }}>
+        {activeEntry && React.createElement(VersionChip, { type: activeEntry.type })}
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {activeEntry ? entryLabel(activeEntry) : (value || 'No installation path selected')}
+        </span>
+        <span style={{ flexShrink: 0, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 140ms', display: 'grid' }}>
+          {React.createElement(Icon, { k: 'chevron', size: 12 })}
+        </span>
+      </button>
+    </div>
+  );
+};
+
+// Modal to set/clear a friendly label for a remembered install path.
+const EditPathTitleModal = ({ path, title, type, onSave, onClose }) => {
+  const [val, setVal] = React.useState(title || '');
+  const inp = {
+    background: T.bg2, border: '1px solid ' + T.line, color: T.text,
+    height: 30, padding: '0 9px', fontSize: 12, fontFamily: 'inherit',
+    outline: 'none', boxSizing: 'border-box', width: '100%',
+  };
+  function save() { onSave((val || '').trim()); }
+  return (
+    <ModalOverlay width={440}>
+      <ModalTitle text="Edit Installation Label" />
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 4 }}>
+          {React.createElement(VersionChip, { type: type })}
+          <span style={{ fontSize: 10, color: T.textFaint, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Label</span>
+        </div>
+        <input autoFocus value={val} maxLength={60}
+          placeholder="Leave empty to show the folder path"
+          onChange={function(e) { setVal(e.target.value); }}
+          onKeyDown={function(e) { if (e.key === 'Enter') save(); else if (e.key === 'Escape') onClose(); }}
+          style={inp} />
+      </div>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 10, color: T.textFaint, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4 }}>Folder</div>
+        <input value={path} disabled readOnly
+          style={Object.assign({}, inp, { color: T.textDim, fontFamily: 'ui-monospace, monospace', cursor: 'default', opacity: 0.8 })} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+        {React.createElement(ModalBtn, { label: 'Cancel', onClick: onClose, secondary: true })}
+        {React.createElement(ModalBtn, { label: 'Save', onClick: save })}
+      </div>
+    </ModalOverlay>
+  );
+};
+
+// Custom (non-native) realm dropdown — same visual language as PathSelect.
+// Opens upward; options are plain selectable rows (no chips/buttons).
+const RealmSelect = ({ realms, value, disabled, isDev, onChange }) => {
+  const [open, setOpen] = React.useState(false);
+  const [hov, setHov]   = React.useState(false);
+  const ref = React.useRef(null);
+
+  React.useEffect(function() {
+    if (!open) return;
+    function onDocDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
+    document.addEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKey);
+    return function() {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  React.useEffect(function() { if (disabled) setOpen(false); }, [disabled]);
+
+  const borderColor = disabled ? T.line : ((open || hov) ? 'rgba(180,130,60,0.65)' : T.amber);
+  const opts = realms.map(function(r, i) { return { label: r, index: i }; })
+                     .filter(function(o) { return !(o.index === 2 && !isDev); });
+  const current = realms[value] || realms[0];
+
+  return (
+    <div ref={ref} style={{ position: 'relative', width: '100%' }}>
+      {open && (
+        <div style={{
+          position: 'absolute', bottom: 'calc(100% + 4px)', left: 0, right: 0,
+          background: T.plate, border: '1px solid rgba(180,130,60,0.45)',
+          boxShadow: '0 8px 22px rgba(0,0,0,0.55)', zIndex: 50, maxHeight: 300, overflowY: 'auto',
+        }}>
+          {opts.map(function(o) {
+            const active = (o.index === value);
+            return (
+              <button key={o.index}
+                onClick={function() { if (!active) onChange(o.index); setOpen(false); }}
+                onMouseEnter={function(ev) { if (!active) ev.currentTarget.style.background = 'rgba(180,130,60,0.10)'; }}
+                onMouseLeave={function(ev) { ev.currentTarget.style.background = active ? 'rgba(180,130,60,0.12)' : 'transparent'; }}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left', border: 'none',
+                  borderBottom: '1px solid ' + T.line2,
+                  background: active ? 'rgba(180,130,60,0.12)' : 'transparent',
+                  color: active ? T.amber : T.amber2, fontFamily: 'Inter, system-ui, sans-serif', fontSize: 12,
+                  padding: '11px 12px', cursor: 'pointer', lineHeight: 1.4,
+                }}>
+                {o.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <button
+        title="Select realm"
+        disabled={disabled}
+        onClick={function() { if (!disabled) setOpen(function(o) { return !o; }); }}
+        onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+        style={{
+          width: '100%', height: 35, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: 6,
+          background: !disabled && (open || hov) ? 'rgba(180,130,60,0.10)' : 'transparent',
+          border: '1px solid ' + borderColor,
+          color: disabled ? T.textDim : (hov ? T.amber : T.amber2),
+          fontFamily: 'Inter, system-ui, sans-serif', fontSize: 12, textAlign: 'left',
+          padding: '0 10px', cursor: disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.5 : 1, transition: 'color 140ms, border-color 140ms, background 140ms',
+        }}>
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{current}</span>
+        <span style={{ flexShrink: 0, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 140ms', display: 'grid' }}>
+          {React.createElement(Icon, { k: 'chevron', size: 12 })}
+        </span>
+      </button>
+    </div>
+  );
+};
+
 // ── Bottom bar ─────────────────────────────────────────────────────────────────
-const BottomBar = ({ state, onAction, booting }) => {
-  const { status, progress, installPath, isInstalled, isRecording, canSaveReplay, playEnabled, workerBusy, isLaunching, realmIndex, isDev } = state;
+const BottomBar = ({ state, onAction, booting, onEditPath }) => {
+  const { status, progress, installPath, recentPaths, clientType, isInstalled, isRecording, canSaveReplay, playEnabled, workerBusy, isLaunching, realmIndex, isDev } = state;
+  // Build the dropdown list (entries are { path, title, type }), with the active path guaranteed present.
+  const paths = (recentPaths && recentPaths.length ? recentPaths.slice() : []);
+  if (installPath && !paths.some(function(e) { return e.path === installPath; })) paths.push({ path: installPath, title: '', type: clientType });
+  const pathDisabled = workerBusy || !!isLaunching;
   const progressPct = Math.max(0, Math.min(100, progress || 0));
   const statusColor = booting ? T.textDim : (isInstalled ? T.amber2 : T.textDim);
   const ctrlDisabled = workerBusy || !isInstalled;
@@ -136,11 +409,7 @@ const BottomBar = ({ state, onAction, booting }) => {
 
         {/* Path row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop:9, minWidth: 0, justifyContent: 'flex-end' }}>
-          <span style={{
-            color: T.textFaint, fontFamily: 'ui-monospace, monospace', fontSize: 12,
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', paddingRight: 6,
-          }}>{installPath || 'No installation path selected'}</span>
-          {React.createElement(PathIconBtn, { title: 'Edit install path', onClick: () => onAction('browse'),     icon: 'pen',    disabled: workerBusy || !!isLaunching })}
+          {React.createElement(PathSelect, { paths: paths, value: installPath, disabled: pathDisabled, onAction: onAction, onEditPath: onEditPath })}
           {React.createElement(PathIconBtn, { title: 'Open folder',       onClick: () => onAction('openFolder'), icon: 'folder', disabled: !installPath || workerBusy })}
         </div>
 
@@ -182,21 +451,10 @@ const BottomBar = ({ state, onAction, booting }) => {
 
       {/* Right column — realm + START GAME + cog */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <select
-          value={localRealm}
-          disabled={realmDisabled}
-          onChange={function(e) { var idx = parseInt(e.target.value); setLocalRealm(idx); onAction('setRealm', { index: idx }); }}
-          style={{
-            appearance: 'none', WebkitAppearance: 'none', background: T.bg2,
-            border: '1px solid ' + T.line, color: T.text, height: 35, boxSizing: 'border-box',
-            padding: '0 27px 0 12px', fontSize: 12,
-            cursor: realmDisabled ? 'not-allowed' : 'pointer', width: '100%',
-            opacity: realmDisabled ? 0.35 : 1,
-            backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%23a08868' fill='none' stroke-width='1.4'/></svg>\")",
-            backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center',
-          }}>
-          {REALMS.map(function(r, i) { if (i === 2 && !isDev) return null; return React.createElement('option', { key: i, value: i }, r); })}
-        </select>
+        {React.createElement(RealmSelect, {
+          realms: REALMS, value: localRealm, disabled: realmDisabled, isDev: isDev,
+          onChange: function(idx) { setLocalRealm(idx); onAction('setRealm', { index: idx }); },
+        })}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 47px', gap: 6 }}>
           {React.createElement(StartBtn, { label: (isInstalled || !installPath) ? 'START GAME' : 'INSTALL', onClick: () => onAction('startGame'), disabled: !playEnabled })}
           {React.createElement(CogBtn,   { onClick: () => onAction('openSettings'), disabled: ctrlDisabled || !!isLaunching })}
@@ -572,9 +830,6 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
       ? (ini.nameplate41ydExe || ini.defaultLaunchExe || '')
       : (ini.customLaunchExe || ini.defaultLaunchExe || '')
   );
-  const [promptOnKillProcess, setPromptOnKillProcess] = React.useState(
-    ini.promptOnKillProcess !== undefined ? ini.promptOnKillProcess : false
-  );
   const [use41ydNameplates, setUse41ydNameplates] = React.useState(
     ini.use41ydNameplates !== undefined ? ini.use41ydNameplates : true
   );
@@ -586,7 +841,6 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
     if (!resetConfirmed) return;
     onAction('generalSettingsResetUi', {
       showRecordingNotifications: true,
-      promptOnKillProcess: false,
       use41ydNameplates: true,
       hermesServerSpellDelay: null,
       hermesClientSpellDelay: null,
@@ -613,7 +867,6 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
   function payload() {
     return {
       showRecordingNotifications,
-      promptOnKillProcess,
       use41ydNameplates,
       hermesServerSpellDelay: serverSpellDelay === '' ? null : (parseInt(serverSpellDelay) || 0),
       hermesClientSpellDelay: clientSpellDelay === '' ? null : (parseInt(clientSpellDelay) || 0),
@@ -637,17 +890,13 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
         />
       </div>
 
+      {isHermes && <>
       <div style={sep} />
       <div style={{ marginBottom: 4, fontSize: 10, color: T.textFaint, letterSpacing: '0.1em', textTransform: 'uppercase' }}>
         Game Settings
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 6 }}>
         <Checkbox
-          checked={promptOnKillProcess}
-          onChange={e => setPromptOnKillProcess(e.target.checked)}
-          label="Ask before closing a running game session when clicking START GAME"
-        />
-        {isHermes && <Checkbox
           checked={use41ydNameplates}
           onChange={e => {
             const checked = e.target.checked;
@@ -657,8 +906,9 @@ const GeneralSettingsModal = ({ settings, onAction, pendingExe, onClearPendingEx
               : (ini.customLaunchExe  || ini.defaultLaunchExe || ''));
           }}
           label="Increase in-game Name Plates distance to 41yd (default 20yd)"
-        />}
+        />
       </div>
+      </>}
 
       {isHermes && <>
         <div style={sep} />
@@ -911,6 +1161,7 @@ const App = ({ isNative }) => {
     status: 'Select an installation folder',
     progress: 0,
     installPath: '',
+    recentPaths: [],
     isInstalled: false,
     isRecording: false,
     canSaveReplay: false,
@@ -921,6 +1172,7 @@ const App = ({ isNative }) => {
   });
   const [hermesLines, setHermesLines] = React.useState([]);
   const [modal, setModal] = React.useState(null);
+  const [editPath, setEditPath] = React.useState(null); // { path, title, type } being labelled
   const [rsSettings,      setRsSettings]      = React.useState(null);
   const [rsPendingFolder, setRsPendingFolder]  = React.useState(null);
   const [rsConflict,      setRsConflict]       = React.useState(null);
@@ -1351,7 +1603,8 @@ const App = ({ isNative }) => {
       </div>
 
       {/* Bottom bar */}
-      {React.createElement(BottomBar, { state: appState, onAction: onAction, booting: booting })}
+      {React.createElement(BottomBar, { state: appState, onAction: onAction, booting: booting,
+        onEditPath: function(e) { setEditPath({ path: e.path, title: e.title || '', type: e.type }); } })}
 
       {/* Toast notifications */}
       {toasts.length > 0 && (
@@ -1394,6 +1647,11 @@ const App = ({ isNative }) => {
           resetConfirmed: gsResetConfirmed,
           onClearResetConfirmed: () => setGsResetConfirmed(false),
         })}
+      {editPath && React.createElement(EditPathTitleModal, {
+        path: editPath.path, title: editPath.title, type: editPath.type,
+        onSave: function(t) { onAction('setRecentPathTitle', { path: editPath.path, title: t }); setEditPath(null); },
+        onClose: function() { setEditPath(null); },
+      })}
     </div>
   );
 };
