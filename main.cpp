@@ -283,7 +283,7 @@ static bool    g_gameRunningSeen = false; // set when WM_GAME_RUNNING arrived fo
 static HMODULE g_hRichEdit     = nullptr; // still loaded for existing RichEdit code paths
 
 static constexpr int WND_CLIENT_W = 875;
-static constexpr int WND_CLIENT_H = 570;
+static constexpr int WND_CLIENT_H = 585;
 
 // ── Shared fonts for modal dialogs (lazily created, never deleted — process lifetime) ──
 static HFONT DlgFont()
@@ -2561,7 +2561,7 @@ static void InitWebView2(HWND hwnd)
                         // WebView2 auto-detects monitor DPI via GetDpiForWindow, which can
                         // differ from GetDpiForSystem used in window creation, causing a
                         // mismatch where the CSS viewport is smaller than the window width
-                        // and the fixed 875x570 content gets cropped.
+                        // and the fixed 875x585 content gets cropped.
                         {
                             Microsoft::WRL::ComPtr<ICoreWebView2Controller3> ctrl3;
                             if (SUCCEEDED(g_wvCtrl.As(&ctrl3))) {

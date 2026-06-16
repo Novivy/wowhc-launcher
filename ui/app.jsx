@@ -96,7 +96,7 @@ const PathIconBtn = ({ title, onClick, icon, disabled }) => {
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
       style={{
-        flexShrink: 0, width: 25, height: 25, padding: 0,
+        flexShrink: 0, width: 30, height: 30, padding: 0,
         background: !disabled && hov ? 'rgba(180,130,60,0.10)' : 'transparent',
         border: '1px solid ' + (disabled ? T.line : (hov ? 'rgba(180,130,60,0.65)' : T.amber)),
         color: disabled ? T.textDim : (hov ? T.amber : T.amber2),
@@ -105,7 +105,7 @@ const PathIconBtn = ({ title, onClick, icon, disabled }) => {
         transition: 'color 140ms, border-color 140ms, background 140ms',
         opacity: disabled ? 0.35 : 1,
       }}>
-      {React.createElement(Icon, { k: icon, size: 12 })}
+      {React.createElement(Icon, { k: icon, size: 14 })}
     </button>
   );
 };
@@ -140,12 +140,17 @@ function entryLabel(e) { return (e && e.title) ? e.title : (e ? e.path : ''); }
 const VersionChip = ({ type }) => {
   const ver = clientTypeVer(type);
   if (!ver) return null;
+  // On-theme warm palette: 1.14 (the better version) = bright gold and stands out;
+  // 1.12 = muted bronze, quieter/secondary.
+  const c = type === 2
+    ? { fg: T.textDim, border: 'rgba(180,130,60,0.22)', bg: 'rgba(180,130,60,0.04)' }
+    : { fg: T.amber,   border: 'rgba(224,160,74,0.6)',  bg: 'rgba(224,160,74,0.14)' };
   return (
     <span style={{
       flexShrink: 0, fontSize: 9, fontWeight: 700, letterSpacing: '0.04em',
-      color: T.amber, border: '1px solid rgba(180,130,60,0.45)', borderRadius: 2,
+      color: c.fg, border: '1px solid ' + c.border, borderRadius: 2,
       padding: '1px 4px', lineHeight: 1.3, fontFamily: 'ui-monospace, monospace',
-      background: 'rgba(180,130,60,0.08)',
+      background: c.bg,
     }}>{ver}</span>
   );
 };
@@ -176,7 +181,7 @@ const PathSelect = ({ paths, value, disabled, onAction, onEditPath }) => {
   const activeEntry = paths.filter(function(e) { return e.path === value; })[0];
 
   return (
-    <div ref={ref} style={{ position: 'relative', width: 239, flexShrink: 0 }}>
+    <div ref={ref} style={{ position: 'relative', width: 300, flexShrink: 0 }}>
       {open && (
         <div style={{
           position: 'absolute', bottom: 'calc(100% + 4px)', left: 0, right: 0,
@@ -239,12 +244,12 @@ const PathSelect = ({ paths, value, disabled, onAction, onEditPath }) => {
         onClick={function() { if (!disabled) setOpen(function(o) { return !o; }); }}
         onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
         style={{
-          width: '100%', height: 25, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: 6,
+          width: '100%', height: 30, boxSizing: 'border-box', display: 'flex', alignItems: 'center', gap: 6,
           background: !disabled && (open || hov) ? 'rgba(180,130,60,0.10)' : 'transparent',
           border: '1px solid ' + borderColor,
           color: disabled ? T.textDim : (hov ? T.amber : T.amber2),
-          fontFamily: 'ui-monospace, monospace', fontSize: 12, textAlign: 'left',
-          padding: '0 8px 0 4px', cursor: disabled ? 'not-allowed' : 'pointer',
+          fontFamily: 'ui-monospace, monospace', fontSize: 13, textAlign: 'left',
+          padding: '0 9px 0 5px', cursor: disabled ? 'not-allowed' : 'pointer',
           opacity: disabled ? 0.5 : 1, transition: 'color 140ms, border-color 140ms, background 140ms',
         }}>
         {activeEntry && React.createElement(VersionChip, { type: activeEntry.type })}
@@ -252,7 +257,7 @@ const PathSelect = ({ paths, value, disabled, onAction, onEditPath }) => {
           {activeEntry ? entryLabel(activeEntry) : (value || 'No installation path selected')}
         </span>
         <span style={{ flexShrink: 0, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 140ms', display: 'grid' }}>
-          {React.createElement(Icon, { k: 'chevron', size: 12 })}
+          {React.createElement(Icon, { k: 'chevron', size: 14 })}
         </span>
       </button>
     </div>
@@ -393,7 +398,7 @@ const BottomBar = ({ state, onAction, booting, onEditPath }) => {
       flexShrink: 0,
     }}>
       {/* Left column */}
-      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, height: 104, justifyContent: 'space-between' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, height: 119, justifyContent: 'space-between' }}>
         {/* Action row */}
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           {React.createElement(ActionBtn, { icon: 'save',   iconColor: T.amber, label: 'Save Replay',    title: 'Save the current replay buffer to a video file', onClick: () => onAction('saveReplay'),         active: false, disabled: !canSaveReplay })}
@@ -407,8 +412,10 @@ const BottomBar = ({ state, onAction, booting, onEditPath }) => {
             active: isRecording, disabled: ctrlDisabled })}
         </div>
 
+        {/* Path + status move down together as one group, ~20px below the action row */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
         {/* Path row */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop:9, minWidth: 0, justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, justifyContent: 'flex-end' }}>
           {React.createElement(PathSelect, { paths: paths, value: installPath, disabled: pathDisabled, onAction: onAction, onEditPath: onEditPath })}
           {React.createElement(PathIconBtn, { title: 'Open folder',       onClick: () => onAction('openFolder'), icon: 'folder', disabled: !installPath || workerBusy })}
         </div>
@@ -447,10 +454,11 @@ const BottomBar = ({ state, onAction, booting, onEditPath }) => {
             <div style={{ position: 'absolute', inset: 0, background: 'repeating-linear-gradient(90deg, transparent 0 7px, rgba(0,0,0,0.18) 7px 0px)' }}/>
           </div>
         </div>
+        </div>
       </div>
 
       {/* Right column — realm + START GAME + cog */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: 119, justifyContent: 'space-between' }}>
         {React.createElement(RealmSelect, {
           realms: REALMS, value: localRealm, disabled: realmDisabled, isDev: isDev,
           onChange: function(idx) { setLocalRealm(idx); onAction('setRealm', { index: idx }); },
@@ -471,7 +479,7 @@ const StartBtn = ({ label, onClick, disabled }) => {
       disabled={disabled}
       onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
       style={{
-        height: 63,
+        height: 69,
         background: 'linear-gradient(180deg, ' + T.amber + ' 0%, ' + T.ember + ' 100%)',
         border: '1px solid ' + T.amber,
         color: '#1a0a04', fontFamily: '"Cinzel", Georgia, serif',
@@ -494,7 +502,7 @@ const CogBtn = ({ onClick, disabled }) => {
       disabled={disabled}
       onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
       style={{
-        height: 63, background: !disabled && hov ? T.bg2 : T.plate,
+        height: 69, background: !disabled && hov ? T.bg2 : T.plate,
         border: '1px solid ' + (!disabled && hov ? 'rgba(180,130,60,0.45)' : T.line),
         color: T.amber, cursor: disabled ? 'not-allowed' : 'pointer', display: 'grid', placeItems: 'center',
         transition: 'background 120ms, border-color 120ms',
@@ -1317,7 +1325,7 @@ const App = ({ isNative }) => {
 
   return (
     <div style={{
-      width: 875, height: 570, display: 'flex', flexDirection: 'column',
+      width: 875, height: 585, display: 'flex', flexDirection: 'column',
       background: T.bg0, color: T.text, fontFamily: '"Inter", system-ui, sans-serif',
       border: '1px solid ' + T.line, position: 'relative', overflow: 'hidden',
     }}>
