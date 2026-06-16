@@ -3381,6 +3381,46 @@ static std::wstring DetectCloudSyncProvider(const std::wstring& path)
     return L"";
 }
 
+// ── Protected system folder detection ─────────────────────────────────────────
+// Program Files / the Windows folder require elevation to write and trigger UAC
+// VirtualStore redirection, which breaks the game install and the launcher
+// self-update. Refuse them too. The env vars give the real (localised/relocated)
+// roots. Returns a friendly location name, or empty string if the path is fine.
+static std::wstring DetectProtectedSystemFolder(const std::wstring& path)
+{
+    if (path.empty()) return L"";
+
+    std::wstring lower = path;
+    if (!lower.empty()) CharLowerW(&lower[0]);
+    if (!lower.empty() && (lower.back() == L'\\' || lower.back() == L'/')) lower.pop_back();
+
+    struct Root { const wchar_t* var; const wchar_t* name; };
+    static const Root roots[] = {
+        { L"ProgramFiles",      L"Program Files" },
+        { L"ProgramFiles(x86)", L"Program Files (x86)" },
+        { L"ProgramW6432",      L"Program Files" },
+        { L"windir",            L"the Windows folder" },
+        { L"SystemRoot",        L"the Windows folder" },
+    };
+    for (const auto& r : roots) {
+        wchar_t buf[MAX_PATH] = {};
+        DWORD n = GetEnvironmentVariableW(r.var, buf, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) continue;
+        std::wstring root = buf;
+        if (!root.empty()) CharLowerW(&root[0]);
+        if (!root.empty() && (root.back() == L'\\' || root.back() == L'/')) root.pop_back();
+        if (root.empty()) continue;
+        // Boundary-aware prefix match: path == root, or path begins with root + separator
+        // (so "C:\Program Files Custom" does not match "C:\Program Files").
+        if (lower.size() >= root.size() &&
+            lower.compare(0, root.size(), root) == 0 &&
+            (lower.size() == root.size() ||
+             lower[root.size()] == L'\\' || lower[root.size()] == L'/'))
+            return r.name;
+    }
+    return L"";
+}
+
 // ── WoW installation detection ────────────────────────────────────────────────
 struct WowInstallInfo {
     std::wstring wowExePath;
@@ -4762,6 +4802,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 }
                             }
 
+                            // Reject protected system locations (Program Files, Windows):
+                            // writing there needs admin rights and triggers UAC VirtualStore
+                            // redirection, breaking the install and the launcher self-update.
+                            {
+                                std::wstring loc = DetectProtectedSystemFolder(selected);
+                                if (!loc.empty()) {
+                                    std::wstring msg =
+                                        L"The folder you selected is inside " + loc + L".\r\n\r\n"
+                                        L"WoW cannot be installed there. Windows protects "
+                                        L"Program Files and the Windows folder, so writing to them "
+                                        L"requires administrator rights and causes the game and "
+                                        L"launcher updates to fail.\r\n\r\n"
+                                        L"Please choose a normal local folder, such as one on your "
+                                        L"C: drive outside " + loc + L".";
+                                    MessageBoxW(hwnd, msg.c_str(),
+                                        L"Protected Folder Not Allowed", MB_OK | MB_ICONERROR);
+                                    pItem->Release();
+                                    pDlg->Release();
+                                    break;
+                                }
+                            }
+
                             // Detect if the launcher exe is sitting inside the selected folder
                             {
                                 wchar_t exeBuf[MAX_PATH] = {};
@@ -4978,6 +5040,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     L"C: drive outside of " + provider + L".";
                     MessageBoxW(hwnd, msg.c_str(),
                         L"Cloud Folder Not Allowed", MB_OK | MB_ICONERROR);
+                    break;
+                }
+            }
+
+            // Same for protected system locations (Program Files, Windows).
+            {
+                std::wstring loc = DetectProtectedSystemFolder(g_clientPath);
+                if (!loc.empty()) {
+                    std::wstring msg =
+                    L"Your install folder is inside " + loc + L".\r\n\r\n"
+                    L"WoW cannot be installed or run there. Windows protects "
+                    L"Program Files and the Windows folder, so writing to them "
+                    L"requires administrator rights and causes the game and "
+                    L"launcher updates to fail.\r\n\r\n"
+                    L"Please choose a normal local folder, such as one on your "
+                    L"C: drive outside " + loc + L".";
+                    MessageBoxW(hwnd, msg.c_str(),
+                        L"Protected Folder Not Allowed", MB_OK | MB_ICONERROR);
                     break;
                 }
             }
