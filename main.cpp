@@ -4792,8 +4792,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                         L"(OneDrive, Dropbox, Google Drive, iCloud, etc.). "
                                         L"The sync client locks game files while they are in use, "
                                         L"which corrupts the installation and eventually breaks it.\r\n\r\n"
-                                        L"Please choose a normal local folder, such as one on your "
-                                        L"C: drive outside of " + provider + L".";
+                                        L"Please choose a normal local folder, such as your Desktop "
+                                        L"or Documents folder, outside of " + provider + L".";
                                     MessageBoxW(hwnd, msg.c_str(),
                                         L"Cloud Folder Not Allowed", MB_OK | MB_ICONERROR);
                                     pItem->Release();
@@ -4813,8 +4813,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                         L"WoW cannot be installed there. This is a protected Windows "
                                         L"system location, and the game and its updates will not "
                                         L"work correctly from it.\r\n\r\n"
-                                        L"Please choose a normal local folder, such as one on your "
-                                        L"C: drive outside " + loc + L".";
+                                        L"Please choose a normal local folder, such as your Desktop "
+                                        L"or Documents folder, outside " + loc + L".";
                                     MessageBoxW(hwnd, msg.c_str(),
                                         L"Protected Folder Not Allowed", MB_OK | MB_ICONERROR);
                                     pItem->Release();
@@ -5035,8 +5035,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     L"(OneDrive, Dropbox, Google Drive, iCloud, etc.). "
                     L"The sync client locks game files while they are in use, "
                     L"which corrupts the installation and eventually breaks it.\r\n\r\n"
-                    L"Please choose a normal local folder, such as one on your "
-                    L"C: drive outside of " + provider + L".";
+                    L"Please choose a normal local folder, such as your Desktop "
+                    L"or Documents folder, outside of " + provider + L".";
                     MessageBoxW(hwnd, msg.c_str(),
                         L"Cloud Folder Not Allowed", MB_OK | MB_ICONERROR);
                     break;
@@ -5052,8 +5052,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     L"WoW cannot be installed or run there. This is a protected Windows "
                     L"system location, and the game and its updates will not "
                     L"work correctly from it.\r\n\r\n"
-                    L"Please choose a normal local folder, such as one on your "
-                    L"C: drive outside " + loc + L".";
+                    L"Please choose a normal local folder, such as your Desktop "
+                    L"or Documents folder, outside " + loc + L".";
                     MessageBoxW(hwnd, msg.c_str(),
                         L"Protected Folder Not Allowed", MB_OK | MB_ICONERROR);
                     break;
