@@ -4810,10 +4810,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 if (!loc.empty()) {
                                     std::wstring msg =
                                         L"The folder you selected is inside " + loc + L".\r\n\r\n"
-                                        L"WoW cannot be installed there. Windows protects "
-                                        L"Program Files and the Windows folder, so writing to them "
-                                        L"requires administrator rights and causes the game and "
-                                        L"launcher updates to fail.\r\n\r\n"
+                                        L"WoW cannot be installed there. This is a protected Windows "
+                                        L"system location, and the game and its updates will not "
+                                        L"work correctly from it.\r\n\r\n"
                                         L"Please choose a normal local folder, such as one on your "
                                         L"C: drive outside " + loc + L".";
                                     MessageBoxW(hwnd, msg.c_str(),
@@ -5050,10 +5049,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (!loc.empty()) {
                     std::wstring msg =
                     L"Your install folder is inside " + loc + L".\r\n\r\n"
-                    L"WoW cannot be installed or run there. Windows protects "
-                    L"Program Files and the Windows folder, so writing to them "
-                    L"requires administrator rights and causes the game and "
-                    L"launcher updates to fail.\r\n\r\n"
+                    L"WoW cannot be installed or run there. This is a protected Windows "
+                    L"system location, and the game and its updates will not "
+                    L"work correctly from it.\r\n\r\n"
                     L"Please choose a normal local folder, such as one on your "
                     L"C: drive outside " + loc + L".";
                     MessageBoxW(hwnd, msg.c_str(),
