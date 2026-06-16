@@ -5710,7 +5710,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         ReplaySettings s = RB_GetSettings();
         s.monitorIndex    = JsonInt(body, "monitorIndex", s.monitorIndex);
         s.minutes         = std::max(1, std::min(60, JsonInt(body, "minutes", s.minutes)));
-        s.fps             = std::max(20, std::min(60, JsonInt(body, "fps", s.fps)));
+        s.fps             = std::max(15, std::min(60, JsonInt(body, "fps", s.fps)));
         s.saveFolder      = JsonStringW(body, "saveFolder");
         s.promptSaveOnStop = JsonBool(body, "promptSaveOnStop", s.promptSaveOnStop);
         s.autoStartOnPlay  = JsonBool(body, "autoStartOnPlay",  s.autoStartOnPlay);
@@ -5774,7 +5774,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         ReplaySettings s = RB_GetSettings();
         s.monitorIndex    = JsonInt(body, "monitorIndex", s.monitorIndex);
         s.minutes         = std::max(1, std::min(60, JsonInt(body, "minutes", s.minutes)));
-        s.fps             = std::max(20, std::min(60, JsonInt(body, "fps", s.fps)));
+        s.fps             = std::max(15, std::min(60, JsonInt(body, "fps", s.fps)));
         s.saveFolder      = JsonStringW(body, "saveFolder");
         s.promptSaveOnStop = JsonBool(body, "promptSaveOnStop", s.promptSaveOnStop);
         s.autoStartOnPlay  = JsonBool(body, "autoStartOnPlay",  s.autoStartOnPlay);

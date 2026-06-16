@@ -9,7 +9,7 @@
 
 struct ReplaySettings {
     int  minutes      = 2;
-    int  fps          = 30;  // 20-60
+    int  fps          = 25;  // 15-60
     int  ramMB        = 0;   // 0 = auto (15% total RAM)
     int  monitorIndex = 0;
     std::wstring saveFolder;

@@ -1003,7 +1003,7 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
   const [monitors]         = React.useState(ini.monitors || []);
   const [monIdx,  setMonIdx]  = React.useState(ini.monitorIndex ?? 0);
   const [mins,    setMins]    = React.useState(String(ini.minutes ?? 2));
-  const [fps,     setFps]     = React.useState(String(ini.fps ?? 30));
+  const [fps,     setFps]     = React.useState(String(ini.fps ?? 25));
   const [folder,  setFolder]  = React.useState(ini.saveFolder ?? '');
   const [prompt,  setPrompt]  = React.useState(ini.promptSaveOnStop !== undefined ? ini.promptSaveOnStop : true);
   const [auto,    setAuto]    = React.useState(ini.autoStartOnPlay !== undefined ? ini.autoStartOnPlay : false);
@@ -1030,7 +1030,7 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
     return {
       monitorIndex: monIdx,
       minutes: Math.max(1, Math.min(60, parseInt(mins) || 2)),
-      fps: Math.max(15, Math.min(60, parseInt(fps) || 30)),
+      fps: Math.max(15, Math.min(60, parseInt(fps) || 25)),
       saveFolder: folder,
       promptSaveOnStop: prompt,
       autoStartOnPlay: auto,

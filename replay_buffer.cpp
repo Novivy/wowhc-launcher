@@ -1272,7 +1272,7 @@ ReplaySettings LoadReplaySettings(const std::wstring& iniPath)
     };
 
     s.minutes      = RdInt(L"Minutes",      2);
-    s.fps          = RdInt(L"Fps",          30);
+    s.fps          = RdInt(L"Fps",          25);
     s.ramMB        = RdInt(L"RamMB",        0);
     s.monitorIndex = RdInt(L"MonitorIndex", 0);
 
