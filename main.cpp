@@ -3337,6 +3337,50 @@ static std::wstring FindExeNearby(const std::wstring& clientDir, const wchar_t* 
     return r;
 }
 
+// ── Cloud-sync folder detection ───────────────────────────────────────────────
+// Installing into a cloud-synced folder (OneDrive, Google Drive, Dropbox, ...)
+// is fatal: the sync client locks game/HermesProxy files mid-write, which corrupts
+// the install and breaks launching. Detect such a destination and refuse it.
+// Returns a friendly provider name, or empty string if the path is safe.
+static std::wstring DetectCloudSyncProvider(const std::wstring& path)
+{
+    if (path.empty()) return L"";
+
+    std::wstring lower = path;
+    if (!lower.empty()) CharLowerW(&lower[0]);
+
+    struct Marker { const wchar_t* needle; const wchar_t* name; };
+    static const Marker markers[] = {
+        { L"onedrive",             L"OneDrive" },
+        { L"dropbox",              L"Dropbox" },
+        { L"google drive",         L"Google Drive" },
+        { L"googledrive",          L"Google Drive" },
+        { L"\\my drive",           L"Google Drive" },
+        { L"iclouddrive",          L"iCloud Drive" },
+        { L"icloud drive",         L"iCloud Drive" },
+        { L"creative cloud files", L"Adobe Creative Cloud" },
+        { L"pcloud",               L"pCloud" },
+    };
+    for (const auto& m : markers)
+        if (lower.find(m.needle) != std::wstring::npos)
+            return m.name;
+
+    // OneDrive can be relocated/renamed; the env vars point at its real root.
+    const wchar_t* odVars[] = { L"OneDrive", L"OneDriveConsumer", L"OneDriveCommercial" };
+    for (const wchar_t* v : odVars) {
+        wchar_t buf[MAX_PATH] = {};
+        DWORD n = GetEnvironmentVariableW(v, buf, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+            std::wstring od = buf;
+            if (!od.empty()) CharLowerW(&od[0]);
+            if (!od.empty() && lower.compare(0, od.size(), od) == 0)
+                return L"OneDrive";
+        }
+    }
+
+    return L"";
+}
+
 // ── WoW installation detection ────────────────────────────────────────────────
 struct WowInstallInfo {
     std::wstring wowExePath;
@@ -4696,6 +4740,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             std::wstring selected = path;
                             CoTaskMemFree(path);
 
+                            // Reject cloud-synced destinations (OneDrive, Google Drive,
+                            // Dropbox, ...) for both new and existing installs: the sync
+                            // client locks files mid-write and corrupts the game/HermesProxy.
+                            {
+                                std::wstring provider = DetectCloudSyncProvider(selected);
+                                if (!provider.empty()) {
+                                    std::wstring msg =
+                                        L"The folder you selected is inside " + provider + L".\r\n\r\n"
+                                        L"WoW cannot be installed or run from a cloud-synced folder "
+                                        L"(OneDrive, Dropbox, Google Drive, iCloud, etc.). "
+                                        L"The sync client locks game files while they are in use, "
+                                        L"which corrupts the installation and eventually breaks it.\r\n\r\n"
+                                        L"Please choose a normal local folder, such as one on your "
+                                        L"C: drive outside of " + provider + L".";
+                                    MessageBoxW(hwnd, msg.c_str(),
+                                        L"Cloud Folder Not Allowed", MB_OK | MB_ICONERROR);
+                                    pItem->Release();
+                                    pDlg->Release();
+                                    break;
+                                }
+                            }
+
                             // Detect if the launcher exe is sitting inside the selected folder
                             {
                                 wchar_t exeBuf[MAX_PATH] = {};
@@ -4895,6 +4961,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         else if (id == ID_BTN_PLAY) {
             if (g_workerBusy.load()) break;
+
+            // Refuse to install/launch a game that lives in a cloud-synced folder.
+            // Catches installs configured before this guard existed, or a profile
+            // whose folder was later moved into OneDrive/Google Drive/Dropbox/etc.
+            {
+                std::wstring provider = DetectCloudSyncProvider(g_clientPath);
+                if (!provider.empty()) {
+                    std::wstring msg =
+                    L"Your install folder is inside " + provider + L".\r\n\r\n"
+                    L"WoW cannot be installed or run from a cloud folder "
+                    L"(OneDrive, Dropbox, Google Drive, iCloud, etc.). "
+                    L"The sync client locks game files while they are in use, "
+                    L"which corrupts the installation and eventually breaks it.\r\n\r\n"
+                    L"Please choose a normal local folder, such as one on your "
+                    L"C: drive outside of " + provider + L".";
+                    MessageBoxW(hwnd, msg.c_str(),
+                        L"Cloud Folder Not Allowed", MB_OK | MB_ICONERROR);
+                    break;
+                }
+            }
 
             bool installed = g_clientInstalled.load();
 
