@@ -2811,7 +2811,28 @@ static void ApplyLauncherUpdate(const std::wstring& newExePath)
         return;
     }
     SaveConfig();
-    ShellExecuteW(nullptr, L"open", exePath, nullptr, nullptr, SW_SHOWNORMAL);
+
+    // Apply the staged UI update before relaunching. Release our own WebView2 locks on
+    // ui/ first (we are on the UI thread, so this is safe), then swap ui_pending -> ui.
+    // Doing it here — in the sole running process — avoids a cross-process lock race with
+    // the relaunched exe. CheckAndBootstrapUiFiles re-applies it on startup as a fallback.
+    // Hide first so releasing the WebView2 control doesn't flash a blank client area.
+    if (g_hwnd) ShowWindow(g_hwnd, SW_HIDE);
+    g_wvCtrl.Reset();
+    g_webview.Reset();
+    {
+        std::wstring pendingUi = g_configDir + L"\\ui_pending";
+        std::wstring appDataUi = g_configDir + L"\\ui";
+        if (GetFileAttributesW(pendingUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            DeleteDirRecursive(appDataUi);
+            MoveFileExW(pendingUi.c_str(), appDataUi.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+        }
+    }
+
+    // Pass --relaunch so the new instance waits for us (the mutex holder) to exit
+    // instead of seeing the still-held single-instance mutex and bailing immediately.
+    ShellExecuteW(nullptr, L"open", exePath, L"--relaunch", nullptr, SW_SHOWNORMAL);
     PostQuitMessage(0);
 }
 
@@ -5107,46 +5128,42 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             std::wstring selected = path;
                             CoTaskMemFree(path);
 
-                            // Reject cloud-synced destinations (OneDrive, Google Drive,
-                            // Dropbox, ...) for both new and existing installs: the sync
-                            // client locks files mid-write and corrupts the game/HermesProxy.
+                            // Warn about cloud-synced destinations (OneDrive, Google Drive,
+                            // Dropbox, ...) but don't reject them: the sync client can lock
+                            // files mid-write and corrupt the game/HermesProxy, so the user
+                            // should be told, then we let them proceed anyway.
                             {
                                 std::wstring provider = DetectCloudSyncProvider(selected);
                                 if (!provider.empty()) {
                                     std::wstring msg =
                                         L"The folder you selected is inside " + provider + L".\r\n\r\n"
-                                        L"WoW cannot be installed or run from a cloud-synced folder "
+                                        L"WoW is not meant to be installed or run from a cloud-synced folder "
                                         L"(OneDrive, Dropbox, Google Drive, iCloud, etc.). "
                                         L"The sync client locks game files while they are in use, "
-                                        L"which corrupts the installation and eventually breaks it.\r\n\r\n"
-                                        L"Please choose a normal local folder, such as your Desktop "
+                                        L"which can corrupt the installation and eventually break it.\r\n\r\n"
+                                        L"For best results, use a normal local folder, such as your Desktop "
                                         L"or Documents folder, outside of " + provider + L".";
                                     MessageBoxW(hwnd, msg.c_str(),
-                                        L"Cloud Folder Not Allowed", MB_OK | MB_ICONERROR);
-                                    pItem->Release();
-                                    pDlg->Release();
-                                    break;
+                                        L"Cloud Folder Warning", MB_OK | MB_ICONWARNING);
                                 }
                             }
 
-                            // Reject protected system locations (Program Files, Windows):
+                            // Warn about protected system locations (Program Files, Windows):
                             // writing there needs admin rights and triggers UAC VirtualStore
-                            // redirection, breaking the install and the launcher self-update.
+                            // redirection, which can break the install and the launcher
+                            // self-update. Warn, but let the user proceed anyway.
                             {
                                 std::wstring loc = DetectProtectedSystemFolder(selected);
                                 if (!loc.empty()) {
                                     std::wstring msg =
                                         L"The folder you selected is inside " + loc + L".\r\n\r\n"
-                                        L"WoW cannot be installed there. This is a protected Windows "
-                                        L"system location, and the game and its updates will not "
+                                        L"WoW is not meant to be installed there. This is a protected "
+                                        L"Windows system location, and the game and its updates may not "
                                         L"work correctly from it.\r\n\r\n"
-                                        L"Please choose a normal local folder, such as your Desktop "
+                                        L"For best results, use a normal local folder, such as your Desktop "
                                         L"or Documents folder, outside " + loc + L".";
                                     MessageBoxW(hwnd, msg.c_str(),
-                                        L"Protected Folder Not Allowed", MB_OK | MB_ICONERROR);
-                                    pItem->Release();
-                                    pDlg->Release();
-                                    break;
+                                        L"Protected Folder Warning", MB_OK | MB_ICONWARNING);
                                 }
                             }
 
@@ -5257,23 +5274,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         else if (id == ID_BTN_PLAY) {
             if (g_workerBusy.load()) break;
 
-            // Refuse to install/launch a game that lives in a cloud-synced folder.
-            // Catches installs configured before this guard existed, or a profile
-            // whose folder was later moved into OneDrive/Google Drive/Dropbox/etc.
+            bool installed = g_clientInstalled.load();
+
+            // Warn about installing/running from a cloud-synced folder, but don't block:
+            // the sync client can lock game files and corrupt the install, so the user
+            // should be told, then we let them proceed anyway.
             {
                 std::wstring provider = DetectCloudSyncProvider(g_clientPath);
                 if (!provider.empty()) {
                     std::wstring msg =
                     L"Your install folder is inside " + provider + L".\r\n\r\n"
-                    L"WoW cannot be installed or run from a cloud folder "
+                    L"WoW is not meant to be installed or run from a cloud folder "
                     L"(OneDrive, Dropbox, Google Drive, iCloud, etc.). "
                     L"The sync client locks game files while they are in use, "
-                    L"which corrupts the installation and eventually breaks it.\r\n\r\n"
-                    L"Please choose a normal local folder, such as your Desktop "
+                    L"which can corrupt the installation and eventually break it.\r\n\r\n"
+                    L"For best results, use a normal local folder, such as your Desktop "
                     L"or Documents folder, outside of " + provider + L".";
                     MessageBoxW(hwnd, msg.c_str(),
-                        L"Cloud Folder Not Allowed", MB_OK | MB_ICONERROR);
-                    break;
+                        L"Cloud Folder Warning", MB_OK | MB_ICONWARNING);
                 }
             }
 
@@ -5283,18 +5301,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (!loc.empty()) {
                     std::wstring msg =
                     L"Your install folder is inside " + loc + L".\r\n\r\n"
-                    L"WoW cannot be installed or run there. This is a protected Windows "
-                    L"system location, and the game and its updates will not "
+                    L"WoW is not meant to be installed or run there. This is a protected "
+                    L"Windows system location, and the game and its updates may not "
                     L"work correctly from it.\r\n\r\n"
-                    L"Please choose a normal local folder, such as your Desktop "
+                    L"For best results, use a normal local folder, such as your Desktop "
                     L"or Documents folder, outside " + loc + L".";
                     MessageBoxW(hwnd, msg.c_str(),
-                        L"Protected Folder Not Allowed", MB_OK | MB_ICONERROR);
-                    break;
+                        L"Protected Folder Warning", MB_OK | MB_ICONWARNING);
                 }
             }
-
-            bool installed = g_clientInstalled.load();
 
             if (!installed && !g_clientPath.empty()) {
                 g_workerBusy = true;
@@ -6553,6 +6568,27 @@ static bool CheckAndBootstrapUiFiles(HINSTANCE hInst)
         }
     }
 
+    // Apply a staged UI update from a prior self-update (the full-zip path stages the
+    // new ui/ into ui_pending/). This must happen here, before WebView2 initialises and
+    // takes file locks on ui/. The old process normally applies it before relaunching,
+    // but this is the authoritative apply point and also recovers any staging the old
+    // process failed to swap in (e.g. it exited before releasing its ui/ locks).
+    if (!g_uiResetThisStart) {
+        std::wstring pendingUi = g_configDir + L"\\ui_pending";
+        if (GetFileAttributesW(pendingUi.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            AppendLog(L"UI bootstrap: applying staged ui_pending -> ui");
+            DeleteDirRecursive(appDataUi);
+            if (!MoveFileExW(pendingUi.c_str(), appDataUi.c_str(),
+                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+                // Move failed (rare lock contention) — copy contents instead, then drop staging.
+                AppendLog(L"UI bootstrap: ui_pending move failed, copying contents");
+                CreateDirectoryW(appDataUi.c_str(), nullptr);
+                MoveDirContents(pendingUi, appDataUi);
+                DeleteDirRecursive(pendingUi);
+            }
+        }
+    }
+
     // Dev: ../ui (source tree) takes priority — no AppData copy needed.
     // Skip during a UI reset so we force a fresh download into AppData instead.
     if (!g_uiResetThisStart) {
@@ -6721,15 +6757,29 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
         g_testMode = true;
     if (lpCmdLine && wcsstr(lpCmdLine, L"--dev"))
         g_devMode = true;
+    // Set by a self-updating predecessor when it relaunches us (see ApplyLauncherUpdate).
+    // Tells the single-instance guard below to wait for that predecessor to exit instead
+    // of treating it as an already-running user instance and bailing.
+    bool isRelaunch = lpCmdLine && wcsstr(lpCmdLine, L"--relaunch");
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_dpi = GetDpiForSystem();
 
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"WOWHCLauncherMutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND existing = FindWindowW(L"WOWHCLauncherWnd", nullptr);
-        if (existing) SetForegroundWindow(existing);
-        return 0;
+        // On a self-update relaunch the predecessor still holds the mutex for the brief
+        // moment it takes to exit. Wait for it to release (or abandon, on process exit)
+        // before claiming we are a duplicate. WAIT_ABANDONED transfers ownership to us.
+        bool acquired = false;
+        if (isRelaunch && hMutex) {
+            DWORD w = WaitForSingleObject(hMutex, 10000);
+            acquired = (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED);
+        }
+        if (!acquired) {
+            HWND existing = FindWindowW(L"WOWHCLauncherWnd", nullptr);
+            if (existing) SetForegroundWindow(existing);
+            return 0;
+        }
     }
 
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
