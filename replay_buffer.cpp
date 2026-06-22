@@ -347,7 +347,7 @@ static LRESULT CALLBACK OsdWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-static void CreateOsdWindow(HWND hMainWnd)
+static void CreateOsdWindow()
 {
     WNDCLASSEXW wc = {};
     wc.cbSize        = sizeof(wc);
@@ -376,16 +376,316 @@ static void CreateOsdWindow(HWND hMainWnd)
         g_osdTitleFont = CreateFontIndirectW(&lf);
     }
 
+    // Ownerless so the toast stays visible on the recording monitor even when the
+    // launcher window is minimized (tied to the monitor, not the launcher window).
     g_osdHwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         L"WOWHCReplayOSD", nullptr,
         WS_POPUP,
         0, 0, 225, 80,
-        hMainWnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
 
     SetLayeredWindowAttributes(g_osdHwnd, 0, 235, LWA_ALPHA);
 
     g_osdBitmap = LoadOsdPng(202);
+}
+
+// ── REC indicator ─────────────────────────────────────────────────────────────
+// A small layered badge (red dot + "REC") shown near the top-right of the monitor
+// being recorded. Mirrors the red REC dot in the launcher title bar (no blink).
+// Gated by g_rbSettings.showRecIndicator (recording setting, off by default).
+// When g_rbSettings.recIndicatorLocked is true the badge is click-through and
+// pinned; when unlocked the user can drag it to reposition (it then shows even
+// before recording so it can be placed). Position is stored as pixel offsets from
+// the recording monitor's top/right edges (recIndicatorTop / recIndicatorRight).
+static HWND  g_recDotHwnd  = nullptr;
+static HFONT g_recDotFont  = nullptr;
+static HWND  g_recDotOwner = nullptr;  // main window, for posting WM_RB_INDICATOR_MOVED
+static bool  g_recDragging = false;
+static int   g_recDragDX   = 0;
+static int   g_recDragDY   = 0;
+static bool  g_recDotActive = false;   // true while actually recording; drawn red when true, grey when just positioning
+
+// "Drag me" coach-mark: a small amber bubble shown to the LEFT of the badge
+// (arrow pointing right at it) every time the badge is unlocked, until the user
+// drags it or locks again. Jiggles left-right to draw the eye.
+static HWND  g_recTipHwnd  = nullptr;
+static HFONT g_recTipFont  = nullptr;
+static int   g_recTipBaseX = 0;        // resting left position; the jiggle offsets from here
+static int   g_recTipPhase = 0;
+static bool  g_recTipDismissed = false;// transient (per-unlock): set true once the user drags; reset on each unlock/reset
+static void HideRecTip();              // defined below; used by the badge drag handler
+
+// Rect of the monitor currently configured for recording (falls back to primary).
+static RECT RecMonitorRect()
+{
+    RECT rcMon = { 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+    int idx = g_rbSettings.monitorIndex;
+    if (!g_monitorCache.empty()) {
+        if (idx < 0 || idx >= (int)g_monitorCache.size()) idx = 0;
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetMonitorInfoW(g_monitorCache[idx].hmon, &mi)) rcMon = mi.rcMonitor;
+    }
+    return rcMon;
+}
+
+static LRESULT CALLBACK RecDotWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_LBUTTONDOWN: {
+        // Reached only when unlocked (locked => WS_EX_TRANSPARENT, clicks pass through)
+        SetCapture(hwnd);
+        POINT pt; GetCursorPos(&pt);
+        RECT wr; GetWindowRect(hwnd, &wr);
+        g_recDragging = true;
+        g_recDragDX = pt.x - wr.left;
+        g_recDragDY = pt.y - wr.top;
+        g_recTipDismissed = true;  // the user is moving it; dismiss the coach-mark
+        HideRecTip();
+        return 0;
+    }
+    case WM_MOUSEMOVE:
+        if (g_recDragging) {
+            POINT pt; GetCursorPos(&pt);
+            SetWindowPos(hwnd, HWND_TOPMOST, pt.x - g_recDragDX, pt.y - g_recDragDY,
+                         0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (g_recDragging) {
+            g_recDragging = false;
+            ReleaseCapture();
+            // Persist the new position as offsets from the recording monitor edges
+            RECT rcMon = RecMonitorRect();
+            RECT wr; GetWindowRect(hwnd, &wr);
+            int top   = wr.top - rcMon.top;
+            int right = rcMon.right - wr.right;
+            if (top   < 0) top   = 0;  if (top   > 4000) top   = 4000;
+            if (right < 0) right = 0;  if (right > 4000) right = 4000;
+            g_rbSettings.recIndicatorTop   = top;
+            g_rbSettings.recIndicatorRight = right;
+            if (g_recDotOwner) PostMessageW(g_recDotOwner, WM_RB_INDICATOR_MOVED, 0, 0);
+        }
+        return 0;
+    case WM_SETCURSOR:
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+        return TRUE;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        // Red while actually recording; grey while only positioning (unlocked, not recording)
+        const BYTE cr = g_recDotActive ? 154 : 150;
+        const BYTE cg = g_recDotActive ? 52  : 150;
+        const BYTE cb = g_recDotActive ? 34  : 155;
+        const COLORREF accent = RGB(cr, cg, cb);
+
+        // Dark chrome background (matches the launcher title bar)
+        HBRUSH bg = CreateSolidBrush(RGB(15, 15, 18));
+        FillRect(hdc, &rc, bg);
+        DeleteObject(bg);
+
+        // 1px accent border
+        HBRUSH border = CreateSolidBrush(accent);
+        FrameRect(hdc, &rc, border);
+        DeleteObject(border);
+
+        constexpr int DOT_X  = 14;
+        constexpr int DOT_SZ = 10;
+        {
+            Gdiplus::Graphics g(hdc);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+            Gdiplus::SolidBrush dot(Gdiplus::Color(255, cr, cg, cb));
+            int dy = rc.top + (rc.bottom - rc.top - DOT_SZ) / 2;
+            g.FillEllipse(&dot, DOT_X, dy, DOT_SZ, DOT_SZ);
+        }
+
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, accent);
+        if (g_recDotFont) SelectObject(hdc, g_recDotFont);
+        RECT tr = { DOT_X + DOT_SZ + 6, rc.top, rc.right - 2, rc.bottom };
+        DrawTextW(hdc, L"REC", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void CreateRecDotWindow(HWND hMainWnd)
+{
+    WNDCLASSEXW wc = {};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = RecDotWndProc;
+    wc.hInstance     = GetModuleHandleW(nullptr);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = L"WOWHCRecDot";
+    RegisterClassExW(&wc);
+
+    LOGFONTW lf = {};
+    lf.lfHeight  = -MulDiv(11, 96, 72);
+    lf.lfWeight  = FW_BOLD;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    wcscpy_s(lf.lfFaceName, L"Segoe UI");
+    g_recDotFont = CreateFontIndirectW(&lf);
+
+    // Created with WS_EX_TRANSPARENT (locked default = click-through); UpdateRecDot
+    // clears it when the badge is unlocked so it can receive drag input.
+    // Ownerless (no parent) so it stays visible on the recorded monitor even when
+    // the launcher window is minimized. g_recDotOwner is only the PostMessage
+    // target for drag updates, not the window owner. WS_EX_TOOLWINDOW keeps it off
+    // the taskbar / alt-tab. Explicitly destroyed in RB_Shutdown.
+    g_recDotOwner = hMainWnd;
+    g_recDotHwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
+        L"WOWHCRecDot", nullptr,
+        WS_POPUP,
+        0, 0, 75, 30,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+
+    SetLayeredWindowAttributes(g_recDotHwnd, 0, 225, LWA_ALPHA);
+}
+
+// Position the badge near the top-right of the recording monitor, nudged by the
+// user-configured pixel offsets.
+static void PositionRecDot()
+{
+    if (!g_recDotHwnd) return;
+    RECT rcMon = RecMonitorRect();
+    RECT wrc; GetWindowRect(g_recDotHwnd, &wrc);
+    int ow = wrc.right - wrc.left;
+    SetWindowPos(g_recDotHwnd, HWND_TOPMOST,
+                 rcMon.right - ow - g_rbSettings.recIndicatorRight,
+                 rcMon.top + g_rbSettings.recIndicatorTop, 0, 0,
+                 SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+// ── "Drag me" coach-mark bubble ────────────────────────────────────────────────
+static constexpr int TIP_W       = 124;  // total window width incl. arrow
+static constexpr int TIP_H       = 26;
+static constexpr int TIP_ARROW_W = 7;     // arrow sticking out of the right edge
+static constexpr int TIP_ARROW_H = 12;
+static constexpr int TIP_GAP     = 8;     // gap between arrow tip and the badge
+static constexpr UINT TIP_TIMER  = 70;
+static constexpr COLORREF TIP_KEY = RGB(255, 0, 255);  // color-key => transparent
+
+static LRESULT CALLBACK RecTipWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_TIMER:
+        if (wp == TIP_TIMER) {
+            // Smooth left-right jiggle via a small triangle-wave table (no float math)
+            static const int kJiggle[] = { 0,-1,-2,-3,-4,-5,-6,-5,-4,-3,-2,-1,
+                                           0, 1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1 };
+            int dx = kJiggle[g_recTipPhase % 24];
+            g_recTipPhase++;
+            RECT wr; GetWindowRect(hwnd, &wr);
+            SetWindowPos(hwnd, HWND_TOPMOST, g_recTipBaseX + dx, wr.top, 0, 0,
+                         SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc; GetClientRect(hwnd, &rc);
+
+        // Fill with the color-key so everything outside the bubble is transparent
+        HBRUSH keyBr = CreateSolidBrush(TIP_KEY);
+        FillRect(hdc, &rc, keyBr);
+        DeleteObject(keyBr);
+
+        const COLORREF amber = RGB(224, 160, 74);
+        int bodyR = rc.right - TIP_ARROW_W;
+        int midY  = (rc.bottom - rc.top) / 2;
+
+        // Body rectangle
+        RECT body = { rc.left, rc.top, bodyR, rc.bottom };
+        HBRUSH amberBr = CreateSolidBrush(amber);
+        FillRect(hdc, &body, amberBr);
+
+        // Arrow pointing right toward the badge
+        HPEN   amberPen = CreatePen(PS_SOLID, 1, amber);
+        HGDIOBJ oldBr = SelectObject(hdc, amberBr);
+        HGDIOBJ oldPen = SelectObject(hdc, amberPen);
+        POINT arrow[3] = {
+            { bodyR,      midY - TIP_ARROW_H / 2 },
+            { rc.right,   midY },
+            { bodyR,      midY + TIP_ARROW_H / 2 },
+        };
+        Polygon(hdc, arrow, 3);
+        SelectObject(hdc, oldPen);
+        SelectObject(hdc, oldBr);
+        DeleteObject(amberPen);
+        DeleteObject(amberBr);
+
+        // Label
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(28, 20, 10));
+        if (g_recTipFont) SelectObject(hdc, g_recTipFont);
+        RECT tr = { rc.left + 10, rc.top, bodyR - 4, rc.bottom };
+        DrawTextW(hdc, L"Drag to move", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void CreateRecTipWindow()
+{
+    WNDCLASSEXW wc = {};
+    wc.cbSize        = sizeof(wc);
+    wc.lpfnWndProc   = RecTipWndProc;
+    wc.hInstance     = GetModuleHandleW(nullptr);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    wc.lpszClassName = L"WOWHCRecTip";
+    RegisterClassExW(&wc);
+
+    LOGFONTW lf = {};
+    lf.lfHeight  = -MulDiv(9, 96, 72);
+    lf.lfWeight  = FW_SEMIBOLD;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    wcscpy_s(lf.lfFaceName, L"Segoe UI");
+    g_recTipFont = CreateFontIndirectW(&lf);
+
+    // Ownerless too, so it tracks the badge/monitor rather than the launcher window.
+    g_recTipHwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
+        L"WOWHCRecTip", nullptr,
+        WS_POPUP,
+        0, 0, TIP_W, TIP_H,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+
+    SetLayeredWindowAttributes(g_recTipHwnd, TIP_KEY, 0, LWA_COLORKEY);
+}
+
+// Place the bubble just to the left of the badge (arrow tip near the badge's left
+// edge) and start the jiggle.
+static void ShowRecTip()
+{
+    if (!g_recTipHwnd || !g_recDotHwnd) return;
+    RECT br; GetWindowRect(g_recDotHwnd, &br);
+    g_recTipBaseX = br.left - TIP_GAP - TIP_W;
+    int y = br.top + ((br.bottom - br.top) - TIP_H) / 2;
+    g_recTipPhase = 0;
+    SetWindowPos(g_recTipHwnd, HWND_TOPMOST, g_recTipBaseX, y, TIP_W, TIP_H, SWP_NOACTIVATE);
+    InvalidateRect(g_recTipHwnd, nullptr, TRUE);
+    ShowWindow(g_recTipHwnd, SW_SHOWNOACTIVATE);
+    SetTimer(g_recTipHwnd, TIP_TIMER, TIP_TIMER, nullptr);
+}
+
+static void HideRecTip()
+{
+    if (!g_recTipHwnd) return;
+    KillTimer(g_recTipHwnd, TIP_TIMER);
+    ShowWindow(g_recTipHwnd, SW_HIDE);
 }
 
 // ── Stored packet ─────────────────────────────────────────────────────────────
@@ -1038,15 +1338,21 @@ static void CaptureThread(int adapterIdx, int outputIdx)
 void RB_Init(HWND hMainWnd)
 {
     g_rbHwnd = hMainWnd;
-    CreateOsdWindow(hMainWnd);
+    CreateOsdWindow();
+    CreateRecDotWindow(hMainWnd);
+    CreateRecTipWindow();
 }
 
 void RB_Shutdown()
 {
     RB_Stop();
     RB_UnregisterHotkeys();
-    if (g_osdHwnd) { DestroyWindow(g_osdHwnd); g_osdHwnd = nullptr; }
-    if (g_osdFont) { DeleteObject(g_osdFont); g_osdFont = nullptr; }
+    if (g_osdHwnd)    { DestroyWindow(g_osdHwnd);    g_osdHwnd    = nullptr; }
+    if (g_osdFont)    { DeleteObject(g_osdFont);     g_osdFont    = nullptr; }
+    if (g_recDotHwnd) { DestroyWindow(g_recDotHwnd); g_recDotHwnd = nullptr; }
+    if (g_recDotFont) { DeleteObject(g_recDotFont);  g_recDotFont = nullptr; }
+    if (g_recTipHwnd) { DestroyWindow(g_recTipHwnd); g_recTipHwnd = nullptr; }
+    if (g_recTipFont) { DeleteObject(g_recTipFont);  g_recTipFont = nullptr; }
 }
 
 std::vector<MonitorDesc> RB_EnumMonitors()
@@ -1092,6 +1398,32 @@ std::vector<MonitorDesc> RB_EnumMonitors()
     return result;
 }
 
+// Show / hide / reposition the badge to match current settings + recording state.
+// Visible while recording (locked or not), and also while unlocked (so the user
+// can position it from the settings modal before recording starts). When locked
+// the window is click-through; when unlocked it accepts drag input.
+static void UpdateRecDot()
+{
+    if (!g_recDotHwnd) return;
+    bool unlocked = !g_rbSettings.recIndicatorLocked;
+    bool show = g_rbSettings.showRecIndicator && (g_rbRunning.load() || unlocked);
+    if (!show) { g_recDragging = false; ShowWindow(g_recDotHwnd, SW_HIDE); HideRecTip(); return; }
+
+    LONG ex = GetWindowLongW(g_recDotHwnd, GWL_EXSTYLE);
+    if (g_rbSettings.recIndicatorLocked) ex |= WS_EX_TRANSPARENT;
+    else                                 ex &= ~WS_EX_TRANSPARENT;
+    SetWindowLongW(g_recDotHwnd, GWL_EXSTYLE, ex);
+
+    g_recDotActive = g_rbRunning.load();  // red when recording, grey when just positioning
+    PositionRecDot();
+    InvalidateRect(g_recDotHwnd, nullptr, FALSE);
+    ShowWindow(g_recDotHwnd, SW_SHOWNOACTIVATE);
+
+    // Coach-mark: shown while unlocked until the user drags it (dismissed) or locks.
+    if (unlocked && !g_recTipDismissed) ShowRecTip();
+    else                                HideRecTip();
+}
+
 bool RB_Start()
 {
     if (g_rbRunning.load()) return true;
@@ -1127,9 +1459,16 @@ bool RB_Start()
         g_packets.clear();
     }
 
+    // A previous CaptureThread may have self-exited on an error (it sets
+    // g_rbRunning=false and returns without anyone joining it). Assigning to a
+    // still-joinable std::thread calls std::terminate()/abort(), so join the
+    // finished thread first — it has already exited, so this returns immediately.
+    if (g_rbThread.joinable()) g_rbThread.join();
+
     g_rbRunning  = true;
     g_rbStartTick = GetTickCount64();
     g_rbThread   = std::thread(CaptureThread, adapterIdx, outputIdx);
+    UpdateRecDot();
     return true;
 }
 
@@ -1137,6 +1476,7 @@ void RB_Stop()
 {
     if (!g_rbRunning.load()) return;
     g_rbRunning = false;
+    UpdateRecDot();
     if (g_rbThread.joinable()) g_rbThread.join();
 }
 
@@ -1163,6 +1503,15 @@ bool RB_IsRunning()
 void RB_SetSettings(const ReplaySettings& s)
 {
     g_rbSettings = s;
+    // Reflect indicator changes (show/hide, lock, position) onto the live badge
+    // without restarting capture.
+    UpdateRecDot();
+}
+
+void RB_ArmRecIndicatorHint()
+{
+    g_recTipDismissed = false;
+    UpdateRecDot();  // re-shows the bubble if the badge is currently unlocked
 }
 
 void RB_ApplySettings(const ReplaySettings& s)
@@ -1253,6 +1602,14 @@ void SaveReplaySettings(const ReplaySettings& s, const std::wstring& iniPath)
                                s.autoStartOnPlay ? L"1" : L"0", ini);
     WritePrivateProfileStringW(sec, L"StopOnWowExit",
                                s.stopOnWowExit ? L"1" : L"0", ini);
+    WritePrivateProfileStringW(sec, L"ShowRecIndicator",
+                               s.showRecIndicator ? L"1" : L"0", ini);
+    WritePrivateProfileStringW(sec, L"RecIndicatorLocked",
+                               s.recIndicatorLocked ? L"1" : L"0", ini);
+    swprintf_s(buf, L"%d", s.recIndicatorTop);
+    WritePrivateProfileStringW(sec, L"RecIndicatorTop",   buf, ini);
+    swprintf_s(buf, L"%d", s.recIndicatorRight);
+    WritePrivateProfileStringW(sec, L"RecIndicatorRight", buf, ini);
 }
 
 ReplaySettings LoadReplaySettings(const std::wstring& iniPath)
@@ -1285,11 +1642,21 @@ ReplaySettings LoadReplaySettings(const std::wstring& iniPath)
     s.promptSaveOnStop  = (RdInt(L"PromptSaveOnStop", 1) != 0);
     s.autoStartOnPlay   = (RdInt(L"AutoStartOnPlay",  0) != 0);
     s.stopOnWowExit     = (RdInt(L"StopOnWowExit",    1) != 0);
+    s.showRecIndicator  = (RdInt(L"ShowRecIndicator", 0) != 0);
+    // Always start locked: unlocking is a per-session positioning mode, never the
+    // state the launcher boots into (the saved value is intentionally ignored).
+    s.recIndicatorLocked = true;
+    s.recIndicatorTop   = RdInt(L"RecIndicatorTop",   16);
+    s.recIndicatorRight = RdInt(L"RecIndicatorRight", 16);
 
     if (s.minutes < 1)  s.minutes = 1;
     if (s.minutes > 60) s.minutes = 60;
     if (s.fps < 15)     s.fps = 15;
     if (s.fps > 60)     s.fps = 60;
+    if (s.recIndicatorTop   < 0)    s.recIndicatorTop   = 0;
+    if (s.recIndicatorTop   > 4000) s.recIndicatorTop   = 4000;
+    if (s.recIndicatorRight < 0)    s.recIndicatorRight = 0;
+    if (s.recIndicatorRight > 4000) s.recIndicatorRight = 4000;
 
     return s;
 }

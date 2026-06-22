@@ -1011,6 +1011,13 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
   const [ssHk,    setSsHk]    = React.useState({ vk: ini.startStopVK || 0, mods: ini.startStopMods || 0 });
   const [svHk,    setSvHk]    = React.useState({ vk: ini.saveVK || 0, mods: ini.saveMods || 0 });
   const [hkError, setHkError] = React.useState(null);
+  const [recShow,   setRecShow]   = React.useState(ini.showRecIndicator !== undefined ? ini.showRecIndicator : false);
+  const [recLocked, setRecLocked] = React.useState(ini.recIndicatorLocked !== undefined ? ini.recIndicatorLocked : true);
+
+  // Live-apply show/lock so the badge appears (and becomes draggable) immediately.
+  function applyIndicator(show, locked) {
+    onAction('recIndicatorApply', { showRecIndicator: show, recIndicatorLocked: locked });
+  }
 
   React.useEffect(() => {
     if (pendingFolder != null) { setFolder(pendingFolder); onClearPendingFolder(); }
@@ -1037,6 +1044,8 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
       stopOnWowExit: stopOnWow,
       startStopVK: ssHk.vk, startStopMods: ssHk.mods,
       saveVK: svHk.vk, saveMods: svHk.mods,
+      showRecIndicator: recShow,
+      recIndicatorLocked: recLocked,
     };
   }
 
@@ -1105,6 +1114,31 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
         <Checkbox checked={prompt}    onChange={e => setPrompt(e.target.checked)}    label="Prompt to save replay when stopping recording" />
         <Checkbox checked={auto}      onChange={e => setAuto(e.target.checked)}      label="Auto-start recording when hitting Play" />
         <Checkbox checked={stopOnWow} onChange={e => setStopOnWow(e.target.checked)} label="Auto-stop recording when WoW closes" />
+      </div>
+
+      <div style={sep} />
+
+      <div style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <Checkbox
+          checked={recShow}
+          onChange={e => { const v = e.target.checked; setRecShow(v); applyIndicator(v, recLocked); }}
+          label="Show a REC indicator on the recorded screen while recording" />
+        {recShow && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 24 }}>
+            <ModalBtn
+              label={recLocked ? 'Unlock to move' : 'Lock position'}
+              onClick={() => { const nl = !recLocked; setRecLocked(nl); applyIndicator(recShow, nl); }}
+              style={{ height: 26 }} />
+            {!recLocked && (
+              <ModalBtn label="Reset position" secondary onClick={() => onAction('recIndicatorReset')} style={{ height: 26 }} />
+            )}
+            <span style={{ fontSize: 10, color: T.textFaint, lineHeight: 1.4 }}>
+              {recLocked
+                ? 'Locked. Appears on the recorded screen while recording.'
+                : 'Drag the REC label on your screen to position it, then lock.'}
+            </span>
+          </div>
+        )}
       </div>
 
       <div style={sep} />

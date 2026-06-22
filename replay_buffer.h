@@ -6,6 +6,7 @@
 #define HOTKEY_ID_RB_STARTSTOP  1001
 #define HOTKEY_ID_RB_SAVE       1002
 #define WM_RB_STATUS            (WM_APP + 20)  // wParam=1 started, 0 stopped
+#define WM_RB_INDICATOR_MOVED   (WM_APP + 21)  // posted to main window after the REC badge is dragged; main persists the new offsets
 
 struct ReplaySettings {
     int  minutes      = 2;
@@ -20,6 +21,10 @@ struct ReplaySettings {
     bool promptSaveOnStop  = true;
     bool autoStartOnPlay   = false;
     bool stopOnWowExit     = true;
+    bool showRecIndicator  = false; // on-screen REC badge on the recorded monitor while recording
+    bool recIndicatorLocked = true; // locked = click-through and pinned; unlocked = draggable to reposition
+    int  recIndicatorTop   = 16;    // badge offset from the monitor's top edge, in pixels
+    int  recIndicatorRight = 16;    // badge offset from the monitor's right edge, in pixels
 };
 
 struct MonitorDesc {
@@ -38,6 +43,7 @@ enum RbSaveResult { RB_SAVE_OK, RB_SAVE_NOT_RUNNING, RB_SAVE_TOO_EARLY };
 RbSaveResult             RB_SaveNow();
 bool                     RB_IsRunning();
 void                     RB_SetSettings(const ReplaySettings& s);   // set only, no restart
+void                     RB_ArmRecIndicatorHint();                  // re-show the "drag me" coach-mark (call on unlock / reset)
 void                     RB_ApplySettings(const ReplaySettings& s); // set + restart if running
 const ReplaySettings&    RB_GetSettings();
 enum OsdAccent { OSD_GREEN = 0, OSD_RED = 1, OSD_ORANGE = 2 };

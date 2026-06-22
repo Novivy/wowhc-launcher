@@ -134,6 +134,8 @@ enum : UINT {
 #define WM_REC_SETTINGS_BROWSE (WM_APP + 32) // open save-folder picker, result posted back to WebView
 #define WM_REC_SETTINGS_TOGGLE (WM_APP + 33) // lParam = new std::string* (JSON), toggle recording
 #define WM_REC_SETTINGS_CLOSE  (WM_APP + 34) // lParam = new std::string* (JSON), save & close modal
+#define WM_REC_INDICATOR_APPLY (WM_APP + 44) // lParam = new std::string* (JSON {showRecIndicator,recIndicatorLocked}) — live-apply REC badge
+#define WM_REC_INDICATOR_RESET (WM_APP + 45) // reset REC badge position to default (top-right) and reposition the live badge
 #define WM_GEN_SETTINGS_CLOSE       (WM_APP + 35) // lParam = new std::string* (JSON), save & close general settings
 #define WM_GEN_SETTINGS_EXE_BROWSE   (WM_APP + 36) // open exe picker for custom launch exe, result posted to WebView
 #define WM_GEN_SETTINGS_RESET_CONFIRM (WM_APP + 37) // show Yes/No MessageBox; posts generalSettingsResetConfirmed on Yes
@@ -2249,7 +2251,11 @@ static void PostRecordSettingsStateToWebView()
         L"\"startStopVK\":"   + std::to_wstring(s.startStopVK)   + L","
         L"\"startStopMods\":" + std::to_wstring(s.startStopMods) + L","
         L"\"saveVK\":"   + std::to_wstring(s.saveVK)   + L","
-        L"\"saveMods\":" + std::to_wstring(s.saveMods) + L"}";
+        L"\"saveMods\":" + std::to_wstring(s.saveMods) + L","
+        L"\"showRecIndicator\":"    + (s.showRecIndicator   ? L"true" : L"false") + L","
+        L"\"recIndicatorLocked\":"  + (s.recIndicatorLocked ? L"true" : L"false") + L","
+        L"\"recIndicatorTop\":"     + std::to_wstring(s.recIndicatorTop)   + L","
+        L"\"recIndicatorRight\":"   + std::to_wstring(s.recIndicatorRight) + L"}";
 
     g_webview->PostWebMessageAsJson(json.c_str());
 }
@@ -4624,6 +4630,13 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
         auto* ps = new std::string(j);
         PostMessageW(hwnd, WM_REC_SETTINGS_CLOSE, 0, (LPARAM)ps);
     }
+    else if (action == "recIndicatorApply") {
+        auto* ps = new std::string(j);
+        PostMessageW(hwnd, WM_REC_INDICATOR_APPLY, 0, (LPARAM)ps);
+    }
+    else if (action == "recIndicatorReset") {
+        PostMessageW(hwnd, WM_REC_INDICATOR_RESET, 0, 0);
+    }
     else if (action == "uploadReplays") {
         PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_UPLOAD, BN_CLICKED), 0);
     }
@@ -5730,6 +5743,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         s.promptSaveOnStop = JsonBool(body, "promptSaveOnStop", s.promptSaveOnStop);
         s.autoStartOnPlay  = JsonBool(body, "autoStartOnPlay",  s.autoStartOnPlay);
         s.stopOnWowExit    = JsonBool(body, "stopOnWowExit",    s.stopOnWowExit);
+        s.showRecIndicator = JsonBool(body, "showRecIndicator", s.showRecIndicator);
+        s.recIndicatorLocked = JsonBool(body, "recIndicatorLocked", s.recIndicatorLocked);
+        s.recIndicatorTop   = std::max(0, std::min(4000, JsonInt(body, "recIndicatorTop",   s.recIndicatorTop)));
+        s.recIndicatorRight = std::max(0, std::min(4000, JsonInt(body, "recIndicatorRight", s.recIndicatorRight)));
         s.startStopVK    = (UINT)JsonInt(body, "startStopVK");
         s.startStopMods  = (UINT)JsonInt(body, "startStopMods");
         s.saveVK         = (UINT)JsonInt(body, "saveVK");
@@ -5794,6 +5811,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         s.promptSaveOnStop = JsonBool(body, "promptSaveOnStop", s.promptSaveOnStop);
         s.autoStartOnPlay  = JsonBool(body, "autoStartOnPlay",  s.autoStartOnPlay);
         s.stopOnWowExit    = JsonBool(body, "stopOnWowExit",    s.stopOnWowExit);
+        s.showRecIndicator = JsonBool(body, "showRecIndicator", s.showRecIndicator);
+        s.recIndicatorLocked = true;  // always re-lock the badge when the settings modal is closed
+        s.recIndicatorTop   = std::max(0, std::min(4000, JsonInt(body, "recIndicatorTop",   s.recIndicatorTop)));
+        s.recIndicatorRight = std::max(0, std::min(4000, JsonInt(body, "recIndicatorRight", s.recIndicatorRight)));
         s.startStopVK    = (UINT)JsonInt(body, "startStopVK");
         s.startStopMods  = (UINT)JsonInt(body, "startStopMods");
         s.saveVK         = (UINT)JsonInt(body, "saveVK");
@@ -5827,6 +5848,45 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         PostStateToWebView();
         return 0;
     }
+
+    case WM_REC_INDICATOR_APPLY:
+    {
+        // Live-apply the REC badge show/lock toggles from the record-settings modal
+        // (so the user can see and drag it). Position is owned by dragging, not the
+        // modal, so it is not touched here.
+        std::string* ps = reinterpret_cast<std::string*>(lp);
+        std::string body = ps ? *ps : "";
+        delete ps;
+
+        bool wasLocked = RB_GetSettings().recIndicatorLocked;
+        ReplaySettings s = RB_GetSettings();
+        s.showRecIndicator   = JsonBool(body, "showRecIndicator",   s.showRecIndicator);
+        s.recIndicatorLocked = JsonBool(body, "recIndicatorLocked", s.recIndicatorLocked);
+        RB_SetSettings(s);  // refreshes the on-screen badge
+        SaveReplaySettings(RB_GetSettings(), ConfigPath());
+        // Every time the user unlocks, (re-)show the "drag me" coach-mark.
+        if (wasLocked && !s.recIndicatorLocked) RB_ArmRecIndicatorHint();
+        return 0;
+    }
+
+    case WM_REC_INDICATOR_RESET:
+    {
+        // Snap the badge back to the default top-right position, and bring back the
+        // "drag me" coach-mark until the user moves it again.
+        ReplaySettings s = RB_GetSettings();
+        s.recIndicatorTop   = 16;
+        s.recIndicatorRight = 16;
+        RB_SetSettings(s);  // repositions the live badge
+        SaveReplaySettings(RB_GetSettings(), ConfigPath());
+        RB_ArmRecIndicatorHint();  // re-show the hint
+        return 0;
+    }
+
+    case WM_RB_INDICATOR_MOVED:
+        // The badge was dragged to a new spot; RB already updated the offsets in its
+        // settings — just persist them to the ini.
+        SaveReplaySettings(RB_GetSettings(), ConfigPath());
+        return 0;
 
     case WM_GEN_SETTINGS_CLOSE:
     {
@@ -6804,6 +6864,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
     g_configDir = std::wstring(appdata) + L"\\WOWHCLauncher";
     CreateDirectoryW(g_configDir.c_str(), nullptr);
 
+    // Detect a brand-new launcher install (no config yet) BEFORE anything writes
+    // the ini. Used to enable the on-screen REC indicator by default for new users
+    // only — existing users keep it off.
+    bool launcherFreshInstall =
+        (GetFileAttributesW(ConfigPath().c_str()) == INVALID_FILE_ATTRIBUTES);
+
     g_logPath = g_configDir + L"\\launcher.log";
     { // truncate log at each startup
         HANDLE hf = CreateFileW(g_logPath.c_str(), GENERIC_WRITE, 0,
@@ -6820,7 +6886,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR lpCmdLine, int)
     AppendLog(L"Config loaded: installPath='%s' clientPath='%s' clientType=%d hermesExePath='%s' arctiumExePath='%s' wowTweakedExePath='%s' realmIndex=%d",
         g_installPath.c_str(), g_clientPath.c_str(), (int)g_clientType,
         g_hermesExePath.c_str(), g_arctiumExePath.c_str(), g_wowTweakedExePath.c_str(), g_realmIndex);
-    RB_SetSettings(LoadReplaySettings(ConfigPath()));
+    {
+        ReplaySettings rs = LoadReplaySettings(ConfigPath());
+        if (launcherFreshInstall) {
+            rs.showRecIndicator = true;                 // on by default for new installs only
+            SaveReplaySettings(rs, ConfigPath());       // persist so it sticks on later launches
+        }
+        RB_SetSettings(rs);
+    }
     EnsureDesktopShortcut(true); // refresh shortcut target to current exe path if it exists
 
     // If client path is saved but the game exe is missing, reset so the user is
