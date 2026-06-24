@@ -1180,12 +1180,124 @@ const RecordSettingsModal = ({ settings, pendingFolder, conflict, isRecording, o
   );
 };
 
+// ── Group Finder (mirrors the WOW_HC addon browse row, 1:1) ─────────────────────
+const GF_ROW_H = 57;
+
+function gfHasRole(mask, bit) { return (Math.floor((mask || 0) / bit) % 2) === 1; }
+function gfDungeon(id) { return GF_DUNGEONS[id] || { name: 'Map ' + id, type: 'dungeon', art: null }; }
+function gfBgUrl(art) { return art ? 'groupfinder/background/ui-lfg-background-' + art + '.png' : null; }
+function gfPad2(n) { return (n < 10 ? '0' : '') + n; }
+function gfListingIsRaid(l) {
+  var d = l.dungeons || [];
+  for (var i = 0; i < d.length; i++) { if (gfDungeon(d[i]).type === 'raid') return true; }
+  return false;
+}
+// leader return label (red) — '' when the leader is online (matches addon returnRed)
+function gfReturnLabel(m) {
+  if (!m || m.online) return '';
+  var ri = m.return_in || 0;
+  if (ri <= 0) return 'Offline';
+  var mins = Math.floor(ri / 60);
+  if (mins >= 60) { var h = Math.floor(mins / 60); return 'Player will be back in ' + h + 'h' + gfPad2(mins - h * 60) + 'm'; }
+  return 'Player will be back in ' + mins + 'm';
+}
+function gfRoleText(mask) {
+  var p = [];
+  if (gfHasRole(mask, 1)) p.push('Tank');
+  if (gfHasRole(mask, 2)) p.push('Heal');
+  if (gfHasRole(mask, 4)) p.push('DPS');
+  return p.length ? p.join('/') : 'No role';
+}
+// plain-text hover tooltip mirroring the addon's ShowListingTooltip
+function gfTooltip(l) {
+  var lines = [];
+  var members = (l.members || []).slice();
+  function rank(m) { if (gfHasRole(m.roles, 1)) return 1; if (gfHasRole(m.roles, 2)) return 2; if (gfHasRole(m.roles, 4)) return 3; return 4; }
+  members.sort(function (a, b) { var r = rank(a) - rank(b); return r !== 0 ? r : (a.name || '').localeCompare(b.name || ''); });
+  members.forEach(function (m) {
+    var lead = (m.name === l.leader) ? ' (leader)' : '';
+    var lv = (m.level && m.level > 0) ? m.level : '??';
+    lines.push(m.name + lead + '  Lvl. ' + lv + '  ' + gfRoleText(m.roles));
+  });
+  if (l.note) { lines.push(''); lines.push(l.note); }
+  lines.push('');
+  (l.dungeons || []).forEach(function (id) { lines.push(gfDungeon(id).name); });
+  return lines.join('\n');
+}
+// Smart role-slot fill — identical to the addon's GF.LayoutRoleIcons.
+function gfRoleSlots(l) {
+  var members = l.members || [];
+  var total = members.length;
+  var extra = (gfListingIsRaid(l) && total > 5) ? (total - 5) : 0;
+  var capTank = 1, capHeal = 1, capDps = (extra > 0) ? 2 : 3;
+  function roleCount(mask) { var n = 0; if (gfHasRole(mask, 1)) n++; if (gfHasRole(mask, 2)) n++; if (gfHasRole(mask, 4)) n++; return n; }
+  var roled = members.filter(function (m) { return (m.roles || 0) !== 0; });
+  roled.sort(function (a, b) { return roleCount(a.roles) - roleCount(b.roles); });
+  var fTank = 0, fHeal = 0, fDps = 0;
+  roled.forEach(function (m) {
+    if (gfHasRole(m.roles, 1) && fTank < capTank) fTank++;
+    else if (gfHasRole(m.roles, 2) && fHeal < capHeal) fHeal++;
+    else if (gfHasRole(m.roles, 4) && fDps < capDps) fDps++;
+  });
+  var slots = (extra > 0)
+    ? [ fTank > 0 ? 'tank' : null, fDps >= 1 ? 'dps' : null, fDps >= 2 ? 'dps' : null, fHeal > 0 ? 'heal' : null ]
+    : [ fTank > 0 ? 'tank' : null, fDps >= 1 ? 'dps' : null, fDps >= 2 ? 'dps' : null, fDps >= 3 ? 'dps' : null, fHeal > 0 ? 'heal' : null ];
+  return { slots: slots, extra: extra };
+}
+
+function GFRoleIcons(props) {
+  var info = gfRoleSlots(props.l);
+  return React.createElement('div', { style: { display: 'flex', alignItems: 'center', flexShrink: 0 } },
+    info.slots.map(function (s, i) {
+      var img = s
+        ? React.createElement('img', { src: 'groupfinder/' + s + '.png', alt: s, style: { width: 22, height: 22 } })
+        : React.createElement('img', { src: 'groupfinder/dot.png', alt: '', style: { width: 15, height: 15 } });
+      return React.createElement('div', { key: i, style: { width: 22, display: 'flex', justifyContent: 'center', alignItems: 'center' } }, img);
+    }),
+    info.extra > 0 && React.createElement('span', { style: { color: '#999', fontSize: 11, fontWeight: 700, marginLeft: 4 } }, '+' + info.extra));
+}
+
+function GFRow(props) {
+  var l = props.l;
+  var dungeons = l.dungeons || [];
+  var dInfo = gfDungeon(dungeons[0]);
+  var bg = gfBgUrl(dInfo.art);
+  var extra = dungeons.length - 1;
+  var dn = dInfo.name + (extra > 0 ? '  +' + extra : '');
+  var leaderM = null;
+  for (var i = 0; i < (l.members || []).length; i++) { if (l.members[i].name === l.leader) { leaderM = l.members[i]; break; } }
+  var rr = gfReturnLabel(leaderM);
+  var nameColor = CLASS_COLORS[l.leader_class] || '#FFD100';
+  var lvl = (l.leader_level && l.leader_level > 0) ? l.leader_level : '?';
+
+  return React.createElement('div', {
+      title: gfTooltip(l),
+      style: { position: 'relative', height: GF_ROW_H, borderBottom: '1px solid ' + T.line2, overflow: 'hidden' },
+    },
+    bg && React.createElement('div', { style: {
+        position: 'absolute', top: 1, left: 1, right: 1, bottom: 1,
+        backgroundImage: 'url(' + bg + ')', backgroundSize: 'auto 100%', backgroundPosition: 'center', backgroundRepeat: 'no-repeat',
+        opacity: 0.18,
+        WebkitMaskImage: 'linear-gradient(to right, transparent 0%, #000 22%, #000 78%, transparent 100%)',
+        maskImage: 'linear-gradient(to right, transparent 0%, #000 22%, #000 78%, transparent 100%)',
+      } }),
+    React.createElement('div', { style: { position: 'relative', height: '100%', display: 'flex', alignItems: 'center', padding: '0 8px', gap: 6 } },
+      React.createElement('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 1.6 } },
+        React.createElement('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 } },
+          React.createElement('span', { style: { fontFamily: '"Cinzel", Georgia, serif', fontSize: 12, color: nameColor, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, l.leader),
+          React.createElement('span', { style: { color: '#8c8c8c', fontSize: 11, flexShrink: 0 } }, 'Lvl. ' + lvl)),
+        React.createElement('div', { style: { color: '#999', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, dn),
+        rr && React.createElement('div', { style: { color: '#ff3030', fontSize: 10, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, rr)),
+      React.createElement(GFRoleIcons, { l: l })));
+}
+
 // ── Main App ───────────────────────────────────────────────────────────────────
 const App = ({ isNative }) => {
   const [fallen,  setFallen]  = React.useState([]);
   const [zones,   setZones]   = React.useState({});
   const [online,  setOnline]  = React.useState(null);
   const [news,    setNews]    = React.useState(NEWS);
+  const [groupFinder, setGroupFinder] = React.useState([]);
   const [booting, setBooting] = React.useState(isNative);
   const [heroHov, setHeroHov] = React.useState(false);
   const [statsCountdown, setStatsCountdown] = React.useState('05:00');
@@ -1258,6 +1370,7 @@ const App = ({ isNative }) => {
         if (msg.type === 'serverStats') {
           if (msg.data.last_deaths)            setFallen(msg.data.last_deaths);
           if (msg.data.online_players != null) setOnline(msg.data.online_players);
+          if (Array.isArray(msg.data.group_finder)) setGroupFinder(msg.data.group_finder);
         }
         if (msg.type === 'areasData' && msg.data)  setZones(msg.data);
         if (msg.type === 'newsData'  && Array.isArray(msg.data) && msg.data.length) setNews(msg.data);
@@ -1318,6 +1431,7 @@ const App = ({ isNative }) => {
         .then(function(d) {
           if (d.last_deaths)            setFallen(d.last_deaths);
           if (d.online_players != null) setOnline(d.online_players);
+          if (Array.isArray(d.group_finder)) setGroupFinder(d.group_finder);
         }).catch(function(){});
     }
     function fetchNews() {
@@ -1356,6 +1470,7 @@ const App = ({ isNative }) => {
 
   var latestNews = news[0];
   var olderNews  = news;
+  var showGF     = Array.isArray(groupFinder) && groupFinder.length > 0;
 
   return (
     <div style={{
@@ -1583,6 +1698,7 @@ const App = ({ isNative }) => {
                 }, 'View Leaderboard')}
               </div>
               <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 160, background: 'linear-gradient(to bottom, transparent, ' + T.bg0 + ')', pointerEvents: 'none', zIndex: 1, opacity: deathsAtBottom ? 0 : 1, transition: 'opacity 250ms' }} />
+              {showConsole && React.createElement(ConsoleOverlay, { lines: hermesLines, ref: consoleScrollRef })}
             </div>
 
             {/* Last News + optional HermesProxy console overlay */}
@@ -1598,12 +1714,13 @@ const App = ({ isNative }) => {
                   )}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                  <span style={{ fontSize: 11, letterSpacing: '0.14em', color: T.lightBlue, fontWeight: 700 }}>LATEST NEWS</span>
+                  <span style={{ fontSize: 11, letterSpacing: '0.14em', color: T.lightBlue, fontWeight: 700 }}>{showGF ? 'GROUP FINDER' : 'LATEST NEWS'}</span>
                   <img src="assets/icon.png" alt="" style={{ width: 14, height: 14, flexShrink: 0, objectFit: 'contain' }}/>
                 </div>
               </div>
               <div style={{ flex: 1, overflowY: 'auto', padding: '0px 0' }} onScroll={function(e) { var el = e.currentTarget; setNewsAtBottom(el.scrollTop + el.clientHeight >= el.scrollHeight - 2); }}>
-                {olderNews.map(function(n, i) {
+                {showGF && groupFinder.map(function(l, i) { return React.createElement(GFRow, { key: l.id != null ? l.id : i, l: l }); })}
+                {!showGF && olderNews.map(function(n, i) {
                   return React.createElement('a', { key: i,
                     onClick: function() { if (n.slug) onAction('openUrl', { url: 'https://wow-hc.com/forums/' + n.slug }); },
                     onMouseEnter: function(e) { e.currentTarget.style.background = 'rgba(180,130,60,0.06)'; },
@@ -1624,7 +1741,7 @@ const App = ({ isNative }) => {
                       React.createElement('span', { style: { color: T.line, flexShrink: 0 } }, '·'),
                       React.createElement('span', { style: { overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical', color: T.textDim, fontFamily: '"Inter", system-ui, sans-serif', whiteSpace: 'normal' } }, stripHtml(n.content_preview))));
                 })}
-                {React.createElement('a', {
+                {!showGF && React.createElement('a', {
                   onClick: function() { onAction('openUrl', { url: 'https://wow-hc.com/forums' }); },
                   style: {
                     display: 'flex', alignItems: 'center', justifyContent: 'center', height: 32, boxSizing: 'border-box',
@@ -1635,10 +1752,20 @@ const App = ({ isNative }) => {
                   onMouseEnter: function(e) { e.currentTarget.style.color = T.fluid; },
                   onMouseLeave: function(e) { e.currentTarget.style.color = T.textFaint; },
                 }, 'Read More News')}
+                {showGF && React.createElement('a', {
+                  onClick: function() { addToast('Log in to the game to view all listings'); },
+                  style: {
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', height: 32, boxSizing: 'border-box',
+                    fontSize: 9, letterSpacing: '0.14em', fontWeight: 700, textTransform: 'uppercase',
+                    color: T.textFaint, textDecoration: 'none', cursor: 'pointer',
+                    transition: 'color 120ms',
+                  },
+                  onMouseEnter: function(e) { e.currentTarget.style.color = T.amber; },
+                  onMouseLeave: function(e) { e.currentTarget.style.color = T.textFaint; },
+                }, 'View More Listings')}
               </div>
 
               <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 48, background: 'linear-gradient(to bottom, transparent, ' + T.bg0 + ')', pointerEvents: 'none', zIndex: 1, opacity: newsAtBottom ? 0 : 1, transition: 'opacity 250ms' }} />
-              {showConsole && React.createElement(ConsoleOverlay, { lines: hermesLines, ref: consoleScrollRef })}
             </div>
           </div>
         </div>
