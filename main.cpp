@@ -144,6 +144,7 @@ enum : UINT {
 #define WM_GAME_RUNNING               (WM_APP + 41) // game process confirmed running — clear launching state, re-enable controls
 #define WM_DELETE_RECENT_PATH         (WM_APP + 42) // lParam = new std::wstring* (recent install path to remove from the list)
 #define WM_SET_RECENT_PATH_TITLE      (WM_APP + 43) // lParam = new std::string* (JSON {path,title}) — set a recent install's label
+#define WM_SET_GAME_LOCALE            (WM_APP + 46) // lParam = new std::string* (JSON {locale}) — set language & write Config.wtf (CT_114)
 
 enum UpdateComponent : WPARAM { UC_HERMES = 0, UC_ADDON = 1, UC_LAUNCHER = 2 };
 
@@ -260,6 +261,7 @@ static int        g_hermesClientSpellDelay = -1; // -1 = UNSET
 static int        g_hermesSpellQueueWindow = 300;
 static std::wstring g_customLaunchExe;            // empty = use default for current client type
 static bool         g_use41ydNameplates   = true;  // CT_114 only: launch 41-yard nameplate EXE
+static std::wstring g_gameLocale;                  // CT_114 only: textLocale/audioLocale for Config.wtf (empty = auto-detect / enUS)
 
 // Server-stats cache — fetched by FetchLiveData (5-min timer), reused by RunThirdPartyAddonUpdates
 static std::string            g_cachedStatsJson;
@@ -394,6 +396,7 @@ static void SaveConfig()
     WritePrivateProfileStringW(L"Launcher", L"RealmIndex", riBuf, ini);
     WritePrivateProfileStringW(L"Launcher", L"ShowRecordingNotifications", g_showRecordingNotifications ? L"1" : L"0", ini);
     WritePrivateProfileStringW(L"Launcher", L"Use41ydNameplates",   g_use41ydNameplates   ? L"1" : L"0", ini);
+    WritePrivateProfileStringW(L"Launcher", L"GameLocale", g_gameLocale.c_str(), ini);
     {
         wchar_t sb[16];
         swprintf_s(sb, L"%d", g_hermesServerSpellDelay);
@@ -474,6 +477,11 @@ static void LoadConfig()
         wchar_t rn[8] = {};
         GetPrivateProfileStringW(L"Launcher", L"Use41ydNameplates", L"1", rn, 8, ini);
         g_use41ydNameplates = (_wtoi(rn) != 0);
+    }
+    {
+        wchar_t lb[16] = {};
+        GetPrivateProfileStringW(L"Launcher", L"GameLocale", L"", lb, 16, ini);
+        g_gameLocale = lb;
     }
     {
         wchar_t sb[16] = {};
@@ -1677,7 +1685,7 @@ static std::map<int, std::wstring> FindListeningPorts(const std::vector<int>& po
 // nameplateMaxDistance to 41 when use41yd is true (removes it otherwise so the
 // game reverts to the exe default of 20). Both keys are replaced or appended in
 // one read-modify-write pass.
-static void PatchConfigWtf(const std::wstring& clientPath, bool use41yd)
+static void PatchConfigWtf(const std::wstring& clientPath, bool use41yd, const std::wstring& locale)
 {
     std::wstring path = clientPath + L"\\_classic_era_\\WTF\\Config.wtf";
     HANDLE hf = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
@@ -1696,9 +1704,15 @@ static void PatchConfigWtf(const std::wstring& clientPath, bool use41yd)
 
     const std::string portalTarget    = "SET portal \"127.0.0.1\"";
     const std::string nameplateTarget = "SET nameplateMaxDistance \"41\"";
+    // Locale is ASCII (e.g. "enUS", "frFR"); empty means leave existing locale lines untouched.
+    std::string localeStr;
+    for (wchar_t c : locale) localeStr.push_back((char)c);
+    bool applyLocale = !localeStr.empty();
+    const std::string textLocaleTarget  = "SET textLocale \"" + localeStr + "\"";
+    const std::string audioLocaleTarget = "SET audioLocale \"" + localeStr + "\"";
     std::string out;
-    out.reserve(content.size() + 64);
-    bool foundPortal = false, foundNameplate = false;
+    out.reserve(content.size() + 128);
+    bool foundPortal = false, foundNameplate = false, foundText = false, foundAudio = false;
     size_t i = 0;
     while (i < content.size()) {
         size_t nl = content.find('\n', i);
@@ -1713,6 +1727,10 @@ static void PatchConfigWtf(const std::wstring& clientPath, bool use41yd)
         } else if (s != std::string::npos && _strnicmp(line.c_str() + s, "SET nameplateMaxDistance ", 25) == 0) {
             if (use41yd) { out += nameplateTarget + ending; foundNameplate = true; }
             // else drop the line so the game reverts to its default
+        } else if (applyLocale && s != std::string::npos && _strnicmp(line.c_str() + s, "SET textLocale ", 15) == 0) {
+            out += textLocaleTarget + ending; foundText = true;
+        } else if (applyLocale && s != std::string::npos && _strnicmp(line.c_str() + s, "SET audioLocale ", 16) == 0) {
+            out += audioLocaleTarget + ending; foundAudio = true;
         } else {
             out += line;
         }
@@ -1725,6 +1743,155 @@ static void PatchConfigWtf(const std::wstring& clientPath, bool use41yd)
         if (!out.empty() && out.back() != '\n') out += "\r\n";
         out += nameplateTarget + "\r\n";
     }
+    if (applyLocale && !foundText) {
+        if (!out.empty() && out.back() != '\n') out += "\r\n";
+        out += textLocaleTarget + "\r\n";
+    }
+    if (applyLocale && !foundAudio) {
+        if (!out.empty() && out.back() != '\n') out += "\r\n";
+        out += audioLocaleTarget + "\r\n";
+    }
+
+    {
+        DWORD attr = GetFileAttributesW(path.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_READONLY))
+            SetFileAttributesW(path.c_str(), attr & ~FILE_ATTRIBUTE_READONLY);
+    }
+    hf = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
+        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD wr = 0;
+        WriteFile(hf, out.data(), (DWORD)out.size(), &wr, nullptr);
+        CloseHandle(hf);
+    }
+}
+
+// Reads the current textLocale value from _classic_era_\WTF\Config.wtf.
+// Returns "" if the file/key is absent. Used to seed the language dropdown default.
+static std::wstring ReadConfigWtfLocale(const std::wstring& clientPath)
+{
+    std::wstring path = clientPath + L"\\_classic_era_\\WTF\\Config.wtf";
+    HANDLE hf = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return L"";
+    std::string content;
+    DWORD sz = GetFileSize(hf, nullptr);
+    if (sz && sz != INVALID_FILE_SIZE) {
+        content.resize(sz);
+        DWORD rd = 0;
+        ReadFile(hf, content.data(), sz, &rd, nullptr);
+        content.resize(rd);
+    }
+    CloseHandle(hf);
+
+    size_t i = 0;
+    while (i < content.size()) {
+        size_t nl = content.find('\n', i);
+        std::string line = content.substr(i, nl == std::string::npos ? std::string::npos : nl - i);
+        i = (nl == std::string::npos) ? content.size() : nl + 1;
+        size_t s = line.find_first_not_of(" \t\r\n");
+        if (s != std::string::npos && _strnicmp(line.c_str() + s, "SET textLocale ", 15) == 0) {
+            size_t q1 = line.find('"', s);
+            size_t q2 = (q1 != std::string::npos) ? line.find('"', q1 + 1) : std::string::npos;
+            if (q1 != std::string::npos && q2 != std::string::npos) {
+                std::string loc = line.substr(q1 + 1, q2 - q1 - 1);
+                return std::wstring(loc.begin(), loc.end());
+            }
+        }
+    }
+    return L"";
+}
+
+// Reads the locale codes this CASC install declares from .build.info (at the client
+// root). The "Tags" column lists an entry like "enUS text?" per supported language.
+// Returns a JSON array of the codes that have a text tag, e.g. ["enUS","frFR",...];
+// "[]" if the file is missing/unparseable (caller falls back to the full built-in list).
+// NOTE: this reflects the client's DECLARED locales, not a guarantee the data for each
+// is present on disk (a locale may stream from the CDN, or may be unavailable offline).
+static std::wstring ReadInstalledLocalesJson(const std::wstring& clientPath)
+{
+    std::wstring path = clientPath + L"\\.build.info";
+    HANDLE hf = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return L"[]";
+    std::string content;
+    DWORD sz = GetFileSize(hf, nullptr);
+    if (sz && sz != INVALID_FILE_SIZE) {
+        content.resize(sz);
+        DWORD rd = 0; ReadFile(hf, content.data(), sz, &rd, nullptr);
+        content.resize(rd);
+    }
+    CloseHandle(hf);
+
+    auto isAlpha = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); };
+    std::vector<std::string> codes;
+    size_t pos = 0;
+    while ((pos = content.find("text?", pos)) != std::string::npos) {
+        // Entries look like "<4-char-code> text?" — grab the 4 chars before the space.
+        if (pos >= 5 && content[pos - 1] == ' ') {
+            std::string code = content.substr(pos - 5, 4);
+            bool ok = isAlpha(code[0]) && isAlpha(code[1]) && isAlpha(code[2]) && isAlpha(code[3]);
+            bool dup = false;
+            for (const auto& e : codes) if (e == code) { dup = true; break; }
+            if (ok && !dup) codes.push_back(code);
+        }
+        pos += 5;
+    }
+    if (codes.empty()) return L"[]";
+    std::wstring json = L"[";
+    for (size_t k = 0; k < codes.size(); k++) {
+        if (k) json += L",";
+        json += L"\"" + std::wstring(codes[k].begin(), codes[k].end()) + L"\"";
+    }
+    json += L"]";
+    return json;
+}
+
+// Writes ONLY textLocale/audioLocale to Config.wtf (used by the main-screen language
+// flag switcher; the full portal/nameplate pass happens at launch via PatchConfigWtf).
+// No-op if locale is empty or the file does not exist (never creates a bare Config.wtf).
+static void WriteConfigWtfLocale(const std::wstring& clientPath, const std::wstring& locale)
+{
+    if (locale.empty()) return;
+    std::wstring path = clientPath + L"\\_classic_era_\\WTF\\Config.wtf";
+    HANDLE hf = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hf == INVALID_HANDLE_VALUE) return;
+    std::string content;
+    DWORD sz = GetFileSize(hf, nullptr);
+    if (sz && sz != INVALID_FILE_SIZE) {
+        content.resize(sz);
+        DWORD rd = 0;
+        ReadFile(hf, content.data(), sz, &rd, nullptr);
+        content.resize(rd);
+    }
+    CloseHandle(hf);
+
+    std::string localeStr;
+    for (wchar_t c : locale) localeStr.push_back((char)c);
+    const std::string textLocaleTarget  = "SET textLocale \"" + localeStr + "\"";
+    const std::string audioLocaleTarget = "SET audioLocale \"" + localeStr + "\"";
+    std::string out;
+    out.reserve(content.size() + 64);
+    bool foundText = false, foundAudio = false;
+    size_t i = 0;
+    while (i < content.size()) {
+        size_t nl = content.find('\n', i);
+        std::string line = content.substr(i, nl == std::string::npos ? std::string::npos : nl - i + 1);
+        i = (nl == std::string::npos) ? content.size() : nl + 1;
+        size_t s = line.find_first_not_of(" \t\r\n");
+        std::string ending = (!line.empty() && line.back() == '\n')
+            ? (line.size() >= 2 && line[line.size()-2] == '\r' ? "\r\n" : "\n") : "";
+        if (s != std::string::npos && _strnicmp(line.c_str() + s, "SET textLocale ", 15) == 0) {
+            out += textLocaleTarget + ending; foundText = true;
+        } else if (s != std::string::npos && _strnicmp(line.c_str() + s, "SET audioLocale ", 16) == 0) {
+            out += audioLocaleTarget + ending; foundAudio = true;
+        } else {
+            out += line;
+        }
+    }
+    if (!foundText)  { if (!out.empty() && out.back() != '\n') out += "\r\n"; out += textLocaleTarget  + "\r\n"; }
+    if (!foundAudio) { if (!out.empty() && out.back() != '\n') out += "\r\n"; out += audioLocaleTarget + "\r\n"; }
 
     {
         DWORD attr = GetFileAttributesW(path.c_str());
@@ -2138,6 +2305,21 @@ static void PostStateToWebView(bool force)
         if (sl != std::wstring::npos) activeLaunchExe = activeLaunchExe.substr(sl + 1);
     }
 
+    // Language flag switcher: shown for any 1.14 install (locale only applies to 1.14).
+    // The flag reflects the locale currently in that install's Config.wtf (falls back
+    // to the saved choice, then enUS).
+    bool showLangFlag = false;
+    std::wstring langLocale = L"enUS";
+    std::wstring langAvailableJson = L"[]";
+    if (g_clientType == CT_114 && !g_clientPath.empty()) {
+        showLangFlag = true;
+        std::wstring loc = ReadConfigWtfLocale(g_clientPath);
+        if (loc.empty()) loc = g_gameLocale;
+        if (loc.empty()) loc = L"enUS";
+        langLocale = loc;
+        langAvailableJson = ReadInstalledLocalesJson(g_clientPath);
+    }
+
     std::wstring recentJson = L"[";
     for (int i = 0; i < (int)g_recentPaths.size(); i++) {
         if (i > 0) recentJson += L",";
@@ -2165,6 +2347,9 @@ static void PostStateToWebView(bool force)
         L"\"clientType\":%d,"
         L"\"showConsole\":%s,"
         L"\"showRecordingNotifications\":%s,"
+        L"\"showLangFlag\":%s,"
+        L"\"gameLocale\":\"%s\","
+        L"\"langAvailable\":%s,"
         L"\"launchExe\":\"%s\","
         L"\"versions\":{"
           L"\"launcher\":\"%s\","
@@ -2187,6 +2372,9 @@ static void PostStateToWebView(bool force)
         (int)g_clientType,
         g_showConsole ? L"true" : L"false",
         g_showRecordingNotifications ? L"true" : L"false",
+        showLangFlag ? L"true" : L"false",
+        JsonEscW(langLocale).c_str(),
+        langAvailableJson.c_str(),
         JsonEscW(activeLaunchExe).c_str(),
         JsonEscW(verLauncher).c_str(),
         JsonEscW(verHermes).c_str(),
@@ -4662,6 +4850,10 @@ static void HandleWebMessage(HWND hwnd, const std::string& j)
         int idx = JsonInt(j, "index");
         PostMessageW(hwnd, WM_SET_REALM, (WPARAM)idx, 0);
     }
+    else if (action == "setGameLocale") {
+        auto* ps = new std::string(j);
+        PostMessageW(hwnd, WM_SET_GAME_LOCALE, 0, (LPARAM)ps);
+    }
     else if (action == "startDrag") {
         // Let Windows move the borderless window as if the user dragged the caption
         ReleaseCapture();
@@ -5389,7 +5581,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     std::wstring arctiumExe = g_customLaunchExe.empty() ? g_arctiumExePath : g_customLaunchExe;
                     bool useArctiumParams   = g_customLaunchExe.empty() || g_customLaunchExe == g_arctiumExePath;
                     std::wstring clientPath = g_clientPath;
-                    std::thread([hermesExe, arctiumExe, clientPath, use41yd, useArctiumParams]() {
+                    std::wstring gameLocale = g_gameLocale;
+                    std::thread([hermesExe, arctiumExe, clientPath, use41yd, useArctiumParams, gameLocale]() {
 
                         HANDLE hHermes     = g_hermesProcess;
                         // Reuse an already-running HermesProxy instead of restarting it: a
@@ -5427,7 +5620,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 }
                             }
                         }
-                        PatchConfigWtf(clientPath, use41yd);
+                        // Per-install language is owned by that install's Config.wtf (the flag
+                        // switcher writes it there directly). Only fall back to the user's global
+                        // choice to seed a fresh install that has no locale yet — never overwrite
+                        // an existing install's language with an unrelated install's setting.
+                        std::wstring effLocale = ReadConfigWtfLocale(clientPath);
+                        if (effLocale.empty()) effLocale = gameLocale;
+                        PatchConfigWtf(clientPath, use41yd, effLocale);
                         SetClientFilesReadOnly(clientPath, true);
                         if (!reuseHermes) {
                             g_hermesStarted = false;
@@ -5910,6 +6109,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
 
+    case WM_SET_GAME_LOCALE:
+    {
+        std::string* ps = reinterpret_cast<std::string*>(lp);
+        std::string body = ps ? *ps : "";
+        delete ps;
+
+        // Main-screen flag switcher — only meaningful for a 1.14 install.
+        if (g_clientType == CT_114 && !g_clientPath.empty()) {
+            std::wstring loc = JsonStringW(body, "locale");
+            if (!loc.empty()) {
+                g_gameLocale = loc;
+                WriteConfigWtfLocale(g_clientPath, loc);
+                SaveConfig();
+                PostStateToWebView(true);
+            }
+        }
+        return 0;
+    }
+
     case WM_GEN_SETTINGS_EXE_BROWSE:
     {
         if (g_clientType == CT_114 && g_use41ydNameplates) {
@@ -5999,6 +6217,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_hermesSpellQueueWindow = 300;
         g_customLaunchExe.clear();
         if (g_clientType == CT_114) g_use41ydNameplates = true;
+        g_gameLocale.clear();
         SaveConfig();
 
         // Can't delete ui/ here — WebView2 holds file locks. Write a marker so the

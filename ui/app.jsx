@@ -377,9 +377,189 @@ const RealmSelect = ({ realms, value, disabled, isDev, onChange }) => {
   );
 };
 
+// Game languages (1.14 only). code = textLocale/audioLocale written to Config.wtf.
+// This is the code -> flag/label mapping; the actual list shown is filtered to the
+// locales the selected install declares (from .build.info, sent as state.langAvailable).
+const LANG_FLAGS = [
+  { code: 'enUS', label: 'English (enUS)' },
+  { code: 'frFR', label: 'Français (frFR)' },
+  { code: 'deDE', label: 'Deutsch (deDE)' },
+  { code: 'esES', label: 'Español (esES)' },
+  { code: 'esMX', label: 'Español latino (esMX)' },
+  { code: 'ptBR', label: 'Português (ptBR)' },
+  { code: 'ruRU', label: 'Русский (ruRU)' },
+  { code: 'koKR', label: '한국어 (koKR)' },
+  { code: 'zhCN', label: '简体中文 (zhCN)' },
+  { code: 'zhTW', label: '繁體中文 (zhTW)' },
+];
+
+// 5-point star outline points (SVG polygon), tip up.
+function starPoints(cx, cy, r) {
+  var p = [];
+  for (var i = 0; i < 10; i++) {
+    var a = -Math.PI / 2 + i * Math.PI / 5;
+    var rr = (i % 2 === 0) ? r : r * 0.42;
+    p.push((cx + rr * Math.cos(a)).toFixed(2) + ',' + (cy + rr * Math.sin(a)).toFixed(2));
+  }
+  return p.join(' ');
+}
+
+// Inline SVG country flags (offline, crisp in WebView2). Simplified but recognizable.
+const Flag = ({ code, w = 22 }) => {
+  const h = Math.round(w * 2 / 3);
+  const st = { width: w, height: h, display: 'block', flexShrink: 0 };
+  const S = (kids) => <svg viewBox="0 0 30 20" style={st} preserveAspectRatio="none">{kids}</svg>;
+  const sh = 20 / 13;
+  switch (code) {
+    case 'enUS': return S(<>
+      <rect width="30" height="20" fill="#fff"/>
+      {Array.from({ length: 7 }).map((_, i) => <rect key={i} y={i * 2 * sh} width="30" height={sh} fill="#B22234"/>)}
+      <rect width="12" height={sh * 7} fill="#3C3B6E"/>
+      {Array.from({ length: 20 }).map((_, i) => <circle key={'d' + i} cx={1.6 + (i % 5) * 2.4} cy={1.4 + Math.floor(i / 5) * 2.4} r="0.5" fill="#fff"/>)}
+    </>);
+    case 'frFR': return S(<>
+      <rect width="30" height="20" fill="#fff"/>
+      <rect width="10" height="20" fill="#0055A4"/>
+      <rect x="20" width="10" height="20" fill="#EF4135"/>
+    </>);
+    case 'deDE': return S(<>
+      <rect width="30" height="20" fill="#000"/>
+      <rect y="6.67" width="30" height="6.67" fill="#DD0000"/>
+      <rect y="13.33" width="30" height="6.67" fill="#FFCE00"/>
+    </>);
+    case 'esES': return S(<>
+      <rect width="30" height="20" fill="#AA151B"/>
+      <rect y="5" width="30" height="10" fill="#F1BF00"/>
+    </>);
+    case 'esMX': return S(<>
+      <rect width="30" height="20" fill="#fff"/>
+      <rect width="10" height="20" fill="#006847"/>
+      <rect x="20" width="10" height="20" fill="#CE1126"/>
+      <circle cx="15" cy="10" r="2.2" fill="#7a5230"/>
+    </>);
+    case 'ptBR': return S(<>
+      <rect width="30" height="20" fill="#009C3B"/>
+      <polygon points="15,2 28,10 15,18 2,10" fill="#FFDF00"/>
+      <circle cx="15" cy="10" r="4.6" fill="#002776"/>
+    </>);
+    case 'ruRU': return S(<>
+      <rect width="30" height="20" fill="#fff"/>
+      <rect y="6.67" width="30" height="6.67" fill="#0039A6"/>
+      <rect y="13.33" width="30" height="6.67" fill="#D52B1E"/>
+    </>);
+    case 'koKR': return S(<>
+      <rect width="30" height="20" fill="#fff"/>
+      <path d="M10 10 A5 5 0 0 1 20 10 Z" fill="#CD2E3A"/>
+      <path d="M10 10 A5 5 0 0 0 20 10 Z" fill="#0047A0"/>
+      <rect x="4" y="3.4" width="4" height="0.8" fill="#000"/>
+      <rect x="22" y="3.4" width="4" height="0.8" fill="#000"/>
+      <rect x="4" y="15.8" width="4" height="0.8" fill="#000"/>
+      <rect x="22" y="15.8" width="4" height="0.8" fill="#000"/>
+    </>);
+    case 'zhCN': return S(<>
+      <rect width="30" height="20" fill="#DE2910"/>
+      <polygon points={starPoints(6, 6, 3)} fill="#FFDE00"/>
+      <polygon points={starPoints(12, 2.5, 1)} fill="#FFDE00"/>
+      <polygon points={starPoints(14.5, 5, 1)} fill="#FFDE00"/>
+      <polygon points={starPoints(14.5, 9, 1)} fill="#FFDE00"/>
+      <polygon points={starPoints(12, 11.5, 1)} fill="#FFDE00"/>
+    </>);
+    case 'zhTW': return S(<>
+      <rect width="30" height="20" fill="#FE0000"/>
+      <rect width="15" height="10" fill="#000095"/>
+      <polygon points={starPoints(7.5, 5, 4)} fill="#fff"/>
+      <circle cx="7.5" cy="5" r="2.6" fill="#000095"/>
+      <circle cx="7.5" cy="5" r="1.7" fill="#fff"/>
+    </>);
+    default: return S(<rect width="30" height="20" fill="#555"/>);
+  }
+};
+
+// Main-screen language switcher: a compact flag button that opens a list of flags.
+// Same warm amber visual language as PathSelect; opens upward.
+const LangFlagSelect = ({ locale, available, disabled, onAction }) => {
+  const [open, setOpen] = React.useState(false);
+  const [hov, setHov]   = React.useState(false);
+  const ref = React.useRef(null);
+
+  React.useEffect(function() {
+    if (!open) return;
+    function onDocDown(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
+    document.addEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKey);
+    return function() {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  React.useEffect(function() { if (disabled) setOpen(false); }, [disabled]);
+
+  // Only show locales the client actually declares (state.langAvailable from .build.info);
+  // fall back to the full list if detection returned nothing.
+  const list = (available && available.length)
+    ? LANG_FLAGS.filter(function(l) { return available.indexOf(l.code) >= 0; })
+    : LANG_FLAGS;
+  const cur = LANG_FLAGS.filter(function(l) { return l.code === locale; })[0]
+            || { code: locale || 'enUS', label: locale || 'enUS' };
+  const borderColor = disabled ? T.line : ((open || hov) ? 'rgba(180,130,60,0.65)' : T.amber);
+
+  return (
+    <div ref={ref} style={{ position: 'relative', flexShrink: 0 }}>
+      {open && (
+        <div style={{
+          position: 'absolute', bottom: 'calc(100% + 4px)', right: 0, minWidth: 200,
+          background: T.plate, border: '1px solid rgba(180,130,60,0.45)',
+          boxShadow: '0 8px 22px rgba(0,0,0,0.55)', zIndex: 50, maxHeight: 320, overflowY: 'auto',
+        }}>
+          {list.map(function(l) {
+            const active = (l.code === locale);
+            return (
+              <button key={l.code}
+                onClick={function() { if (!active) onAction('setGameLocale', { locale: l.code }); setOpen(false); }}
+                onMouseEnter={function(ev) { if (!active) ev.currentTarget.style.background = 'rgba(180,130,60,0.10)'; }}
+                onMouseLeave={function(ev) { ev.currentTarget.style.background = active ? 'rgba(180,130,60,0.12)' : 'transparent'; }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 9, width: '100%', textAlign: 'left', border: 'none',
+                  borderBottom: '1px solid ' + T.line2,
+                  background: active ? 'rgba(180,130,60,0.12)' : 'transparent',
+                  color: active ? T.amber : T.amber2, fontFamily: 'Inter, system-ui, sans-serif', fontSize: 12,
+                  padding: '8px 12px', cursor: 'pointer',
+                }}>
+                {React.createElement(Flag, { code: l.code, w: 22 })}
+                <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <button
+        title={'Game language: ' + cur.label}
+        disabled={disabled}
+        onClick={function() { if (!disabled) setOpen(function(o) { return !o; }); }}
+        onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+        style={{
+          flexShrink: 0, height: 30, boxSizing: 'border-box', padding: '0 5px 0 7px',
+          display: 'flex', alignItems: 'center', gap: 4,
+          background: !disabled && (open || hov) ? 'rgba(180,130,60,0.10)' : 'transparent',
+          border: '1px solid ' + borderColor,
+          color: disabled ? T.textDim : (hov ? T.amber : T.amber2),
+          cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1,
+          transition: 'color 140ms, border-color 140ms, background 140ms',
+        }}>
+        {React.createElement(Flag, { code: cur.code, w: 22 })}
+        <span style={{ flexShrink: 0, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 140ms', display: 'grid' }}>
+          {React.createElement(Icon, { k: 'chevron', size: 12 })}
+        </span>
+      </button>
+    </div>
+  );
+};
+
 // ── Bottom bar ─────────────────────────────────────────────────────────────────
 const BottomBar = ({ state, onAction, booting, onEditPath }) => {
-  const { status, progress, installPath, recentPaths, clientType, isInstalled, isRecording, canSaveReplay, playEnabled, workerBusy, isLaunching, realmIndex, isDev } = state;
+  const { status, progress, installPath, recentPaths, clientType, isInstalled, isRecording, canSaveReplay, playEnabled, workerBusy, isLaunching, realmIndex, isDev, showLangFlag, gameLocale, langAvailable } = state;
   // Build the dropdown list (entries are { path, title, type }), with the active path guaranteed present.
   const paths = (recentPaths && recentPaths.length ? recentPaths.slice() : []);
   if (installPath && !paths.some(function(e) { return e.path === installPath; })) paths.push({ path: installPath, title: '', type: clientType });
@@ -417,6 +597,7 @@ const BottomBar = ({ state, onAction, booting, onEditPath }) => {
         {/* Path row */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, justifyContent: 'flex-end' }}>
           {React.createElement(PathSelect, { paths: paths, value: installPath, disabled: pathDisabled, onAction: onAction, onEditPath: onEditPath })}
+          {showLangFlag && React.createElement(LangFlagSelect, { locale: gameLocale, available: langAvailable, disabled: pathDisabled, onAction: onAction })}
           {React.createElement(PathIconBtn, { title: 'Open folder',       onClick: () => onAction('openFolder'), icon: 'folder', disabled: !installPath || workerBusy })}
         </div>
 
